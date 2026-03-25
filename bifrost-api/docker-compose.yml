@@ -1,0 +1,37 @@
+# =============================================================================
+# Bifrost API - Docker Compose Configuration
+# =============================================================================
+# Deploys the Bifrost management API alongside the existing NewAPI instance.
+#
+# NewAPI is expected to be running on port 3000 (either as a Docker container
+# or a host process). This service communicates with NewAPI via the Docker
+# host gateway (host.docker.internal).
+#
+# Usage:
+#   cp .env.example .env   # then fill in values
+#   docker compose up -d
+#   docker compose logs -f
+# =============================================================================
+
+services:
+  bifrost-api:
+    build: .
+    container_name: bifrost-api
+    restart: always
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      - BIFROST_NEWAPI_BASE_URL=http://host.docker.internal:3000
+      - BIFROST_NEWAPI_ADMIN_TOKEN=${NEWAPI_ADMIN_TOKEN:-}
+      - BIFROST_ADMIN_KEY=${BIFROST_ADMIN_KEY:-}
+      - BIFROST_ALLOW_SELF_REGISTER=${ALLOW_SELF_REGISTER:-true}
+      - BIFROST_DEFAULT_QUOTA=${DEFAULT_QUOTA:-100}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

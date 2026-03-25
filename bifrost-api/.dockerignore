@@ -1,0 +1,17 @@
+# =============================================================================
+# Bifrost API - Docker build exclusions
+# =============================================================================
+__pycache__
+*.pyc
+*.pyo
+.env
+.env.local
+.git
+.gitignore
+.venv
+venv
+*.md
+.mypy_cache
+.pytest_cache
+.ruff_cache
+tests/
