@@ -26,6 +26,7 @@ services:
       - BIFROST_ADMIN_KEY=${BIFROST_ADMIN_KEY:-}
       - BIFROST_ALLOW_SELF_REGISTER=${ALLOW_SELF_REGISTER:-true}
       - BIFROST_DEFAULT_QUOTA=${DEFAULT_QUOTA:-100}
+      - BIFROST_PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     security_opt:

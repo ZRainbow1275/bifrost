@@ -55,6 +55,13 @@ CHANNEL_TYPES: dict[int, str] = {
 # ------------------------------------------------------------------
 
 
+def _mask_key(key: str) -> str:
+    """Mask API key, showing only first 4 and last 4 characters."""
+    if len(key) <= 12:
+        return "***"
+    return f"{key[:4]}{'*' * 6}{key[-4:]}"
+
+
 def _map_channel(raw: dict[str, Any]) -> ChannelInfo:
     """Convert a raw NewAPI channel dict to our ``ChannelInfo`` schema."""
     return ChannelInfo(
@@ -62,7 +69,7 @@ def _map_channel(raw: dict[str, Any]) -> ChannelInfo:
         name=raw.get("name", ""),
         type=raw.get("type", 1),
         status=raw.get("status", 1),
-        key=raw.get("key", ""),
+        key=_mask_key(raw.get("key", "")),
         base_url=raw.get("base_url", ""),
         models=raw.get("models", ""),
         test_model=raw.get("test_model", ""),
@@ -122,6 +129,8 @@ async def test_all_channels(
         channels = await _fetch_all_channels(client)
     except NewAPIError as exc:
         logger.error("获取渠道列表失败: %s", exc)
+        if exc.status_code in (401, 403):
+            raise HTTPException(status_code=500, detail="NewAPI 管理员令牌无效或已过期，请检查配置") from exc
         raise HTTPException(
             status_code=502, detail="无法连接上游服务获取渠道列表"
         ) from exc
@@ -184,6 +193,8 @@ async def list_channels(
         result = await client.list_channels(page=page, page_size=page_size)
     except NewAPIError as exc:
         logger.error("获取渠道列表失败: %s", exc)
+        if exc.status_code in (401, 403):
+            raise HTTPException(status_code=500, detail="NewAPI 管理员令牌无效或已过期，请检查配置") from exc
         raise HTTPException(
             status_code=502, detail="无法连接上游服务获取渠道列表"
         ) from exc
@@ -215,6 +226,8 @@ async def create_channel(
         )
     except NewAPIError as exc:
         logger.error("创建渠道失败: %s", exc)
+        if exc.status_code in (401, 403):
+            raise HTTPException(status_code=500, detail="NewAPI 管理员令牌无效或已过期，请检查配置") from exc
         raise HTTPException(
             status_code=502,
             detail=f"创建渠道失败: {exc.detail or exc}",
@@ -243,22 +256,22 @@ async def get_channel(
 ) -> ApiResponse:
     """Get details for a single channel."""
     try:
-        # NewAPI list_channels with specific ID or fetch from list
-        result = await client.list_channels(page=0, page_size=100)
+        all_channels = await _fetch_all_channels(client)
     except NewAPIError as exc:
         logger.error("获取渠道详情失败: %s", exc)
+        if exc.status_code in (401, 403):
+            raise HTTPException(status_code=500, detail="NewAPI 管理员令牌无效或已过期，请检查配置") from exc
         raise HTTPException(
             status_code=502, detail="无法连接上游服务"
         ) from exc
 
-    raw_channels = result.get("data", [])
-    for ch in raw_channels:
+    for ch in all_channels:
         if ch.get("id") == channel_id:
             return ApiResponse(
                 success=True, data=_map_channel(ch).model_dump()
             )
 
-    raise HTTPException(status_code=404, detail=f"渠道 {channel_id} 不存在")
+    raise HTTPException(status_code=404, detail="渠道不存在")
 
 
 @router.put(
@@ -302,6 +315,8 @@ async def update_channel(
         result = await client.update_channel(channel_id, **kwargs)
     except NewAPIError as exc:
         logger.error("更新渠道 %d 失败: %s", channel_id, exc)
+        if exc.status_code in (401, 403):
+            raise HTTPException(status_code=500, detail="NewAPI 管理员令牌无效或已过期，请检查配置") from exc
         raise HTTPException(
             status_code=502,
             detail=f"更新渠道失败: {exc.detail or exc}",
@@ -329,6 +344,8 @@ async def delete_channel(
         await client.delete_channel(channel_id)
     except NewAPIError as exc:
         logger.error("删除渠道 %d 失败: %s", channel_id, exc)
+        if exc.status_code in (401, 403):
+            raise HTTPException(status_code=500, detail="NewAPI 管理员令牌无效或已过期，请检查配置") from exc
         raise HTTPException(
             status_code=502,
             detail=f"删除渠道失败: {exc.detail or exc}",
@@ -352,6 +369,8 @@ async def test_channel(
     try:
         channels_result = await client.list_channels(page=0, page_size=100)
     except NewAPIError as exc:
+        if exc.status_code in (401, 403):
+            raise HTTPException(status_code=500, detail="NewAPI 管理员令牌无效或已过期，请检查配置") from exc
         raise HTTPException(
             status_code=502, detail="无法连接上游服务"
         ) from exc

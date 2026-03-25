@@ -94,9 +94,9 @@ _ba_get_admin_token() {
         return 0
     fi
 
-    # 2. Try environment variable
-    if [[ -n "${NEWAPI_ADMIN_TOKEN:-}" ]]; then
-        echo "${NEWAPI_ADMIN_TOKEN}"
+    # 2. Try environment variable (support both NEWAPI_ADMIN_TOKEN and NEW_API_ADMIN_TOKEN)
+    if [[ -n "${NEWAPI_ADMIN_TOKEN:-${NEW_API_ADMIN_TOKEN:-}}" ]]; then
+        echo "${NEWAPI_ADMIN_TOKEN:-${NEW_API_ADMIN_TOKEN}}"
         return 0
     fi
 

@@ -131,6 +131,8 @@ async def list_models(
         channels = await _fetch_all_channels(client)
     except NewAPIError as exc:
         logger.error("获取渠道列表失败: %s", exc)
+        if exc.status_code in (401, 403):
+            raise HTTPException(status_code=500, detail="NewAPI 管理员令牌无效或已过期，请检查配置") from exc
         raise HTTPException(
             status_code=502, detail="无法连接上游服务获取渠道列表"
         ) from exc
@@ -158,6 +160,8 @@ async def test_all_models(
         channels = await _fetch_all_channels(client)
     except NewAPIError as exc:
         logger.error("获取渠道列表失败: %s", exc)
+        if exc.status_code in (401, 403):
+            raise HTTPException(status_code=500, detail="NewAPI 管理员令牌无效或已过期，请检查配置") from exc
         raise HTTPException(
             status_code=502, detail="无法连接上游服务获取渠道列表"
         ) from exc

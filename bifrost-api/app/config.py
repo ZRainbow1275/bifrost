@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     newapi_base_url: str = "http://127.0.0.1:3000"
     newapi_admin_token: str = ""
 
+    # Public URL for users (e.g. https://your-domain.com)
+    public_base_url: str = ""
+
     # Bifrost API settings
     api_title: str = "Bifrost 管理平台"
     api_version: str = "1.0.0"

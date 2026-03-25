@@ -98,22 +98,33 @@ async def register_user(
             quota=settings.default_quota,
         )
 
-        user_id: int = user_result.get("id", 0)
+        user_id: int = user_result.get("data", {}).get("id", 0)
         if not user_id:
             raise ValueError("NewAPI 未返回有效的用户 ID")
 
         # Step 2: create token for this user
-        token_result = await client.create_token(
-            name=token_name,
-            remain_quota=settings.default_quota,
-            expired_time=-1,  # never expire
-            unlimited_quota=False,
-            user_id=user_id,
-        )
+        try:
+            token_result = await client.create_token(
+                name=token_name,
+                remain_quota=settings.default_quota,
+                expired_time=-1,  # never expire
+                unlimited_quota=False,
+                user_id=user_id,
+            )
 
-        api_key: str = token_result.get("key", "")
-        if not api_key:
-            raise ValueError("NewAPI 未返回有效的 API Key")
+            api_key: str = token_result.get("data", {}).get("key", "")
+            if not api_key:
+                raise ValueError("NewAPI 未返回有效的 API Key")
+        except Exception as token_exc:
+            # Rollback: delete the orphaned user
+            try:
+                await client.delete_user(user_id)
+            except Exception:
+                pass  # Best-effort cleanup
+            raise HTTPException(
+                status_code=502,
+                detail=f"Token 创建失败（用户已回滚）: {token_exc}",
+            ) from token_exc
 
     except HTTPException:
         raise
@@ -136,7 +147,7 @@ async def register_user(
         success=True,
         username=body.username,
         api_key=api_key,
-        base_url=f"{settings.newapi_base_url}/v1",
+        base_url=f"{(settings.public_base_url or settings.newapi_base_url).rstrip('/')}/v1",
         message="注册成功",
     )
 

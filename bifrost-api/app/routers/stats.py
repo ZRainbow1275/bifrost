@@ -74,6 +74,8 @@ async def stats_overview(
         all_channels = await _fetch_all_pages(client.list_channels)
     except NewAPIError as exc:
         logger.error("获取系统统计失败: %s", exc)
+        if exc.status_code in (401, 403):
+            raise HTTPException(status_code=500, detail="NewAPI 管理员令牌无效或已过期，请检查配置") from exc
         raise HTTPException(
             status_code=502, detail="无法连接上游服务获取统计数据"
         ) from exc
@@ -135,6 +137,8 @@ async def stats_usage(
         )
     except NewAPIError as exc:
         logger.error("获取使用统计失败: %s", exc)
+        if exc.status_code in (401, 403):
+            raise HTTPException(status_code=500, detail="NewAPI 管理员令牌无效或已过期，请检查配置") from exc
         raise HTTPException(
             status_code=502, detail="无法连接上游服务获取日志数据"
         ) from exc
@@ -194,6 +198,8 @@ async def stats_top_users(
         all_users = await _fetch_all_pages(client.list_users)
     except NewAPIError as exc:
         logger.error("获取用户列表失败: %s", exc)
+        if exc.status_code in (401, 403):
+            raise HTTPException(status_code=500, detail="NewAPI 管理员令牌无效或已过期，请检查配置") from exc
         raise HTTPException(
             status_code=502, detail="无法连接上游服务获取用户数据"
         ) from exc
@@ -239,6 +245,8 @@ async def stats_top_models(
         stat_result = await client.get_log_stat()
     except NewAPIError as exc:
         logger.error("获取日志统计失败: %s", exc)
+        if exc.status_code in (401, 403):
+            raise HTTPException(status_code=500, detail="NewAPI 管理员令牌无效或已过期，请检查配置") from exc
         raise HTTPException(
             status_code=502, detail="无法连接上游服务获取日志统计"
         ) from exc

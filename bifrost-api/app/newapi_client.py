@@ -117,11 +117,19 @@ class NewAPIClient:
                     continue
 
                 if response.status_code >= 400:
-                    body = response.text
+                    try:
+                        body = response.json()
+                    except Exception:
+                        body = response.text
+                    detail = (
+                        body.get("message", response.text[:200])
+                        if isinstance(body, dict)
+                        else response.text[:200]
+                    )
                     raise NewAPIError(
-                        f"NewAPI request failed: {method} {path} -> {response.status_code}",
+                        f"NewAPI 请求失败",
                         status_code=response.status_code,
-                        detail=body,
+                        detail=detail,
                     )
 
                 return response.json()  # type: ignore[no-any-return]
@@ -187,7 +195,7 @@ class NewAPIClient:
             payload["email"] = email
         if quota:
             payload["quota"] = quota
-        return await self._request("POST", "/api/user/", json_body=payload)
+        return await self._request("POST", "/api/user", json_body=payload)
 
     async def list_users(self, page: int = 0, page_size: int = 20) -> dict[str, Any]:
         """List users with pagination.
@@ -196,7 +204,7 @@ class NewAPIClient:
         """
         return await self._request(
             "GET",
-            "/api/user/",
+            "/api/user",
             params={"p": page, "size": page_size},
         )
 
@@ -211,7 +219,7 @@ class NewAPIClient:
         (e.g. ``status``, ``quota``, ``display_name``).
         """
         payload = {"id": user_id, **kwargs}
-        return await self._request("PUT", "/api/user/", json_body=payload)
+        return await self._request("PUT", "/api/user", json_body=payload)
 
     async def delete_user(self, user_id: int) -> bool:
         """Delete a user by ID. Returns ``True`` on success."""
@@ -249,20 +257,20 @@ class NewAPIClient:
         }
         if user_id:
             payload["user_id"] = user_id
-        return await self._request("POST", "/api/token/", json_body=payload)
+        return await self._request("POST", "/api/token", json_body=payload)
 
     async def list_tokens(self, page: int = 0, page_size: int = 20) -> dict[str, Any]:
         """List API tokens with pagination."""
         return await self._request(
             "GET",
-            "/api/token/",
+            "/api/token",
             params={"p": page, "size": page_size},
         )
 
     async def update_token(self, token_id: int, **kwargs: Any) -> dict[str, Any]:
         """Update token fields."""
         payload = {"id": token_id, **kwargs}
-        return await self._request("PUT", "/api/token/", json_body=payload)
+        return await self._request("PUT", "/api/token", json_body=payload)
 
     async def delete_token(self, token_id: int) -> bool:
         """Delete a token by ID. Returns ``True`` on success."""
@@ -277,7 +285,7 @@ class NewAPIClient:
         """List channels (upstream providers) with pagination."""
         return await self._request(
             "GET",
-            "/api/channel/",
+            "/api/channel",
             params={"p": page, "size": page_size},
         )
 
@@ -311,12 +319,12 @@ class NewAPIClient:
             payload["models"] = models
         if test_model:
             payload["test_model"] = test_model
-        return await self._request("POST", "/api/channel/", json_body=payload)
+        return await self._request("POST", "/api/channel", json_body=payload)
 
     async def update_channel(self, channel_id: int, **kwargs: Any) -> dict[str, Any]:
         """Update channel fields."""
         payload = {"id": channel_id, **kwargs}
-        return await self._request("PUT", "/api/channel/", json_body=payload)
+        return await self._request("PUT", "/api/channel", json_body=payload)
 
     async def delete_channel(self, channel_id: int) -> bool:
         """Delete a channel by ID. Returns ``True`` on success."""
@@ -384,4 +392,4 @@ class NewAPIClient:
             params["end_timestamp"] = end_timestamp
         if user_id is not None:
             params["user_id"] = user_id
-        return await self._request("GET", "/api/log/self/stat", params=params)
+        return await self._request("GET", "/api/log", params=params)

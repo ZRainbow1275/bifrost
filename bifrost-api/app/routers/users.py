@@ -213,7 +213,7 @@ async def batch_create_users(
                 quota=body.quota,
             )
 
-            user_id: int = user_result.get("id", 0)
+            user_id: int = user_result.get("data", {}).get("id", 0)
             if not user_id:
                 raise ValueError("NewAPI 未返回有效的用户 ID")
 
@@ -226,7 +226,7 @@ async def batch_create_users(
                 user_id=user_id,
             )
 
-            api_key: str = token_result.get("key", "")
+            api_key: str = token_result.get("data", {}).get("key", "")
             if not api_key:
                 raise ValueError("NewAPI 未返回有效的 API Key")
 
