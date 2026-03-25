@@ -1,0 +1,644 @@
+#!/usr/bin/env bash
+# =============================================================================
+# AI Gateway Bridge - 一键部署脚本
+# 国内外 AI 服务桥接解决方案
+#
+# 架构: 员工设备 → WireGuard VPN → 国内服务器A (VPN Gateway + Caddy + New API + Mihomo + Xray Client)
+#    ↕ VLESS+Reality 加密隧道
+#        海外服务器B (Xray Server + 3x-ui + Caddy)
+#    ↕
+#        AI API (Claude/GPT/Gemini/DeepSeek...)
+#
+# 支持系统: Ubuntu 22.04+, Debian 12+, CentOS 9+, Rocky 9+, AlmaLinux 9+
+# 用途: 为中小企业 (30-100人) 提供安全的 AI 工具访问
+# =============================================================================
+
+set -euo pipefail
+
+# --- Constants ---
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_VERSION="2.0.0"
+readonly PROJECT_NAME="AI Gateway Bridge"
+readonly CONFIG_DIR="/opt/ai-gateway-bridge"
+readonly LOG_DIR="/var/log/ai-gateway-bridge"
+
+# --- Source modules ---
+# shellcheck source=scripts/common.sh
+source "${SCRIPT_DIR}/scripts/common.sh"
+
+# --- Main Menu ---
+show_main_menu() {
+    print_banner "${PROJECT_NAME} v${SCRIPT_VERSION}"
+    echo ""
+    log_info "欢迎使用 ${PROJECT_NAME} 一键部署脚本"
+    log_info "本工具将帮助你快速搭建国内外 AI 服务桥接环境"
+    echo ""
+
+    print_section "系统信息"
+    detect_system
+    print_system_summary
+    echo ""
+
+    print_section "请选择操作"
+    local options=(
+        "部署海外服务器 (Server B) — Xray 服务端 + 3x-ui + AI 网关"
+        "部署国内服务器 (Server A) — Xray 客户端 + New API + Caddy"
+        "仅执行安全加固"
+        "仅部署监控系统 (Netdata)"
+        "白名单管理"
+        "系统健康检查"
+        "查看连接信息"
+        "DD 系统重装 (预部署环境清理)"
+        "企业 VPN 部署 (WireGuard/OpenVPN)"
+        "DPI 防护部署 (反深包检测)"
+        "Mihomo 智能路由部署"
+        "连接保活部署 (Keepalive + Watchdog)"
+        "网络分流部署 (Split Tunnel)"
+        "备份与恢复管理"
+        "组件更新管理"
+        "多节点 Server B 管理"
+        "用户管理 (VPN + API)"
+        "深度诊断 (网络/服务/GFW检测)"
+        "卸载所有组件"
+        "退出"
+    )
+    show_menu "主菜单" options
+
+    case "${MENU_RESULT}" in
+        1) deploy_server_b_flow ;;
+        2) deploy_server_a_flow ;;
+        3) security_only_flow ;;
+        4) monitoring_only_flow ;;
+        5) whitelist_flow ;;
+        6) health_check_flow ;;
+        7) show_connection_info ;;
+        8) dd_reinstall_flow ;;
+        9) vpn_flow ;;
+        10) anti_dpi_flow ;;
+        11) mihomo_flow ;;
+        12) keepalive_flow ;;
+        13) split_tunnel_flow ;;
+        14) backup_flow ;;
+        15) update_flow ;;
+        16) multi_server_flow ;;
+        17) user_management_flow ;;
+        18) diagnostics_flow ;;
+        19) uninstall_flow ;;
+        20) log_info "再见！"; exit 0 ;;
+        *) log_error "无效选择"; show_main_menu ;;
+    esac
+}
+
+# --- Flow: Deploy Server B (Overseas) ---
+deploy_server_b_flow() {
+    print_banner "部署海外服务器 (Server B)"
+    echo ""
+    log_info "Server B 将部署以下组件："
+    echo "  1. 云 Agent 清理 (预部署检查)"
+    echo "  2. 系统安全加固 (防火墙/SSH/fail2ban/内核加固)"
+    echo "  3. Xray 服务端 (VLESS+Reality)"
+    echo "  4. 3x-ui 管理面板 (可选)"
+    echo "  5. Hysteria 2 备用隧道 (可选)"
+    echo "  6. Caddy 反向代理 + 伪装网站"
+    echo "  7. BBR 拥塞控制优化"
+    echo "  8. DPI 防护 (反深包检测)"
+    echo "  9. 连接保活 (Keepalive + Watchdog)"
+    echo "  10. Netdata 监控"
+    echo ""
+
+    if ! confirm_action "确认开始部署 Server B？" "y"; then
+        show_main_menu
+        return
+    fi
+
+    require_root
+
+    # Create config directory
+    mkdir -p "${CONFIG_DIR}" "${LOG_DIR}"
+
+    # Source and run server-b deployment
+    # shellcheck source=scripts/security.sh
+    source "${SCRIPT_DIR}/scripts/security.sh"
+    # shellcheck source=scripts/server-b.sh
+    source "${SCRIPT_DIR}/scripts/server-b.sh"
+    # shellcheck source=scripts/monitoring.sh
+    source "${SCRIPT_DIR}/scripts/monitoring.sh"
+
+    deploy_server_b
+
+    echo ""
+    print_section "部署完成"
+    log_success "Server B 部署成功！"
+    log_info "请保存上方显示的连接信息，部署 Server A 时需要使用"
+    log_info "连接信息已保存到: /root/ai-gateway-connection.txt"
+    echo ""
+    log_warn "重要提醒："
+    echo "  1. 请在新终端测试 SSH 连接是否正常"
+    echo "  2. 请记录 Xray 连接参数（UUID、PublicKey 等）"
+    echo "  3. 接下来请在国内服务器上运行本脚本选择 '部署国内服务器'"
+}
+
+# --- Flow: Deploy Server A (China) ---
+deploy_server_a_flow() {
+    print_banner "部署国内服务器 (Server A)"
+    echo ""
+    log_info "Server A 将部署以下组件："
+    echo "  1. 云 Agent 清理 (预部署检查)"
+    echo "  2. 系统安全加固 (防火墙/SSH/fail2ban/内核加固)"
+    echo "  3. Xray 客户端 (VLESS+Reality → 连接 Server B)"
+    echo "  4. Mihomo 智能路由引擎"
+    echo "  5. New API AI 网关 (Docker)"
+    echo "  6. Caddy 反向代理 + 伪装网站"
+    echo "  7. 企业 VPN (WireGuard/Firezone, 可选)"
+    echo "  8. 连接保活 (Keepalive + Watchdog)"
+    echo "  9. 网络分流 (Split Tunnel)"
+    echo "  10. Netdata 监控"
+    echo ""
+    log_warn "前提条件："
+    echo "  - Server B 已部署完成"
+    echo "  - 已获取 Server B 的连接信息 (UUID/PublicKey/IP/Port)"
+    echo "  - (推荐) 已准备 ICP 备案域名"
+    echo ""
+
+    if ! confirm_action "确认 Server B 已部署且连接信息已就绪？" "y"; then
+        show_main_menu
+        return
+    fi
+
+    require_root
+
+    # Create config directory
+    mkdir -p "${CONFIG_DIR}" "${LOG_DIR}"
+
+    # Source and run server-a deployment
+    # shellcheck source=scripts/security.sh
+    source "${SCRIPT_DIR}/scripts/security.sh"
+    # shellcheck source=scripts/server-a.sh
+    source "${SCRIPT_DIR}/scripts/server-a.sh"
+    # shellcheck source=scripts/monitoring.sh
+    source "${SCRIPT_DIR}/scripts/monitoring.sh"
+
+    deploy_server_a
+
+    echo ""
+    print_section "部署完成"
+    log_success "Server A 部署成功！"
+    echo ""
+    log_info "用户配置指南："
+    echo ""
+    echo "  === Claude Code ==="
+    echo "  export ANTHROPIC_BASE_URL=https://your-domain.com"
+    echo "  export ANTHROPIC_API_KEY=<从 New API 面板获取>"
+    echo ""
+    echo "  === Codex CLI ==="
+    echo "  export OPENAI_BASE_URL=https://your-domain.com/v1"
+    echo "  export OPENAI_API_KEY=<从 New API 面板获取>"
+    echo ""
+    echo "  === OpenCode / 其他 OpenAI 兼容工具 ==="
+    echo "  export OPENAI_BASE_URL=https://your-domain.com/v1"
+    echo "  export OPENAI_API_KEY=<从 New API 面板获取>"
+    echo ""
+    log_info "详细配置说明请参阅: docs/CLIENT-SETUP.md"
+}
+
+# --- Flow: Security Only ---
+security_only_flow() {
+    print_banner "安全加固"
+    require_root
+
+    # shellcheck source=scripts/security.sh
+    source "${SCRIPT_DIR}/scripts/security.sh"
+
+    print_section "选择加固模块"
+    local sec_options=(
+        "完整安全加固 (推荐)"
+        "仅 SSH 加固"
+        "仅防火墙配置"
+        "仅 fail2ban 部署"
+        "仅内核安全参数"
+        "仅安全工具安装 (Lynis/rkhunter)"
+        "运行安全审计"
+        "返回主菜单"
+    )
+    show_menu "安全加固" sec_options
+
+    case "${MENU_RESULT}" in
+        1) full_security_hardening ;;
+        2) harden_ssh ;;
+        3) setup_firewall ;;
+        4) setup_fail2ban ;;
+        5) harden_kernel ;;
+        6) install_security_tools ;;
+        7) run_security_audit ;;
+        8) show_main_menu; return ;;
+    esac
+
+    log_success "安全加固完成"
+}
+
+# --- Flow: Monitoring Only ---
+monitoring_only_flow() {
+    print_banner "监控部署"
+    require_root
+
+    # shellcheck source=scripts/monitoring.sh
+    source "${SCRIPT_DIR}/scripts/monitoring.sh"
+
+    deploy_monitoring
+
+    log_success "监控系统部署完成"
+    log_info "Netdata 面板: http://127.0.0.1:19999 (仅本地访问，如需远程请通过 SSH 隧道)"
+}
+
+# --- Flow: Whitelist Management ---
+whitelist_flow() {
+    # shellcheck source=scripts/whitelist.sh
+    source "${SCRIPT_DIR}/scripts/whitelist.sh"
+
+    manage_whitelist
+}
+
+# --- Flow: Health Check ---
+health_check_flow() {
+    print_banner "系统健康检查"
+
+    if [[ -f "${SCRIPT_DIR}/scripts/health-check.sh" ]]; then
+        bash "${SCRIPT_DIR}/scripts/health-check.sh" --verbose
+    else
+        log_error "健康检查脚本不存在"
+    fi
+}
+
+# --- Flow: Show Connection Info ---
+show_connection_info() {
+    print_banner "连接信息"
+
+    if [[ -f /root/ai-gateway-connection.txt ]]; then
+        print_section "Server B 连接信息"
+        # Filter out the private key when displaying connection info
+        grep -v '^PRIVATE_KEY=' /root/ai-gateway-connection.txt
+        echo ""
+        log_warn "PRIVATE_KEY 已隐藏 (仅存储在文件中，使用 cat /root/ai-gateway-connection.txt 查看)"
+    else
+        log_warn "未找到 Server B 连接信息文件"
+    fi
+
+    if [[ -f /root/server-b-connection.conf ]]; then
+        print_section "Server B 连接配置"
+        cat /root/server-b-connection.conf
+    fi
+
+    # Check New API
+    if command -v docker &>/dev/null && docker ps --format '{{.Names}}' 2>/dev/null | grep -q "new-api"; then
+        print_section "New API 状态"
+        docker ps --filter name=new-api --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+        echo ""
+        log_info "New API 面板: http://localhost:3000"
+    fi
+
+    # Check Xray
+    if systemctl is-active --quiet xray 2>/dev/null; then
+        print_section "Xray 状态"
+        log_success "Xray 服务运行中"
+        systemctl status xray --no-pager -l 2>/dev/null | head -5
+    fi
+
+    # Check 3x-ui
+    if systemctl is-active --quiet x-ui 2>/dev/null; then
+        print_section "3x-ui 状态"
+        log_success "3x-ui 服务运行中"
+    fi
+
+    echo ""
+    log_info "按回车返回主菜单..."
+    read -r
+    show_main_menu
+}
+
+# --- Flow: DD Reinstall ---
+dd_reinstall_flow() {
+    print_banner "DD 系统重装 / 云 Agent 清理"
+    require_root
+
+    # shellcheck source=scripts/dd-reinstall.sh
+    source "${SCRIPT_DIR}/scripts/dd-reinstall.sh"
+
+    pre_deploy_check
+}
+
+# --- Flow: VPN ---
+vpn_flow() {
+    print_banner "企业 VPN 部署"
+    require_root
+
+    # shellcheck source=scripts/vpn.sh
+    source "${SCRIPT_DIR}/scripts/vpn.sh"
+
+    deploy_vpn
+}
+
+# --- Flow: Anti-DPI ---
+anti_dpi_flow() {
+    print_banner "DPI 防护部署"
+    require_root
+
+    # shellcheck source=scripts/anti-dpi.sh
+    source "${SCRIPT_DIR}/scripts/anti-dpi.sh"
+
+    deploy_anti_dpi
+}
+
+# --- Flow: Mihomo ---
+mihomo_flow() {
+    print_banner "Mihomo 智能路由部署"
+    require_root
+
+    # shellcheck source=scripts/mihomo.sh
+    source "${SCRIPT_DIR}/scripts/mihomo.sh"
+
+    deploy_mihomo
+}
+
+# --- Flow: Keepalive ---
+keepalive_flow() {
+    print_banner "连接保活部署"
+    require_root
+
+    # shellcheck source=scripts/keepalive.sh
+    source "${SCRIPT_DIR}/scripts/keepalive.sh"
+
+    deploy_keepalive
+}
+
+# --- Flow: Split Tunnel ---
+split_tunnel_flow() {
+    print_banner "网络分流部署"
+    require_root
+
+    # shellcheck source=scripts/split-tunnel.sh
+    source "${SCRIPT_DIR}/scripts/split-tunnel.sh"
+
+    deploy_split_tunnel
+}
+
+# --- Flow: Backup ---
+backup_flow() {
+    print_banner "备份与恢复管理"
+    require_root
+
+    # shellcheck source=scripts/backup.sh
+    source "${SCRIPT_DIR}/scripts/backup.sh"
+
+    manage_backups
+}
+
+# --- Flow: Update ---
+update_flow() {
+    print_banner "组件更新管理"
+    require_root
+
+    # shellcheck source=scripts/update.sh
+    source "${SCRIPT_DIR}/scripts/update.sh"
+
+    manage_updates
+}
+
+# --- Flow: Multi Server ---
+multi_server_flow() {
+    print_banner "多节点 Server B 管理"
+    require_root
+
+    # shellcheck source=scripts/multi-server.sh
+    source "${SCRIPT_DIR}/scripts/multi-server.sh"
+
+    manage_servers
+}
+
+# --- Flow: User Management ---
+user_management_flow() {
+    print_banner "用户管理"
+    require_root
+
+    # shellcheck source=scripts/user-management.sh
+    source "${SCRIPT_DIR}/scripts/user-management.sh"
+
+    manage_users
+}
+
+# --- Flow: Diagnostics ---
+diagnostics_flow() {
+    print_banner "深度诊断"
+
+    # shellcheck source=scripts/diagnostics.sh
+    source "${SCRIPT_DIR}/scripts/diagnostics.sh"
+
+    manage_diagnostics
+}
+
+# --- Flow: Uninstall ---
+uninstall_flow() {
+    print_banner "卸载"
+    require_root
+
+    # shellcheck source=scripts/uninstall.sh
+    source "${SCRIPT_DIR}/scripts/uninstall.sh"
+
+    uninstall_all
+}
+
+# --- Argument Parsing ---
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --server-a)
+                require_root
+                source "${SCRIPT_DIR}/scripts/security.sh"
+                source "${SCRIPT_DIR}/scripts/server-a.sh"
+                source "${SCRIPT_DIR}/scripts/monitoring.sh"
+                deploy_server_a
+                exit 0
+                ;;
+            --server-b)
+                require_root
+                source "${SCRIPT_DIR}/scripts/security.sh"
+                source "${SCRIPT_DIR}/scripts/server-b.sh"
+                source "${SCRIPT_DIR}/scripts/monitoring.sh"
+                deploy_server_b
+                exit 0
+                ;;
+            --security)
+                require_root
+                source "${SCRIPT_DIR}/scripts/security.sh"
+                full_security_hardening
+                exit 0
+                ;;
+            --health-check)
+                bash "${SCRIPT_DIR}/scripts/health-check.sh" --verbose
+                exit 0
+                ;;
+            --uninstall)
+                require_root
+                source "${SCRIPT_DIR}/scripts/uninstall.sh"
+                uninstall_all
+                exit 0
+                ;;
+            --vpn)
+                require_root
+                source "${SCRIPT_DIR}/scripts/vpn.sh"
+                deploy_vpn
+                exit 0
+                ;;
+            --anti-dpi)
+                require_root
+                source "${SCRIPT_DIR}/scripts/anti-dpi.sh"
+                deploy_anti_dpi
+                exit 0
+                ;;
+            --mihomo)
+                require_root
+                source "${SCRIPT_DIR}/scripts/mihomo.sh"
+                deploy_mihomo
+                exit 0
+                ;;
+            --keepalive)
+                require_root
+                source "${SCRIPT_DIR}/scripts/keepalive.sh"
+                deploy_keepalive
+                exit 0
+                ;;
+            --split-tunnel)
+                require_root
+                source "${SCRIPT_DIR}/scripts/split-tunnel.sh"
+                deploy_split_tunnel
+                exit 0
+                ;;
+            --backup)
+                require_root
+                source "${SCRIPT_DIR}/scripts/backup.sh"
+                manage_backups
+                exit 0
+                ;;
+            --update)
+                require_root
+                source "${SCRIPT_DIR}/scripts/update.sh"
+                manage_updates
+                exit 0
+                ;;
+            --multi-server)
+                require_root
+                source "${SCRIPT_DIR}/scripts/multi-server.sh"
+                manage_servers
+                exit 0
+                ;;
+            --user-mgmt)
+                require_root
+                source "${SCRIPT_DIR}/scripts/user-management.sh"
+                manage_users
+                exit 0
+                ;;
+            --diagnostics)
+                source "${SCRIPT_DIR}/scripts/diagnostics.sh"
+                manage_diagnostics
+                exit 0
+                ;;
+            --dd-reinstall)
+                require_root
+                source "${SCRIPT_DIR}/scripts/dd-reinstall.sh"
+                pre_deploy_check
+                exit 0
+                ;;
+            --version)
+                echo "${PROJECT_NAME} v${SCRIPT_VERSION}"
+                exit 0
+                ;;
+            --help|-h)
+                show_help
+                exit 0
+                ;;
+            *)
+                log_error "未知参数: $1"
+                show_help
+                exit 1
+                ;;
+        esac
+        shift
+    done
+}
+
+# --- Help ---
+show_help() {
+    cat <<'HELP'
+AI Gateway Bridge v2.0 - 一键部署脚本
+
+用法:
+  ./install.sh                交互式菜单 (推荐)
+
+基础部署:
+  ./install.sh --server-b     非交互式部署海外服务器
+  ./install.sh --server-a     非交互式部署国内服务器
+  ./install.sh --security     仅执行安全加固
+  ./install.sh --dd-reinstall DD 系统重装 / 云 Agent 清理
+
+v2.0 模块部署:
+  ./install.sh --vpn          部署企业 VPN (WireGuard/Firezone/Headscale)
+  ./install.sh --anti-dpi     部署 DPI 防护 (dest 轮换/uTLS/Mux)
+  ./install.sh --mihomo       部署 Mihomo 智能路由引擎
+  ./install.sh --keepalive    部署连接保活 (Keepalive + Watchdog)
+  ./install.sh --split-tunnel 部署网络分流 (Split Tunnel)
+
+运维管理:
+  ./install.sh --backup       备份与恢复管理
+  ./install.sh --update       组件更新管理
+  ./install.sh --multi-server 多节点 Server B 管理
+  ./install.sh --user-mgmt    用户管理 (VPN + API)
+  ./install.sh --diagnostics  深度诊断 (网络/服务/GFW 检测)
+  ./install.sh --health-check 运行健康检查
+  ./install.sh --uninstall    卸载所有组件
+
+其他:
+  ./install.sh --version      显示版本
+  ./install.sh --help         显示帮助
+
+推荐部署顺序:
+  0. (可选) DD 系统重装: ./install.sh --dd-reinstall
+  1. 海外服务器: ./install.sh --server-b + --anti-dpi
+  2. 国内服务器: ./install.sh --server-a
+  3. 部署 VPN:   ./install.sh --vpn
+  4. 部署路由:   ./install.sh --mihomo
+  5. 部署增强:   ./install.sh --keepalive --split-tunnel --backup
+  6. 创建用户:   ./install.sh --user-mgmt
+
+支持系统:
+  Ubuntu 22.04 / 24.04 LTS
+  Debian 12+
+  CentOS 9 / Rocky Linux 9 / AlmaLinux 9
+
+文档:
+  docs/USAGE.md             使用说明 (含 v2 完整部署流程)
+  docs/VPN-SETUP.md         企业 VPN 部署与员工入职指南
+  docs/CLIENT-SETUP.md      客户端配置 (VPN + AI 工具)
+  docs/TROUBLESHOOTING.md   疑难排查 (含 VPN/Mihomo/DPI/Keepalive)
+  docs/SECURITY.md          安全说明
+
+项目地址: https://github.com/your-org/ai-gateway-bridge
+HELP
+}
+
+# --- Entry Point ---
+main() {
+    # Ensure we're in the script directory
+    cd "${SCRIPT_DIR}"
+
+    # Create necessary directories
+    mkdir -p "${CONFIG_DIR}" "${LOG_DIR}" 2>/dev/null || true
+
+    if [[ $# -gt 0 ]]; then
+        parse_args "$@"
+    else
+        # Interactive mode
+        detect_system
+        show_main_menu
+    fi
+}
+
+main "$@"

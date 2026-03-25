@@ -1,0 +1,168 @@
+# =============================================================================
+# AI Gateway Bridge - Firezone Docker Compose
+# =============================================================================
+# Firezone: WireGuard-based VPN server with admin portal.
+# Provides: Web UI for user/device management, MFA, OIDC support.
+#
+# IMPORTANT: This config is for Firezone v0.7.x (legacy Phoenix/Elixir app).
+# Firezone v1.x (released mid-2024) uses a completely different architecture
+# (separate Gateway/Relay/Portal/API components) and is NOT compatible with
+# this compose file. We pin to v0.7.36 (last stable v0.7.x release).
+# See: https://www.firezone.dev/docs/deploy
+#
+# Template variables:
+#   {{DB_PASSWORD}}              - PostgreSQL database password
+#   {{SECRET_KEY_BASE}}          - Phoenix secret key base
+#   {{LIVE_VIEW_SIGNING_SALT}}   - LiveView signing salt
+#   {{COOKIE_SIGNING_SALT}}      - Cookie signing salt
+#   {{COOKIE_ENCRYPTION_SALT}}   - Cookie encryption salt
+#   {{ADMIN_EMAIL}}              - Initial admin email
+#   {{EXTERNAL_URL}}             - External URL (https://vpn.yourdomain.com)
+#   {{VPN_SUBNET}}               - VPN subnet (10.8.0.0/24)
+#   {{WG_PORT}}                  - WireGuard listen port (51820)
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL Database
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:15-alpine
+    container_name: firezone-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: firezone
+      POSTGRES_USER: firezone
+      POSTGRES_PASSWORD: "{{DB_PASSWORD}}"
+    volumes:
+      - firezone-db:/var/lib/postgresql/data
+    networks:
+      - firezone-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U firezone -d firezone"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    # Security: no port exposure to host
+    # Database is only accessible within the firezone-internal network
+
+  # ---------------------------------------------------------------------------
+  # Firezone Application
+  # ---------------------------------------------------------------------------
+  firezone:
+    image: firezone/firezone:0.7.36
+    container_name: firezone-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      # Admin portal (VPN-only access enforced by iptables)
+      - "13000:13000"
+      # WireGuard endpoint (public)
+      - "{{WG_PORT}}:{{WG_PORT}}/udp"
+    environment:
+      # --- Database ---
+      DATABASE_HOST: postgres
+      DATABASE_PORT: "5432"
+      DATABASE_NAME: firezone
+      DATABASE_USER: firezone
+      DATABASE_PASSWORD: "{{DB_PASSWORD}}"
+      DATABASE_POOL_SIZE: "10"
+
+      # --- Application ---
+      EXTERNAL_URL: "{{EXTERNAL_URL}}"
+      DEFAULT_ADMIN_EMAIL: "{{ADMIN_EMAIL}}"
+
+      # --- Security secrets ---
+      SECRET_KEY_BASE: "{{SECRET_KEY_BASE}}"
+      LIVE_VIEW_SIGNING_SALT: "{{LIVE_VIEW_SIGNING_SALT}}"
+      GUARDIAN_SECRET_KEY: "{{SECRET_KEY_BASE}}"
+      COOKIE_SIGNING_SALT: "{{COOKIE_SIGNING_SALT}}"
+      COOKIE_ENCRYPTION_SALT: "{{COOKIE_ENCRYPTION_SALT}}"
+
+      # --- WireGuard ---
+      WIREGUARD_PORT: "{{WG_PORT}}"
+      WIREGUARD_DNS: "1.1.1.1, 8.8.8.8"
+      WIREGUARD_IPV4_ENABLED: "true"
+      WIREGUARD_IPV4_NETWORK: "{{VPN_SUBNET}}"
+      WIREGUARD_IPV4_ADDRESS: "10.8.0.1"
+      WIREGUARD_IPV6_ENABLED: "false"
+      WIREGUARD_ALLOWED_IPS: "10.8.0.0/24, 172.16.0.0/24"
+      WIREGUARD_PERSISTENT_KEEPALIVE: "25"
+      WIREGUARD_MTU: "1420"
+
+      # --- Features ---
+      LOCAL_AUTH_ENABLED: "true"
+      DISABLE_VPN_ON_OIDC_ERROR: "false"
+      ALLOW_UNPRIVILEGED_DEVICE_MANAGEMENT: "true"
+      ALLOW_UNPRIVILEGED_DEVICE_CONFIGURATION: "true"
+      AUTO_CREATE_OIDC_USERS: "false"
+
+      # --- Session ---
+      SECURE_COOKIES: "true"
+      MAX_DEVICES_PER_USER: "5"
+      VPN_SESSION_DURATION: "0"
+
+      # --- Telemetry ---
+      TELEMETRY_ENABLED: "false"
+
+      # --- Logging ---
+      LOG_LEVEL: "info"
+
+      # --- Phoenix ---
+      PHOENIX_HTTP_PORT: "13000"
+      PHOENIX_EXTERNAL_TRUSTED_PROXIES: "[]"
+      PHOENIX_PRIVATE_CLIENTS: "[]"
+
+    volumes:
+      - firezone-data:/var/firezone
+    networks:
+      - firezone-internal
+      - firezone-vpn
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+      - net.ipv6.conf.all.disable_ipv6=1
+      - net.ipv6.conf.default.disable_ipv6=1
+      - net.ipv6.conf.lo.disable_ipv6=1
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:13000/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  firezone-db:
+    driver: local
+    name: firezone-db
+  firezone-data:
+    driver: local
+    name: firezone-data
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  # Internal network for database communication (isolated)
+  firezone-internal:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+  # VPN network for WireGuard traffic
+  firezone-vpn:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24
