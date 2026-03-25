@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# AI Gateway Bridge - Mihomo Routing Engine
+# Bifrost - Mihomo Routing Engine
 # =============================================================================
 # Description : Deploys Mihomo (Meta) as the central routing engine on Server A.
 #               Mihomo handles ALL routing decisions (AI -> proxy, streaming ->
@@ -329,7 +329,7 @@ _mihomo_create_service() {
 
     cat > /etc/systemd/system/${MIHOMO_SERVICE_NAME}.service <<'SERVICEEOF'
 [Unit]
-Description=Mihomo (Meta) - Routing Engine for AI Gateway Bridge
+Description=Mihomo (Meta) - Routing Engine for Bifrost
 Documentation=https://wiki.metacubex.one
 After=network-online.target nss-lookup.target
 Wants=network-online.target
@@ -447,7 +447,7 @@ configure_mihomo() {
 
     # --- Print connection info ---
     # NOTE: Print API secret ONLY to stdout (not to log file) to avoid
-    # persisting secrets in /var/log/ai-gateway-bridge.log.
+    # persisting secrets in /var/log/bifrost.log.
     log_success "Mihomo routing engine configured successfully."
     log_info "  Mixed proxy (HTTP+SOCKS5): 0.0.0.0:${MIHOMO_MIXED_PORT}"
     log_info "  SOCKS5 proxy:              127.0.0.1:${MIHOMO_SOCKS_PORT}"
@@ -505,7 +505,7 @@ _mihomo_generate_config_direct() {
 
     cat > "${MIHOMO_CONFIG}" <<CFGEOF
 # =============================================================================
-# Mihomo (Meta) Configuration - AI Gateway Bridge
+# Mihomo (Meta) Configuration - Bifrost
 # Generated on $(date '+%Y-%m-%d %H:%M:%S')
 # =============================================================================
 # Architecture:
@@ -715,7 +715,7 @@ generate_mihomo_rulesets() {
     log_info "Generating Mihomo rulesets..."
 
     local whitelist_file="${_MIHOMO_PROJECT_DIR}/configs/whitelist/ai-domains.txt"
-    local installed_whitelist="/opt/ai-gateway-bridge/configs/whitelist/ai-domains.txt"
+    local installed_whitelist="/opt/bifrost/configs/whitelist/ai-domains.txt"
 
     # Find the whitelist source
     local source_file=""
@@ -738,7 +738,7 @@ generate_mihomo_rulesets() {
     local domain_count=0
 
     {
-        echo "# AI Gateway Bridge - AI Domain Ruleset for Mihomo"
+        echo "# Bifrost - AI Domain Ruleset for Mihomo"
         echo "# Auto-generated from configs/whitelist/ai-domains.txt"
         echo "# Generated on $(date '+%Y-%m-%d %H:%M:%S')"
         echo "# Format: Mihomo classical ruleset"
@@ -788,7 +788,7 @@ _mihomo_generate_default_streaming_ruleset() {
     local output_file="${1}"
 
     cat > "${output_file}" <<'STREAMEOF'
-# AI Gateway Bridge - Streaming Services Block Ruleset
+# Bifrost - Streaming Services Block Ruleset
 # Auto-generated default. Edit configs/mihomo/ruleset/streaming-block.yaml to customize.
 payload:
   # Netflix
@@ -1184,7 +1184,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             deploy_mihomo
             ;;
         help|--help|-h)
-            echo "AI Gateway Bridge - Mihomo Routing Engine"
+            echo "Bifrost - Mihomo Routing Engine"
             echo ""
             echo "Usage:"
             echo "  $0 install     # Install Mihomo binary + GeoData"

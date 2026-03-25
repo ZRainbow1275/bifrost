@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ###############################################################################
-# AI Gateway Bridge - Multi-Server Management Module
+# Bifrost - Multi-Server Management Module
 #
 # Manages multiple overseas Server B instances for load balancing and failover.
 # Server information is stored in Mihomo (Clash.Meta) proxy group config and
@@ -84,7 +84,7 @@ fi
 # =============================================================================
 # Constants
 # =============================================================================
-SERVER_REGISTRY_DIR="/etc/ai-gateway-bridge"
+SERVER_REGISTRY_DIR="/etc/bifrost"
 SERVER_REGISTRY_FILE="${SERVER_REGISTRY_DIR}/servers.conf"
 MIHOMO_CONFIG="/etc/mihomo/config.yaml"
 MIHOMO_FALLBACK_CONFIG="/etc/clash/config.yaml"
@@ -108,7 +108,7 @@ _ensure_registry() {
     fi
     if [[ ! -f "${SERVER_REGISTRY_FILE}" ]]; then
         {
-            echo "# AI Gateway Bridge - Server Registry"
+            echo "# Bifrost - Server Registry"
             echo "# Format: NAME|IP|PORT|UUID|PUBKEY|SNI|SHORTID|PROTOCOL|ADDED_DATE"
             echo "#"
         } > "${SERVER_REGISTRY_FILE}"
@@ -832,7 +832,7 @@ manage_servers() {
     while true; do
         echo ""
         echo -e "${BLUE}============================================${NC}"
-        echo -e "${BLUE}  AI Gateway Bridge - Multi-Server Manager  ${NC}"
+        echo -e "${BLUE}  Bifrost - Multi-Server Manager  ${NC}"
         echo -e "${BLUE}============================================${NC}"
         echo ""
         echo "  1) List all servers (with status)"
@@ -877,7 +877,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             test_all_servers
             ;;
         help|--help|-h)
-            echo "AI Gateway Bridge - Multi-Server Manager"
+            echo "Bifrost - Multi-Server Manager"
             echo ""
             echo "Usage:"
             echo "  $0                   # Interactive menu"

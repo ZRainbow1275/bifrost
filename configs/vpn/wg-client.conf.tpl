@@ -1,5 +1,5 @@
 # =============================================================================
-# AI Gateway Bridge - WireGuard Client Configuration Template
+# Bifrost - WireGuard Client Configuration Template
 # =============================================================================
 # This template is rendered per-user by vpn.sh:create_vpn_user().
 #

@@ -2122,7 +2122,7 @@ deploy_server_a() {
     log_info "######################################################"
     log_info "#                                                    #"
     log_info "#    Server A (China Domestic) Deployment             #"
-    log_info "#    AI Gateway Bridge - Production Setup             #"
+    log_info "#    Bifrost - Production Setup             #"
     log_info "#                                                    #"
     log_info "######################################################"
     echo ""
@@ -2277,7 +2277,7 @@ deploy_server_a() {
     else
         # Inline minimal logrotate if monitoring.sh not loaded
         log_info "Setting up minimal log rotation..."
-        cat > /etc/logrotate.d/ai-gateway-bridge <<'_LOGROTATE_MINIMAL'
+        cat > /etc/logrotate.d/bifrost <<'_LOGROTATE_MINIMAL'
 /var/log/xray/*.log {
     daily
     rotate 7
@@ -2300,7 +2300,7 @@ deploy_server_a() {
     notifempty
     create 0640 caddy caddy
 }
-/var/log/ai-gateway-bridge/*.log {
+/var/log/bifrost/*.log {
     weekly
     rotate 4
     compress

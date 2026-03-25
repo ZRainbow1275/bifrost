@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ###############################################################################
-# AI Gateway Bridge - Monitoring Deployment Script
+# Bifrost - Monitoring Deployment Script
 #
 # Deploys monitoring infrastructure:
 #   - Netdata (lightweight system monitoring with Web UI)
@@ -66,8 +66,8 @@ if ! declare -f command_exists >/dev/null 2>&1; then
 fi
 
 # Project paths (use := to avoid overwriting readonly vars set by install.sh)
-: "${INSTALL_DIR:=/opt/ai-gateway-bridge}"
-: "${LOG_DIR:=/var/log/ai-gateway-bridge}"
+: "${INSTALL_DIR:=/opt/bifrost}"
+: "${LOG_DIR:=/var/log/bifrost}"
 HEALTH_CHECK_SCRIPT="${INSTALL_DIR}/health-check.sh"
 
 ###############################################################################
@@ -160,7 +160,7 @@ install_netdata() {
 
     # Write optimized configuration
     cat > "${netdata_conf_dir}/netdata.conf" <<'NETDATA_CONF'
-# AI Gateway Bridge - Netdata Configuration
+# Bifrost - Netdata Configuration
 # Optimized for low resource usage on proxy servers
 
 [global]
@@ -263,7 +263,7 @@ STREAM_CONF
 ###############################################################################
 # setup_health_check()
 #
-# Create a comprehensive health check script at /opt/ai-gateway-bridge/
+# Create a comprehensive health check script at /opt/bifrost/
 # that monitors:
 #   - Xray service status
 #   - Tunnel connectivity (curl through SOCKS5 proxy)
@@ -290,7 +290,7 @@ setup_health_check() {
 #!/usr/bin/env bash
 # Minimal health check - see scripts/health-check.sh for the full version
 set -euo pipefail
-LOG_DIR="/var/log/ai-gateway-bridge"
+LOG_DIR="/var/log/bifrost"
 mkdir -p "${LOG_DIR}"
 echo "{\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"status\":\"ok\",\"note\":\"minimal check\"}" > "${LOG_DIR}/health.json"
 HEALTH_EOF
@@ -301,7 +301,7 @@ HEALTH_EOF
 
     # Add cron job (every 5 minutes)
     local cron_entry="*/5 * * * * ${HEALTH_CHECK_SCRIPT} >> ${LOG_DIR}/health-cron.log 2>&1"
-    local cron_marker="# ai-gateway-bridge-health-check"
+    local cron_marker="# bifrost-health-check"
 
     # Check if cron job already exists
     if crontab -l 2>/dev/null | grep -qF "${cron_marker}"; then
@@ -327,14 +327,14 @@ HEALTH_EOF
 #   - Xray logs (/var/log/xray/)
 #   - Caddy logs (/var/log/caddy/)
 #   - New API logs (Docker stdout, managed separately)
-#   - AI Gateway Bridge logs (/var/log/ai-gateway-bridge/)
+#   - Bifrost logs (/var/log/bifrost/)
 ###############################################################################
 setup_logrotate() {
     log_step "Configuring log rotation..."
 
     # Create logrotate configuration
-    cat > /etc/logrotate.d/ai-gateway-bridge <<'LOGROTATE_CONF'
-# AI Gateway Bridge - Log Rotation Configuration
+    cat > /etc/logrotate.d/bifrost <<'LOGROTATE_CONF'
+# Bifrost - Log Rotation Configuration
 
 # Xray proxy logs
 /var/log/xray/*.log {
@@ -375,8 +375,8 @@ setup_logrotate() {
     endscript
 }
 
-# AI Gateway Bridge operational logs (health checks, alerts)
-/var/log/ai-gateway-bridge/*.log {
+# Bifrost operational logs (health checks, alerts)
+/var/log/bifrost/*.log {
     weekly
     rotate 4
     compress
@@ -387,8 +387,8 @@ setup_logrotate() {
     size 50M
 }
 
-# AI Gateway Bridge health JSON (keep only recent)
-/var/log/ai-gateway-bridge/health.json {
+# Bifrost health JSON (keep only recent)
+/var/log/bifrost/health.json {
     daily
     rotate 3
     compress
@@ -398,7 +398,7 @@ setup_logrotate() {
 }
 LOGROTATE_CONF
 
-    log_info "Log rotation configured at /etc/logrotate.d/ai-gateway-bridge"
+    log_info "Log rotation configured at /etc/logrotate.d/bifrost"
 
     # Create log directories if they don't exist
     mkdir -p /var/log/xray
@@ -411,10 +411,10 @@ LOGROTATE_CONF
     chmod 750 "${LOG_DIR}"
 
     # Test logrotate configuration
-    if logrotate -d /etc/logrotate.d/ai-gateway-bridge 2>/dev/null; then
+    if logrotate -d /etc/logrotate.d/bifrost 2>/dev/null; then
         log_info "Logrotate configuration syntax is valid."
     else
-        log_warn "Logrotate dry-run produced warnings. Check /etc/logrotate.d/ai-gateway-bridge"
+        log_warn "Logrotate dry-run produced warnings. Check /etc/logrotate.d/bifrost"
     fi
 
     log_info "Log rotation setup complete."
@@ -430,7 +430,7 @@ LOGROTATE_CONF
 ###############################################################################
 deploy_monitoring() {
     log_step "============================================"
-    log_step "  AI Gateway Bridge - Monitoring Deployment"
+    log_step "  Bifrost - Monitoring Deployment"
     log_step "============================================"
     echo ""
 

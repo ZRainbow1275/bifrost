@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ###############################################################################
-# AI Gateway Bridge - Heartbeat Probe Script
+# Bifrost - Heartbeat Probe Script
 #
 # Standalone script invoked by the ai-gateway-heartbeat systemd service.
 # Sends periodic connectivity probes through the local SOCKS5 proxy to
@@ -19,7 +19,7 @@
 #   2 - Alert threshold reached, notification sent
 #
 # Usage:
-#   /opt/ai-gateway-bridge/heartbeat.sh
+#   /opt/bifrost/heartbeat.sh
 #   (invoked by systemd timer, not intended for manual use)
 ###############################################################################
 
@@ -37,10 +37,10 @@ readonly PROBE_TARGETS=(
 readonly CONNECT_TIMEOUT=10
 readonly MAX_TIME=20
 
-readonly STATE_DIR="/var/lib/ai-gateway-bridge"
+readonly STATE_DIR="/var/lib/bifrost"
 readonly FAIL_COUNT_FILE="${STATE_DIR}/heartbeat-failures"
-readonly HEARTBEAT_STATUS_FILE="/var/log/ai-gateway-bridge/heartbeat.json"
-readonly ALERT_LOG="/var/log/ai-gateway-bridge/alerts.log"
+readonly HEARTBEAT_STATUS_FILE="/var/log/bifrost/heartbeat.json"
+readonly ALERT_LOG="/var/log/bifrost/alerts.log"
 
 readonly RESTART_THRESHOLD=3    # Auto-restart Xray after 3 consecutive failures
 readonly ALERT_THRESHOLD=5      # Send alert after 5 consecutive failures

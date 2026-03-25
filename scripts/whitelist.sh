@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ###############################################################################
-# AI Gateway Bridge - Whitelist Management Script
+# Bifrost - Whitelist Management Script
 #
 # Manages the AI domain whitelist used by Xray routing rules.
 # Provides an interactive menu to:
@@ -81,7 +81,7 @@ fi
 
 # Paths
 WHITELIST_FILE="${_WL_PROJECT_DIR}/configs/whitelist/ai-domains.txt"
-INSTALLED_WHITELIST="/opt/ai-gateway-bridge/configs/whitelist/ai-domains.txt"
+INSTALLED_WHITELIST="/opt/bifrost/configs/whitelist/ai-domains.txt"
 XRAY_CLIENT_CONFIG="/usr/local/etc/xray/config.json"
 XRAY_SERVER_CONFIG="/usr/local/etc/xray/config.json"
 
@@ -501,7 +501,7 @@ manage_whitelist() {
     while true; do
         echo ""
         echo -e "${BLUE}============================================${NC}"
-        echo -e "${BLUE}  AI Gateway Bridge - Whitelist Management  ${NC}"
+        echo -e "${BLUE}  Bifrost - Whitelist Management  ${NC}"
         echo -e "${BLUE}============================================${NC}"
         echo ""
         echo "  1) List all whitelisted domains"
@@ -602,7 +602,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             test_domain "$2"
             ;;
         help|--help|-h)
-            echo "AI Gateway Bridge - Whitelist Management"
+            echo "Bifrost - Whitelist Management"
             echo ""
             echo "Usage:"
             echo "  $0              # Interactive menu"

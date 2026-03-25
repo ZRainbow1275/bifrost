@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# AI Gateway Bridge - 一键部署脚本
+# Bifrost - 一键部署脚本
 # 国内外 AI 服务桥接解决方案
 #
 # 架构: 员工设备 → WireGuard VPN → 国内服务器A (VPN Gateway + Caddy + New API + Mihomo + Xray Client)
@@ -18,9 +18,9 @@ set -euo pipefail
 # --- Constants ---
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_VERSION="2.0.0"
-readonly PROJECT_NAME="AI Gateway Bridge"
-readonly CONFIG_DIR="/opt/ai-gateway-bridge"
-readonly LOG_DIR="/var/log/ai-gateway-bridge"
+readonly PROJECT_NAME="Bifrost"
+readonly CONFIG_DIR="/opt/bifrost"
+readonly LOG_DIR="/var/log/bifrost"
 
 # --- Source modules ---
 # shellcheck source=scripts/common.sh
@@ -568,7 +568,7 @@ parse_args() {
 # --- Help ---
 show_help() {
     cat <<'HELP'
-AI Gateway Bridge v2.0 - 一键部署脚本
+Bifrost v2.0 - 一键部署脚本
 
 用法:
   ./install.sh                交互式菜单 (推荐)
@@ -620,7 +620,7 @@ v2.0 模块部署:
   docs/TROUBLESHOOTING.md   疑难排查 (含 VPN/Mihomo/DPI/Keepalive)
   docs/SECURITY.md          安全说明
 
-项目地址: https://github.com/your-org/ai-gateway-bridge
+项目地址: https://github.com/your-org/bifrost
 HELP
 }
 

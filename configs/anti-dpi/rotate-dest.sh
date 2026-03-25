@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# AI Gateway Bridge - Standalone Dest Rotation Script (Cron)
+# Bifrost - Standalone Dest Rotation Script (Cron)
 # ==============================================================================
 # Description : Rotates the Xray Reality destination ("dest") to a randomly
 #               selected entry from the validated dest pool. Designed for
 #               unattended cron execution with full error handling, config
 #               validation, atomic replacement, and automatic rollback.
 #
-# Usage       : /opt/ai-gateway-bridge/rotate-dest.sh
+# Usage       : /opt/bifrost/rotate-dest.sh
 #               (called weekly by cron, or manually for on-demand rotation)
 #
-# Cron entry  : 17 3 * * 0 /opt/ai-gateway-bridge/rotate-dest.sh >> /var/log/ai-gateway-bridge-rotate.log 2>&1
+# Cron entry  : 17 3 * * 0 /opt/bifrost/rotate-dest.sh >> /var/log/bifrost-rotate.log 2>&1
 #
 # Exit codes  :
 #   0 - Rotation successful
@@ -18,7 +18,7 @@
 #   2 - Rotation failed but rollback succeeded
 #   3 - Both rotation and rollback failed (manual intervention required)
 #
-# Project     : AI Gateway Bridge
+# Project     : Bifrost
 # License     : MIT
 # ==============================================================================
 
@@ -28,11 +28,11 @@ set -euo pipefail
 # Configuration
 # ==============================================================================
 
-readonly DEST_POOL_FILE="/opt/ai-gateway-bridge/dest-pool.txt"
+readonly DEST_POOL_FILE="/opt/bifrost/dest-pool.txt"
 readonly XRAY_CONFIG="/usr/local/etc/xray/config.json"
 readonly XRAY_CONFIG_BACKUP="${XRAY_CONFIG}.pre-rotate.bak"
 readonly XRAY_CONFIG_TMP="${XRAY_CONFIG}.rotate-tmp.$$"
-readonly STATE_DIR="/opt/ai-gateway-bridge/.anti-dpi-state"
+readonly STATE_DIR="/opt/bifrost/.anti-dpi-state"
 readonly STATE_FILE="${STATE_DIR}/state.env"
 readonly LOCK_FILE="/var/run/ai-gateway-dest-rotate.lock"
 

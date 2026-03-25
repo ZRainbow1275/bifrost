@@ -1,5 +1,5 @@
 # =============================================================================
-# AI Gateway Bridge - AI Domain Ruleset for Mihomo
+# Bifrost - AI Domain Ruleset for Mihomo
 # =============================================================================
 # Format: Mihomo classical ruleset
 # Behavior: classical (supports DOMAIN, DOMAIN-SUFFIX, DOMAIN-KEYWORD, etc.)

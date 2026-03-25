@@ -1,5 +1,5 @@
 ###############################################################################
-# AI Gateway Bridge - fail2ban Configuration
+# Bifrost - fail2ban Configuration
 #
 # This configuration provides intrusion prevention for:
 # - SSH brute force attacks

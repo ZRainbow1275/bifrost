@@ -1,8 +1,8 @@
-# AI Gateway Bridge - 使用说明 (v2.0)
+# Bifrost - 使用说明 (v2.0)
 
 ## 部署概述
 
-AI Gateway Bridge v2.0 采用双服务器 + VPN 网关架构，推荐按以下顺序部署：
+Bifrost v2.0 采用双服务器 + VPN 网关架构，推荐按以下顺序部署：
 
 ```
 Step 0: (可选) DD 系统重装 — 移除云厂商预装 Agent，获得干净环境
@@ -73,13 +73,13 @@ sudo ./install.sh
 ssh root@your-server-b-ip
 
 # 下载脚本（方式一：Git）
-git clone https://github.com/your-org/ai-gateway-bridge.git
-cd ai-gateway-bridge
+git clone https://github.com/ZRainbow1275/bifrost.git
+cd bifrost
 
 # 下载脚本（方式二：直接下载）
-wget https://github.com/your-org/ai-gateway-bridge/archive/main.tar.gz
+wget https://github.com/ZRainbow1275/bifrost/archive/main.tar.gz
 tar xzf main.tar.gz
-cd ai-gateway-bridge-main
+cd bifrost-main
 
 # 赋予执行权限
 chmod +x install.sh scripts/*.sh
@@ -162,8 +162,8 @@ Short ID:     (空或 0123456789abcdef)
 ssh root@your-server-a-ip
 
 # 下载脚本
-git clone https://github.com/your-org/ai-gateway-bridge.git
-cd ai-gateway-bridge
+git clone https://github.com/ZRainbow1275/bifrost.git
+cd bifrost
 chmod +x install.sh scripts/*.sh
 
 # 运行
@@ -362,7 +362,7 @@ sudo bash scripts/user-management.sh create zhangsan
 - New API Token (sk-xxxxx 格式)
 - 个人入职指南 (Markdown 格式)
 
-所有文件保存在: `/etc/ai-gateway-bridge/vpn/users/<username>/`
+所有文件保存在: `/etc/bifrost/vpn/users/<username>/`
 
 ### 4.2 员工入职流程
 

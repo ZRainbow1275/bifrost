@@ -1,4 +1,4 @@
-# AI Gateway Bridge - 客户端配置指南 (v2.0)
+# Bifrost - 客户端配置指南 (v2.0)
 
 ## 概述
 
@@ -190,7 +190,7 @@ export OPENAI_API_KEY=sk-xxxxx
 
 ## 可用模型
 
-通过 AI Gateway Bridge，你可以使用以下模型（取决于 New API 中配置的渠道）：
+通过 Bifrost，你可以使用以下模型（取决于 New API 中配置的渠道）：
 
 | 提供商 | 模型示例 |
 |--------|---------|

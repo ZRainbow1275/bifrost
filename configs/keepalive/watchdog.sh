@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ###############################################################################
-# AI Gateway Bridge - Service Watchdog Script
+# Bifrost - Service Watchdog Script
 #
 # Standalone watchdog that monitors critical services every 10 seconds:
 #   - xray       (proxy tunnel core)
@@ -23,7 +23,7 @@
 #   1 - Fatal initialization error
 #
 # Usage:
-#   /opt/ai-gateway-bridge/watchdog.sh
+#   /opt/bifrost/watchdog.sh
 #   (managed by systemd, not intended for manual use)
 ###############################################################################
 
@@ -36,10 +36,10 @@ readonly CHECK_INTERVAL=10       # seconds between check cycles
 readonly MAX_RESTART_ATTEMPTS=3  # max consecutive restarts before giving up
 readonly COOLDOWN_PERIOD=300     # seconds to wait after max restarts before retrying
 
-readonly STATE_DIR="/var/lib/ai-gateway-bridge/watchdog"
-readonly STATUS_FILE="/var/log/ai-gateway-bridge/watchdog.json"
-readonly ALERT_LOG="/var/log/ai-gateway-bridge/alerts.log"
-readonly WATCHDOG_LOG="/var/log/ai-gateway-bridge/watchdog.log"
+readonly STATE_DIR="/var/lib/bifrost/watchdog"
+readonly STATUS_FILE="/var/log/bifrost/watchdog.json"
+readonly ALERT_LOG="/var/log/bifrost/alerts.log"
+readonly WATCHDOG_LOG="/var/log/bifrost/watchdog.log"
 
 # VPN interface detection: check these interface names
 readonly VPN_INTERFACES=("wg0" "wg1" "tun0" "tun1")

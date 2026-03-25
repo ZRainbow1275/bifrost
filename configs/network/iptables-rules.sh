@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ###############################################################################
-# AI Gateway Bridge - Complete iptables Ruleset
+# Bifrost - Complete iptables Ruleset
 #
 # Implements network segmentation and split-tunneling firewall rules:
 #
@@ -23,7 +23,7 @@
 #     - Logging of dropped packets for debugging
 #
 # Usage:
-#   bash /opt/ai-gateway-bridge/iptables-rules.sh [apply|save|restore|status]
+#   bash /opt/bifrost/iptables-rules.sh [apply|save|restore|status]
 #
 # This script is invoked by scripts/split-tunnel.sh during deployment.
 ###############################################################################
@@ -63,7 +63,7 @@ readonly VPN_INTERFACE="${IPTABLES_VPN_IFACE:-}"
 readonly DOCKER_INTERFACE="${IPTABLES_DOCKER_IFACE:-docker0}"
 
 # Persistent rules file
-readonly RULES_SAVE_FILE="/etc/iptables/ai-gateway-bridge.rules"
+readonly RULES_SAVE_FILE="/etc/iptables/bifrost.rules"
 
 # Log prefix for dropped packets
 readonly LOG_PREFIX="AI-GW-DROP: "

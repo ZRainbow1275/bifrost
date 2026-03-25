@@ -1,12 +1,12 @@
 # Enterprise VPN Setup Guide
 
-AI Gateway Bridge - VPN as the First Security Gate
+Bifrost - VPN as the First Security Gate
 
 ---
 
 ## Overview
 
-The VPN is the **FIRST and mandatory gate** in the AI Gateway Bridge architecture. All employees **MUST** connect to the VPN before accessing any internal service.
+The VPN is the **FIRST and mandatory gate** in the Bifrost architecture. All employees **MUST** connect to the VPN before accessing any internal service.
 
 ### Architecture
 
@@ -47,8 +47,8 @@ VPN Gateway (10.8.0.1)
 
 ```bash
 # Clone the project
-git clone <repository-url> /opt/ai-gateway-bridge
-cd /opt/ai-gateway-bridge
+git clone <repository-url> /opt/bifrost
+cd /opt/bifrost
 
 # Run VPN deployment
 sudo bash scripts/vpn.sh deploy
@@ -114,7 +114,7 @@ This generates:
 - New API token
 - Personalized setup guide
 
-All files are stored in `/etc/ai-gateway-bridge/vpn/users/<username>/`.
+All files are stored in `/etc/bifrost/vpn/users/<username>/`.
 
 #### List all users
 
@@ -375,7 +375,7 @@ If your configuration is compromised or corrupted:
 - **Audit user list** monthly -- revoke access for departed employees immediately
 - **Monitor VPN logs** for unauthorized access attempts
 - **Keep WireGuard updated** -- kernel module and tools
-- **Backup VPN state** directory: `/etc/ai-gateway-bridge/vpn/`
+- **Backup VPN state** directory: `/etc/bifrost/vpn/`
 - **Use OIDC/SSO** with Firezone for enterprise authentication
 - **Enable MFA** in Firezone admin portal
 - Each user gets a **unique preshared key** for post-quantum resistance

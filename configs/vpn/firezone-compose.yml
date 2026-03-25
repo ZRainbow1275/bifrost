@@ -1,5 +1,5 @@
 # =============================================================================
-# AI Gateway Bridge - Firezone Docker Compose
+# Bifrost - Firezone Docker Compose
 # =============================================================================
 # Firezone: WireGuard-based VPN server with admin portal.
 # Provides: Web UI for user/device management, MFA, OIDC support.

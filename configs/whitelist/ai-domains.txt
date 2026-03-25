@@ -1,5 +1,5 @@
 ###############################################################################
-# AI Gateway Bridge - AI Service Domain Whitelist
+# Bifrost - AI Service Domain Whitelist
 #
 # This file contains all domains that should be routed through the proxy tunnel.
 # Used by Xray routing rules to selectively forward only AI-related traffic.

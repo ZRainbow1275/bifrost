@@ -1,4 +1,4 @@
-# AI Gateway Bridge - 安全说明
+# Bifrost - 安全说明
 
 ## 安全架构
 
@@ -81,7 +81,7 @@
 
 | 频率 | 操作 | 命令 |
 |------|------|------|
-| 每日 | 查看健康检查报告 | `cat /var/log/ai-gateway-bridge/health.json` |
+| 每日 | 查看健康检查报告 | `cat /var/log/bifrost/health.json` |
 | 每周 | 查看 fail2ban 封禁日志 | `fail2ban-client status sshd` |
 | 每周 | 检查 rkhunter 扫描报告 | `cat /var/log/rkhunter.log` |
 | 每月 | 运行 Lynis 安全审计 | `lynis audit system --quick` |

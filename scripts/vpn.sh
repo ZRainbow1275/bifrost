@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# AI Gateway Bridge - Enterprise VPN Module
+# Bifrost - Enterprise VPN Module
 # =============================================================================
 # Description : Deploy and manage enterprise VPN as the first security gate.
 #               Employees MUST connect to VPN before accessing ANY service.
@@ -21,7 +21,7 @@
 #
 # Usage       : source "$(dirname "${BASH_SOURCE[0]}")/vpn.sh"
 #
-# Project     : AI Gateway Bridge
+# Project     : Bifrost
 # License     : MIT
 # =============================================================================
 
@@ -67,7 +67,7 @@ readonly HEADSCALE_PORT=8080
 readonly HEADSCALE_METRICS_PORT=9090
 
 # State
-readonly VPN_STATE_DIR="/etc/ai-gateway-bridge/vpn"
+readonly VPN_STATE_DIR="/etc/bifrost/vpn"
 readonly VPN_STATE_FILE="${VPN_STATE_DIR}/vpn-state"
 readonly VPN_USERS_DIR="${VPN_STATE_DIR}/users"
 readonly VPN_KEYS_DIR="${VPN_STATE_DIR}/keys"
@@ -207,7 +207,7 @@ setup_vpn_network() {
     # ----- Enable IP forwarding -----
     local sysctl_conf="/etc/sysctl.d/99-vpn-forwarding.conf"
     cat > "${sysctl_conf}" <<'SYSCTL'
-# AI Gateway Bridge - VPN IP Forwarding
+# Bifrost - VPN IP Forwarding
 net.ipv4.ip_forward = 1
 net.ipv4.conf.all.forwarding = 1
 
@@ -977,7 +977,7 @@ _create_headscale_user() {
             _vpn_save_state "USER_${username}_PREAUTH_FILE" "${user_dir}/preauth-key.txt"
 
             # Print pre-auth key ONLY to stdout (not to log file) to avoid
-            # persisting secrets in /var/log/ai-gateway-bridge.log.
+            # persisting secrets in /var/log/bifrost.log.
             echo "Pre-auth key created. User should run:"
             echo "  tailscale up --login-server ${server_url} --authkey ${preauth_key}"
         else
@@ -1003,7 +1003,7 @@ _generate_user_setup_guide() {
 
     cat > "${guide_file}" <<GUIDE
 ================================================================================
-AI Gateway Bridge - VPN Setup Guide for: ${username}
+Bifrost - VPN Setup Guide for: ${username}
 ================================================================================
 Generated: $(date -Iseconds)
 
@@ -1137,7 +1137,7 @@ _vpn_update_server_config() {
     mkdir -p /etc/wireguard
 
     cat > "${wg_conf}" <<CONF
-# AI Gateway Bridge - WireGuard Server Configuration
+# Bifrost - WireGuard Server Configuration
 # Auto-generated: $(date -Iseconds)
 
 [Interface]
@@ -1325,7 +1325,7 @@ revoke_vpn_user() {
 # Main VPN deployment orchestrator.
 # Guides the admin through the complete VPN setup process.
 deploy_vpn() {
-    print_banner "AI Gateway Bridge - Enterprise VPN Setup"
+    print_banner "Bifrost - Enterprise VPN Setup"
 
     log_info "This will deploy the enterprise VPN as the FIRST security gate."
     log_info "All employees MUST connect to VPN before accessing ANY service."

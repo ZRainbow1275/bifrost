@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 ###############################################################################
-# AI Gateway Bridge - Diagnostics Module
+# Bifrost - Diagnostics Module
 #
-# Comprehensive diagnostic suite for troubleshooting the AI Gateway Bridge.
+# Comprehensive diagnostic suite for troubleshooting the Bifrost.
 # Checks system health, service status, network connectivity, DNS leaks,
 # speed tests, and GFW detection patterns.
 #
@@ -82,7 +82,7 @@ fi
 # =============================================================================
 # Constants
 # =============================================================================
-REPORT_DIR="/var/log/ai-gateway-bridge"
+REPORT_DIR="/var/log/bifrost"
 PROXY_SOCKS="socks5://127.0.0.1:10808"
 PROXY_HTTP="http://127.0.0.1:10809"
 
@@ -256,7 +256,7 @@ _diag_system() {
 ###############################################################################
 # _diag_services()
 #
-# Check status of all AI Gateway Bridge services.
+# Check status of all Bifrost services.
 ###############################################################################
 _diag_services() {
     log_step "Service Status"
@@ -814,7 +814,7 @@ run_full_diagnostic() {
 
     echo ""
     echo -e "${BOLD}${BLUE}============================================${NC}"
-    echo -e "${BOLD}${BLUE}  AI Gateway Bridge - Full Diagnostic       ${NC}"
+    echo -e "${BOLD}${BLUE}  Bifrost - Full Diagnostic       ${NC}"
     echo -e "${BOLD}${BLUE}============================================${NC}"
     echo -e "  Timestamp: ${DIAG_TIMESTAMP}"
     echo ""
@@ -848,7 +848,7 @@ run_full_diagnostic() {
 # generate_diagnostic_report()
 #
 # Generate a comprehensive JSON diagnostic report combining all checks.
-# The report is saved to /var/log/ai-gateway-bridge/diagnostic-report.json.
+# The report is saved to /var/log/bifrost/diagnostic-report.json.
 ###############################################################################
 generate_diagnostic_report() {
     log_step "Generating diagnostic report..."
@@ -979,7 +979,7 @@ manage_diagnostics() {
     while true; do
         echo ""
         echo -e "${BLUE}============================================${NC}"
-        echo -e "${BLUE}  AI Gateway Bridge - Diagnostics           ${NC}"
+        echo -e "${BLUE}  Bifrost - Diagnostics           ${NC}"
         echo -e "${BLUE}============================================${NC}"
         echo ""
         echo "  1) Run full diagnostic"
@@ -1033,7 +1033,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             generate_diagnostic_report
             ;;
         help|--help|-h)
-            echo "AI Gateway Bridge - Diagnostics"
+            echo "Bifrost - Diagnostics"
             echo ""
             echo "Usage:"
             echo "  $0              # Interactive menu"

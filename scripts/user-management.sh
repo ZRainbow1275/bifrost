@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ###############################################################################
-# AI Gateway Bridge - User Management Module
+# Bifrost - User Management Module
 #
 # Manages user access for both VPN (Xray proxy) and API gateway (New API).
 # Provides user creation with credentials, access revocation, listing, and
@@ -84,13 +84,13 @@ fi
 # =============================================================================
 # Constants
 # =============================================================================
-USER_REGISTRY_DIR="/etc/ai-gateway-bridge/users"
-USER_REGISTRY_FILE="/etc/ai-gateway-bridge/users/registry.conf"
-USER_GUIDES_DIR="/etc/ai-gateway-bridge/users/guides"
+USER_REGISTRY_DIR="/etc/bifrost/users"
+USER_REGISTRY_FILE="/etc/bifrost/users/registry.conf"
+USER_GUIDES_DIR="/etc/bifrost/users/guides"
 
 XRAY_CONFIG="/usr/local/etc/xray/config.json"
 NEW_API_BASE_URL="http://127.0.0.1:3000"
-NEW_API_ADMIN_TOKEN_FILE="/etc/ai-gateway-bridge/.new-api-admin-token"
+NEW_API_ADMIN_TOKEN_FILE="/etc/bifrost/.new-api-admin-token"
 
 # Default quota (in USD) for new users -- maps to New API quota system
 DEFAULT_QUOTA=100
@@ -110,7 +110,7 @@ _ensure_user_dirs() {
 
     if [[ ! -f "${USER_REGISTRY_FILE}" ]]; then
         {
-            echo "# AI Gateway Bridge - User Registry"
+            echo "# Bifrost - User Registry"
             echo "# Format: USERNAME|UUID|EMAIL|STATUS|API_TOKEN_ID|CREATED|DISABLED"
             echo "#"
         } > "${USER_REGISTRY_FILE}"
@@ -541,7 +541,7 @@ create_user() {
             if declare -f create_vpn_user &>/dev/null; then
                 create_vpn_user "${username}" || log_warn "WireGuard peer creation failed (non-fatal)."
                 # Check if WireGuard config was generated
-                local vpn_users_dir="/etc/ai-gateway-bridge/vpn/users"
+                local vpn_users_dir="/etc/bifrost/vpn/users"
                 if [[ -f "${vpn_users_dir}/${username}/wg-${username}.conf" ]]; then
                     wg_config_file="${vpn_users_dir}/${username}/wg-${username}.conf"
                     log_success "WireGuard config: ${wg_config_file}"
@@ -584,7 +584,7 @@ create_user() {
     # Save credentials to a secure per-user file
     local user_creds_file="${USER_REGISTRY_DIR}/${username}.credentials"
     {
-        echo "# AI Gateway Bridge - User Credentials"
+        echo "# Bifrost - User Credentials"
         echo "# User: ${username}"
         echo "# Created: ${created_date}"
         echo "#"
@@ -869,7 +869,7 @@ _generate_user_guide() {
     # Check if WireGuard VPN is deployed and user has a config
     local vpn_deployed=false
     local wg_config_file=""
-    local vpn_users_dir="/etc/ai-gateway-bridge/vpn/users"
+    local vpn_users_dir="/etc/bifrost/vpn/users"
     if systemctl is-active --quiet wg-quick@wg0 2>/dev/null || \
        [[ -f /etc/wireguard/wg0.conf ]]; then
         vpn_deployed=true
@@ -891,9 +891,9 @@ _generate_user_guide() {
     local guide_file="${USER_GUIDES_DIR}/${username}-guide.md"
 
     cat > "${guide_file}" <<GUIDE_EOF
-# AI Gateway Bridge - User Onboarding Guide
+# Bifrost - User Onboarding Guide
 
-Welcome, **${username}**! This guide helps you connect to the AI Gateway Bridge.
+Welcome, **${username}**! This guide helps you connect to the Bifrost.
 
 ---
 
@@ -1085,7 +1085,7 @@ Contact your system administrator for:
 
 ---
 
-*Generated on $(date '+%Y-%m-%d %H:%M:%S') by AI Gateway Bridge*
+*Generated on $(date '+%Y-%m-%d %H:%M:%S') by Bifrost*
 GUIDE_EOF
 
     chmod 640 "${guide_file}"
@@ -1154,7 +1154,7 @@ manage_users() {
     while true; do
         echo ""
         echo -e "${BLUE}============================================${NC}"
-        echo -e "${BLUE}  AI Gateway Bridge - User Management       ${NC}"
+        echo -e "${BLUE}  Bifrost - User Management       ${NC}"
         echo -e "${BLUE}============================================${NC}"
         echo ""
         echo "  1) Create new user"
@@ -1199,7 +1199,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             export_user_guide "${2:-}"
             ;;
         help|--help|-h)
-            echo "AI Gateway Bridge - User Management"
+            echo "Bifrost - User Management"
             echo ""
             echo "Usage:"
             echo "  $0                      # Interactive menu"

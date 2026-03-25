@@ -1,5 +1,5 @@
 # =============================================================================
-# AI Gateway Bridge - Headscale Configuration
+# Bifrost - Headscale Configuration
 # =============================================================================
 # Headscale: Self-hosted Tailscale control server (v0.23.x).
 # Provides: Mesh VPN, ACL, DERP relay, user namespaces.
@@ -57,7 +57,7 @@ derp:
     enabled: true
     region_id: 999
     region_code: "ai-gw"
-    region_name: "AI Gateway Bridge DERP"
+    region_name: "Bifrost DERP"
     stun_listen_addr: "0.0.0.0:3478"
     # Note: private_key_path removed in 0.23.x; DERP reuses the noise key
     # Automatically add this embedded DERP to the list

@@ -1,5 +1,5 @@
 # ==============================================================================
-# AI Gateway Bridge - Reality Destination Pool
+# Bifrost - Reality Destination Pool
 # ==============================================================================
 # Format: host:port  # description
 #

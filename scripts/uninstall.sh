@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 ###############################################################################
-# AI Gateway Bridge - Uninstall Script
+# Bifrost - Uninstall Script
 #
-# Completely removes all AI Gateway Bridge components from the server.
+# Completely removes all Bifrost components from the server.
 # Includes triple confirmation for safety.
 #
 # Components removed:
@@ -84,8 +84,8 @@ fi
 : "${NC:=${COLOR_RESET:-\033[0m}}"
 
 # Paths (use := to avoid overwriting readonly vars set by install.sh)
-: "${INSTALL_DIR:=/opt/ai-gateway-bridge}"
-: "${LOG_DIR:=/var/log/ai-gateway-bridge}"
+: "${INSTALL_DIR:=/opt/bifrost}"
+: "${LOG_DIR:=/var/log/bifrost}"
 
 # Track what was removed for final summary
 declare -a REMOVED_ITEMS=()
@@ -102,10 +102,10 @@ add_failed()   { FAILED_ITEMS+=("$1"); }
 confirm_uninstall() {
     echo ""
     echo -e "${RED}${BOLD}================================================================${NC}"
-    echo -e "${RED}${BOLD}  WARNING: AI Gateway Bridge Complete Uninstall${NC}"
+    echo -e "${RED}${BOLD}  WARNING: Bifrost Complete Uninstall${NC}"
     echo -e "${RED}${BOLD}================================================================${NC}"
     echo ""
-    echo "This will permanently remove ALL AI Gateway Bridge components:"
+    echo "This will permanently remove ALL Bifrost components:"
     echo ""
     echo "  - Xray proxy service (client/server)"
     echo "  - Caddy web server and configuration"
@@ -113,8 +113,8 @@ confirm_uninstall() {
     echo "  - 3x-ui management panel"
     echo "  - Netdata monitoring agent"
     echo "  - fail2ban custom configuration"
-    echo "  - All configuration files in /opt/ai-gateway-bridge/"
-    echo "  - All log files in /var/log/ai-gateway-bridge/"
+    echo "  - All configuration files in /opt/bifrost/"
+    echo "  - All log files in /var/log/bifrost/"
     echo "  - All related cron jobs"
     echo "  - Kernel hardening sysctl parameters"
     echo ""
@@ -123,7 +123,7 @@ confirm_uninstall() {
 
     # Confirmation 1
     echo -e "${RED}Confirmation 1/3:${NC}"
-    if ! confirm_action "Are you sure you want to uninstall AI Gateway Bridge?"; then
+    if ! confirm_action "Are you sure you want to uninstall Bifrost?"; then
         log_info "Uninstall cancelled at step 1."
         exit 0
     fi
@@ -227,7 +227,7 @@ remove_docker_resources() {
     done
 
     # Remove docker-compose files
-    local compose_dirs=("/opt/new-api" "/opt/ai-gateway-bridge/new-api" "${INSTALL_DIR}/docker")
+    local compose_dirs=("/opt/new-api" "/opt/bifrost/new-api" "${INSTALL_DIR}/docker")
     for dir in ${compose_dirs[@]+"${compose_dirs[@]}"}; do
         if [[ -d "${dir}" ]]; then
             log_info "Removing compose directory: ${dir}..."
@@ -344,7 +344,7 @@ remove_configs() {
 
     # fail2ban custom configs (only remove our additions, not the whole package)
     if [[ -f /etc/fail2ban/jail.local ]]; then
-        if grep -q "ai-gateway-bridge" /etc/fail2ban/jail.local 2>/dev/null; then
+        if grep -q "bifrost" /etc/fail2ban/jail.local 2>/dev/null; then
             log_info "Removing custom fail2ban jail.local..."
             rm -f /etc/fail2ban/jail.local
             add_removed "fail2ban jail.local (custom)"
@@ -366,9 +366,9 @@ remove_configs() {
     fi
 
     # Logrotate config
-    if [[ -f /etc/logrotate.d/ai-gateway-bridge ]]; then
+    if [[ -f /etc/logrotate.d/bifrost ]]; then
         log_info "Removing logrotate configuration..."
-        rm -f /etc/logrotate.d/ai-gateway-bridge
+        rm -f /etc/logrotate.d/bifrost
         add_removed "Logrotate config"
     fi
 
@@ -425,7 +425,7 @@ remove_cron_jobs() {
     log_step "[6/9] Removing cron jobs..."
 
     local cron_markers=(
-        "ai-gateway-bridge"
+        "bifrost"
         "health-check"
         "rkhunter"
     )
@@ -449,7 +449,7 @@ remove_cron_jobs() {
             echo "${new_crontab}" | crontab -
             log_info "Cron jobs removed."
         else
-            add_skipped "No AI Gateway Bridge cron jobs found"
+            add_skipped "No Bifrost cron jobs found"
         fi
     else
         add_skipped "No crontab exists"
@@ -477,8 +477,8 @@ restore_ssh_config() {
     done
 
     # Also check for our specific backup
-    if [[ -f "${ssh_config}.bak.ai-gateway-bridge" ]]; then
-        latest_backup="${ssh_config}.bak.ai-gateway-bridge"
+    if [[ -f "${ssh_config}.bak.bifrost" ]]; then
+        latest_backup="${ssh_config}.bak.bifrost"
     fi
 
     if [[ -n "${latest_backup}" && -f "${latest_backup}" ]]; then
@@ -493,7 +493,7 @@ restore_ssh_config() {
             log_info "SSH configuration restored."
 
             # Clean up backups
-            rm -f "${ssh_config}".bak.ai-gateway-bridge 2>/dev/null || true
+            rm -f "${ssh_config}".bak.bifrost 2>/dev/null || true
         else
             add_skipped "SSH config restore (user declined)"
         fi
@@ -514,15 +514,15 @@ restore_firewall() {
         log_info "Detected ufw firewall."
 
         # Check for backup
-        if [[ -f "/etc/ufw/ufw.conf.bak.ai-gateway-bridge" ]]; then
+        if [[ -f "/etc/ufw/ufw.conf.bak.bifrost" ]]; then
             if confirm_action "Restore original ufw rules from backup?"; then
                 ufw --force reset 2>/dev/null || true
                 # Restore backed up rules
-                if [[ -f "/etc/ufw/user.rules.bak.ai-gateway-bridge" ]]; then
-                    cp "/etc/ufw/user.rules.bak.ai-gateway-bridge" "/etc/ufw/user.rules"
+                if [[ -f "/etc/ufw/user.rules.bak.bifrost" ]]; then
+                    cp "/etc/ufw/user.rules.bak.bifrost" "/etc/ufw/user.rules"
                 fi
-                if [[ -f "/etc/ufw/user6.rules.bak.ai-gateway-bridge" ]]; then
-                    cp "/etc/ufw/user6.rules.bak.ai-gateway-bridge" "/etc/ufw/user6.rules"
+                if [[ -f "/etc/ufw/user6.rules.bak.bifrost" ]]; then
+                    cp "/etc/ufw/user6.rules.bak.bifrost" "/etc/ufw/user6.rules"
                 fi
                 ufw --force enable 2>/dev/null || true
                 add_removed "UFW rules restored from backup"
@@ -547,9 +547,9 @@ restore_firewall() {
     elif command_exists firewall-cmd; then
         log_info "Detected firewalld."
 
-        if [[ -d "/etc/firewalld/zones.bak.ai-gateway-bridge" ]]; then
+        if [[ -d "/etc/firewalld/zones.bak.bifrost" ]]; then
             if confirm_action "Restore original firewalld zones from backup?"; then
-                cp -r /etc/firewalld/zones.bak.ai-gateway-bridge/* /etc/firewalld/zones/ 2>/dev/null || true
+                cp -r /etc/firewalld/zones.bak.bifrost/* /etc/firewalld/zones/ 2>/dev/null || true
                 firewall-cmd --reload 2>/dev/null || true
                 add_removed "Firewalld zones restored from backup"
             else
@@ -580,7 +580,7 @@ print_summary() {
     log_step "[9/9] Uninstall Summary"
     echo ""
     echo "============================================"
-    echo "  AI Gateway Bridge - Uninstall Complete"
+    echo "  Bifrost - Uninstall Complete"
     echo "============================================"
     echo ""
 
@@ -612,7 +612,7 @@ print_summary() {
     echo ""
 
     if [[ ${#FAILED_ITEMS[@]} -eq 0 ]]; then
-        log_info "AI Gateway Bridge has been completely uninstalled."
+        log_info "Bifrost has been completely uninstalled."
     else
         log_warn "Uninstall completed with ${#FAILED_ITEMS[@]} failure(s). Check items above."
     fi
@@ -638,7 +638,7 @@ uninstall_all() {
     fi
 
     echo ""
-    echo -e "${BLUE}${BOLD}AI Gateway Bridge - Uninstall Script${NC}"
+    echo -e "${BLUE}${BOLD}Bifrost - Uninstall Script${NC}"
     echo ""
 
     # Triple confirmation

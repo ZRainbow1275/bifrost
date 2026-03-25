@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# AI Gateway Bridge - Shared Utility Library
+# Bifrost - Shared Utility Library
 # =============================================================================
 # Description : Common functions shared across all deployment scripts.
 #               Provides logging, OS detection, package management, Docker
@@ -9,7 +9,7 @@
 #
 # Usage       : source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 #
-# Project     : AI Gateway Bridge (国内外 AI 服务桥接一键部署方案)
+# Project     : Bifrost (国内外 AI 服务桥接一键部署方案)
 # License     : MIT
 # =============================================================================
 
@@ -31,12 +31,12 @@ readonly _COMMON_SH_LOADED=1
 readonly _COMMON_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly PROJECT_ROOT="$(cd "${_COMMON_SCRIPT_DIR}/.." && pwd)"
 
-readonly LOG_FILE="/var/log/ai-gateway-bridge.log"
-readonly BACKUP_DIR="/var/backups/ai-gateway-bridge"
+readonly LOG_FILE="/var/log/bifrost.log"
+readonly BACKUP_DIR="/var/backups/bifrost"
 
 # Ensure the log file directory exists; fall back to /tmp if not writable.
 if ! mkdir -p "$(dirname "${LOG_FILE}")" 2>/dev/null; then
-    _LOG_FILE_FALLBACK="/tmp/ai-gateway-bridge.log"
+    _LOG_FILE_FALLBACK="/tmp/bifrost.log"
 else
     _LOG_FILE_FALLBACK="${LOG_FILE}"
 fi
@@ -84,7 +84,7 @@ readonly COLOR_SUCCESS="${COLOR_GREEN}"
 # Print a large banner with project name.
 # Usage: print_banner "Title Text"
 print_banner() {
-    local title="${1:-AI Gateway Bridge}"
+    local title="${1:-Bifrost}"
     local border
     border="$(printf '=%.0s' {1..62})"
     echo ""

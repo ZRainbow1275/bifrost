@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 ###############################################################################
-# AI Gateway Bridge - Component Update Module
+# Bifrost - Component Update Module
 #
-# Safely updates all AI Gateway Bridge components to their latest versions.
+# Safely updates all Bifrost components to their latest versions.
 #
 # Functions:
 #   update_xray()      - Update Xray-core to latest release
@@ -591,7 +591,7 @@ update_new_api() {
 
     # Check if docker-compose is available and a compose file exists
     local compose_file=""
-    for dir in "/opt/new-api" "/opt/ai-gateway-bridge/new-api" "/opt/ai-gateway-bridge/docker"; do
+    for dir in "/opt/new-api" "/opt/bifrost/new-api" "/opt/bifrost/docker"; do
         if [[ -f "${dir}/docker-compose.yml" ]]; then
             compose_file="${dir}/docker-compose.yml"
             break
@@ -966,7 +966,7 @@ check_updates() {
 # Each update step catches failures and continues to the next.
 ###############################################################################
 update_all() {
-    log_step "Updating all AI Gateway Bridge components..."
+    log_step "Updating all Bifrost components..."
     echo ""
     log_info "Update order: GeoIP -> Xray -> Mihomo -> New API"
     echo ""
@@ -1053,7 +1053,7 @@ manage_updates() {
     while true; do
         echo ""
         echo -e "${BLUE}============================================${NC}"
-        echo -e "${BLUE}  AI Gateway Bridge - Update Manager        ${NC}"
+        echo -e "${BLUE}  Bifrost - Update Manager        ${NC}"
         echo -e "${BLUE}============================================${NC}"
         echo ""
         echo "  1) Check for updates (dry run)"
@@ -1108,7 +1108,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             update_all
             ;;
         help|--help|-h)
-            echo "AI Gateway Bridge - Update Manager"
+            echo "Bifrost - Update Manager"
             echo ""
             echo "Usage:"
             echo "  $0              # Interactive menu"

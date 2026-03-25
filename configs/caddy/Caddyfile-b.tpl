@@ -1,5 +1,5 @@
 # =============================================================================
-# AI Gateway Bridge - Caddy Configuration for Server B (Overseas)
+# Bifrost - Caddy Configuration for Server B (Overseas)
 #
 # This Caddyfile configures Caddy on the overseas server:
 #   1. Reverse proxy to 3x-ui management panel

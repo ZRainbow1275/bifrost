@@ -1,13 +1,14 @@
 <p align="center">
-  <h1 align="center">Bifrost</h1>
-  <p align="center">国内外 AI 服务桥接 · 一键部署方案</p>
-  <p align="center">
-    <a href="#快速开始">快速开始</a> ·
-    <a href="docs/USAGE.md">使用指南</a> ·
-    <a href="docs/VPN-SETUP.md">VPN 配置</a> ·
-    <a href="docs/SECURITY.md">安全说明</a> ·
-    <a href="docs/TROUBLESHOOTING.md">故障排查</a>
-  </p>
+  <img src="bifrost.svg" width="160" height="160" alt="Bifrost">
+</p>
+<h1 align="center">Bifrost</h1>
+<p align="center">国内外 AI 服务桥接 · 一键部署方案</p>
+<p align="center">
+  <a href="#快速开始">快速开始</a> ·
+  <a href="docs/USAGE.md">使用指南</a> ·
+  <a href="docs/VPN-SETUP.md">VPN 配置</a> ·
+  <a href="docs/SECURITY.md">安全说明</a> ·
+  <a href="docs/TROUBLESHOOTING.md">故障排查</a>
 </p>
 
 ---
@@ -61,9 +62,31 @@ Server B · 海外
 
 ### 前置条件
 
-- **Server A**（国内）：Ubuntu 20.04+，2C4G，公网 IP
-- **Server B**（海外）：Ubuntu 20.04+，1C1G，公网 IP
-- 一个域名（用于 TLS 证书）
+**Server A（国内）**
+
+| 项目 | 最低要求 |
+|------|----------|
+| OS | Ubuntu 20.04+ / Debian 11+ |
+| CPU | 2 核 |
+| RAM | 4 GB |
+| 存储 | 40 GB SSD |
+| 网络 | 公网 IP，带宽 ≥ 10 Mbps |
+| 推荐供应商 | 腾讯云、阿里云、华为云 |
+
+**Server B（海外）**
+
+| 项目 | 最低要求 |
+|------|----------|
+| OS | Ubuntu 20.04+ / Debian 11+ |
+| CPU | 1 核 |
+| RAM | 1 GB |
+| 存储 | 20 GB SSD |
+| 网络 | 公网 IP，带宽 ≥ 30 Mbps |
+| 推荐供应商 | Bandwagon、RackNerd、DMIT |
+
+**其他**
+
+- 一个域名（用于 TLS 证书与流量伪装）
 
 ### 一键安装
 
@@ -161,7 +184,18 @@ Claude · GPT · Gemini · DeepSeek · Mistral · Grok · Qwen · Llama · Coher
 
 ## 许可证
 
-MIT License
+本项目使用 [GPL-3.0](LICENSE) 许可证。
+
+## 免责声明
+
+本项目仅供学习和合法用途。使用者应确保其使用符合所在地区的法律法规。
+
+- 作者不对因使用本项目造成的任何直接或间接损失承担责任
+- 作者不对服务器安全事件、数据丢失或服务中断负责
+- 作者没有义务提供技术支持、故障修复或问题回复
+- 使用者须自行承担部署和运维风险
+
+使用本项目即表示您同意上述条款。
 
 ---
 

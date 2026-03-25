@@ -1,5 +1,5 @@
 # =============================================================================
-# AI Gateway Bridge - Caddy Configuration for Server A (China / Domestic)
+# Bifrost - Caddy Configuration for Server A (China / Domestic)
 #
 # This Caddyfile configures Caddy as a reverse proxy on the domestic server:
 #   1. Reverse proxy to New API gateway (Docker container)

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 ###############################################################################
-# AI Gateway Bridge - Standalone Health Check Script
+# Bifrost - Standalone Health Check Script
 #
 # This script is called by cron every 5 minutes to monitor the health of
-# all AI Gateway Bridge components. It performs the following checks:
+# all Bifrost components. It performs the following checks:
 #
 #   1. Xray service status
 #   2. Tunnel connectivity (curl through proxy to api.anthropic.com)
@@ -15,11 +15,11 @@
 #   8. Log file sizes
 #
 # Output:
-#   - JSON status report: /var/log/ai-gateway-bridge/health.json
-#   - Alerts on failure: /var/log/ai-gateway-bridge/alerts.log
+#   - JSON status report: /var/log/bifrost/health.json
+#   - Alerts on failure: /var/log/bifrost/alerts.log
 #
 # Usage:
-#   /opt/ai-gateway-bridge/health-check.sh
+#   /opt/bifrost/health-check.sh
 #   (typically invoked by cron, not manually)
 ###############################################################################
 
@@ -28,7 +28,7 @@ set -euo pipefail
 # =============================================================================
 # Configuration
 # =============================================================================
-LOG_DIR="/var/log/ai-gateway-bridge"
+LOG_DIR="/var/log/bifrost"
 HEALTH_JSON="${LOG_DIR}/health.json"
 ALERTS_LOG="${LOG_DIR}/alerts.log"
 PROXY_SOCKS="socks5://127.0.0.1:10808"

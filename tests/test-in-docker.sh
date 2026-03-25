@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# AI Gateway Bridge - Docker 模拟测试
+# Bifrost - Docker 模拟测试
 # 在 Ubuntu 容器中测试脚本的安装逻辑（不含实际网络穿越）
 #
 # 用法:
@@ -318,7 +318,7 @@ test_in_container() {
 
     # Start container
     docker run -d --name "$CONTAINER_NAME" \
-        -v "${SCRIPT_DIR}:/opt/ai-gateway-bridge:ro" \
+        -v "${SCRIPT_DIR}:/opt/bifrost:ro" \
         "$DOCKER_IMAGE" \
         tail -f /dev/null
 
@@ -327,7 +327,7 @@ test_in_container() {
     docker exec "$CONTAINER_NAME" apt-get install -y -qq bash curl >/dev/null 2>&1
 
     # Test 1: bash -n in container
-    if docker exec "$CONTAINER_NAME" bash -n /opt/ai-gateway-bridge/install.sh; then
+    if docker exec "$CONTAINER_NAME" bash -n /opt/bifrost/install.sh; then
         record_pass "容器内 bash -n: install.sh"
     else
         record_fail "容器内 bash -n: install.sh"
@@ -335,7 +335,7 @@ test_in_container() {
 
     # Test 2: Source common.sh and test detect_system
     if docker exec "$CONTAINER_NAME" bash -c '
-        source /opt/ai-gateway-bridge/scripts/common.sh 2>/dev/null
+        source /opt/bifrost/scripts/common.sh 2>/dev/null
         detect_system
         echo "OS_ID=${OS_ID:-unknown}"
         [[ -n "${OS_ID:-}" ]]
@@ -346,14 +346,14 @@ test_in_container() {
     fi
 
     # Test 3: show_help
-    if docker exec "$CONTAINER_NAME" bash /opt/ai-gateway-bridge/install.sh --help 2>/dev/null | grep -q "AI Gateway Bridge"; then
+    if docker exec "$CONTAINER_NAME" bash /opt/bifrost/install.sh --help 2>/dev/null | grep -q "Bifrost"; then
         record_pass "容器内 --help"
     else
         record_fail "容器内 --help"
     fi
 
     # Test 4: --version
-    if docker exec "$CONTAINER_NAME" bash /opt/ai-gateway-bridge/install.sh --version 2>/dev/null | grep -q "2.0.0"; then
+    if docker exec "$CONTAINER_NAME" bash /opt/bifrost/install.sh --version 2>/dev/null | grep -q "2.0.0"; then
         record_pass "容器内 --version (2.0.0)"
     else
         record_fail "容器内 --version"
@@ -366,7 +366,7 @@ test_in_container() {
 # --- Run tests ---
 main() {
     echo "============================================"
-    echo "  AI Gateway Bridge - 测试套件"
+    echo "  Bifrost - 测试套件"
     echo "  $(date '+%Y-%m-%d %H:%M:%S')"
     echo "============================================"
     echo ""

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# AI Gateway Bridge - Cloud Agent Cleanup & DD Reinstall Module
+# Bifrost - Cloud Agent Cleanup & DD Reinstall Module
 # =============================================================================
 # Description : Detects cloud provider, identifies and removes pre-installed
 #               monitoring agents / security daemons / telemetry, and
@@ -15,7 +15,7 @@
 #               Linode, OVH, Hetzner, Bandwagon, DMIT, RackNerd).
 #
 # Database    : configs/cloud-agents.conf
-# Project     : AI Gateway Bridge (国内外 AI 服务桥接一键部署方案)
+# Project     : Bifrost (国内外 AI 服务桥接一键部署方案)
 # License     : MIT
 # =============================================================================
 

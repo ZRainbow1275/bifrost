@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# AI Gateway Bridge - VPN Network Isolation Rules (iptables)
+# Bifrost - VPN Network Isolation Rules (iptables)
 # =============================================================================
 # This script configures iptables rules to enforce VPN-only access to
 # internal services. It is called by vpn.sh:setup_vpn_firewall().

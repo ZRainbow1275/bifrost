@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <radialGradient id="bgGlow" cx="50%" cy="50%" r="65%">
+      <stop offset="0%" stop-color="#1E2030"/>
+      <stop offset="100%" stop-color="#090B10"/>
+    </radialGradient>
+
+    <linearGradient id="rainbow" x1="100" y1="0" x2="412" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#00F2FE"/> <stop offset="30%" stop-color="#4FACFE"/> <stop offset="60%" stop-color="#A18CD1"/> <stop offset="85%" stop-color="#FBC2EB"/> <stop offset="100%" stop-color="#FFAA85"/> </linearGradient>
+
+    <filter id="glowHeavy" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="16" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+    <filter id="glowLight" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#FFFFFF" stroke-opacity="0.04" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="url(#bgGlow)"/>
+  <rect width="512" height="512" rx="112" fill="url(#grid)"/>
+  
+  <rect x="2" y="2" width="508" height="508" rx="110" fill="none" stroke="#FFFFFF" stroke-opacity="0.1" stroke-width="2"/>
+
+  <g transform="translate(0, -24)">
+
+    <circle cx="120" cy="360" r="48" fill="#00F2FE" opacity="0.15" filter="url(#glowHeavy)"/>
+    <circle cx="392" cy="360" r="48" fill="#FBC2EB" opacity="0.15" filter="url(#glowHeavy)"/>
+
+    <path d="M 120 340 A 136 180 0 0 1 392 340" fill="none" stroke="url(#rainbow)" stroke-width="24" opacity="0.15" filter="url(#glowHeavy)"/>
+
+    <g fill="none" stroke-linecap="round">
+      <path d="M 88 340 A 168 220 0 0 1 424 340" stroke="url(#rainbow)" stroke-width="3" opacity="0.5"/>
+      <path d="M 88 340 A 168 220 0 0 1 424 340" stroke="#FFFFFF" stroke-width="3" stroke-dasharray="8 32" opacity="0.8">
+        <animate attributeName="stroke-dashoffset" from="120" to="0" dur="2s" repeatCount="indefinite"/>
+      </path>
+      
+      <path d="M 104 340 A 152 200 0 0 1 408 340" stroke="url(#rainbow)" stroke-width="6" opacity="0.8" filter="url(#glowLight)"/>
+      
+      <path d="M 120 340 A 136 180 0 0 1 392 340" stroke="url(#rainbow)" stroke-width="12" opacity="1" filter="url(#glowLight)"/>
+      <path d="M 120 340 A 136 180 0 0 1 392 340" stroke="#FFFFFF" stroke-width="4" stroke-dasharray="4 60 16 80 8 40" opacity="0.9">
+        <animate attributeName="stroke-dashoffset" from="300" to="0" dur="1.5s" repeatCount="indefinite"/>
+      </path>
+
+      <path d="M 136 340 A 120 160 0 0 1 376 340" stroke="url(#rainbow)" stroke-width="4" opacity="0.7"/>
+
+      <path d="M 152 340 A 104 140 0 0 1 360 340" stroke="url(#rainbow)" stroke-width="2" stroke-dasharray="12 12" opacity="0.5">
+         <animate attributeName="stroke-dashoffset" from="48" to="0" dur="3s" repeatCount="indefinite"/>
+      </path>
+    </g>
+
+    <g transform="translate(72, 308)">
+      <rect width="96" height="88" rx="16" fill="#0D1322" stroke="#00F2FE" stroke-width="2" opacity="0.9"/>
+      <rect x="2" y="2" width="92" height="84" rx="14" fill="none" stroke="#FFFFFF" stroke-opacity="0.1"/>
+      
+      <line x1="0" y1="24" x2="96" y2="24" stroke="#00F2FE" stroke-width="2" opacity="0.4"/>
+      <circle cx="16" cy="12" r="3" fill="#FF5F56"/>
+      <circle cx="28" cy="12" r="3" fill="#FFBD2E"/>
+      <circle cx="40" cy="12" r="3" fill="#27C93F"/>
+      
+      <path d="M 16 44 L 28 54 L 16 64" fill="none" stroke="#00F2FE" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" filter="url(#glowLight)"/>
+      <line x1="34" y1="64" x2="48" y2="64" stroke="#00F2FE" stroke-width="3" stroke-linecap="round" filter="url(#glowLight)">
+        <animate attributeName="opacity" values="1;0;1" dur="1.2s" repeatCount="indefinite"/>
+      </line>
+      
+      <circle cx="76" cy="74" r="2.5" fill="#10B981" filter="url(#glowLight)"/>
+      <circle cx="84" cy="74" r="2.5" fill="#10B981"/>
+    </g>
+
+    <g stroke="#00F2FE" stroke-width="2" opacity="0.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M 120 396 L 120 440"/>
+      <path d="M 100 396 L 100 410 L 80 430 L 80 440"/>
+      <path d="M 140 396 L 140 410 L 160 430 L 160 440"/>
+    </g>
+    <g fill="#00F2FE" opacity="0.8">
+      <circle cx="80" cy="440" r="3.5"/>
+      <circle cx="120" cy="440" r="4"/>
+      <circle cx="160" cy="440" r="3.5"/>
+    </g>
+
+
+    <g transform="translate(344, 308)">
+      <rect width="96" height="88" rx="16" fill="#1A0B14" stroke="#FBC2EB" stroke-width="2" opacity="0.9"/>
+      <rect x="2" y="2" width="92" height="84" rx="14" fill="none" stroke="#FFFFFF" stroke-opacity="0.1"/>
+      
+      <line x1="0" y1="24" x2="96" y2="24" stroke="#FBC2EB" stroke-width="2" opacity="0.4"/>
+      <circle cx="56" cy="12" r="3" fill="#FBC2EB" opacity="0.4"/>
+      <circle cx="68" cy="12" r="3" fill="#FBC2EB" opacity="0.6"/>
+      <circle cx="80" cy="12" r="3" fill="#FBC2EB" filter="url(#glowLight)"/>
+      
+      <path d="M 48 34 Q 48 54 68 54 Q 48 54 48 74 Q 48 54 28 54 Q 48 54 48 34 Z" fill="#FBC2EB" filter="url(#glowLight)"/>
+      <path d="M 48 40 Q 48 54 62 54 Q 48 54 48 68 Q 48 54 34 54 Q 48 54 48 40 Z" fill="#FFFFFF">
+        <animate attributeName="opacity" values="1;0.7;1" dur="2s" repeatCount="indefinite"/>
+      </path>
+      
+      <circle cx="24" cy="40" r="1.5" fill="#FFAA85" filter="url(#glowLight)"/>
+      <circle cx="72" cy="70" r="2" fill="#FFAA85" filter="url(#glowLight)"/>
+      
+      <circle cx="12" cy="74" r="2.5" fill="#10B981" filter="url(#glowLight)"/>
+      <circle cx="20" cy="74" r="2.5" fill="#10B981"/>
+    </g>
+
+    <g stroke="#FBC2EB" stroke-width="2" opacity="0.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M 392 396 L 392 440"/>
+      <path d="M 372 396 L 372 410 L 352 430 L 352 440"/>
+      <path d="M 412 396 L 412 410 L 432 430 L 432 440"/>
+    </g>
+    <g fill="#FBC2EB" opacity="0.8">
+      <polygon points="352,436 356,440 352,444 348,440"/>
+      <polygon points="392,436 396,440 392,444 388,440"/>
+      <polygon points="432,436 436,440 432,444 428,440"/>
+    </g>
+
+    <text x="256" y="482" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="28" font-weight="800" fill="#FFFFFF" letter-spacing="4" text-anchor="middle">
+      bifrost<tspan fill="#00F2FE">_</tspan>
+    </text>
+  </g>
+</svg>

@@ -1,5 +1,5 @@
 # =============================================================================
-# Mihomo (Meta) Configuration Template - AI Gateway Bridge
+# Mihomo (Meta) Configuration Template - Bifrost
 # =============================================================================
 # Architecture:
 #   Docker (New API) -> HTTP_PROXY -> Mihomo:{{MIHOMO_MIXED_PORT}}

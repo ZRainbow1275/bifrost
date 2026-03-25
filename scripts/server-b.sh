@@ -2,7 +2,7 @@
 # ==============================================================================
 # server-b.sh - Overseas Server (Server B) Deployment Module
 # ==============================================================================
-# Part of: AI Gateway Bridge
+# Part of: Bifrost
 # Purpose: Deploy Xray Server (VLESS+Reality), 3x-ui panel, Hysteria 2 (backup),
 #          Caddy reverse proxy, whitelist routing, and BBR optimization on the
 #          overseas server that provides direct access to AI API endpoints.
@@ -41,7 +41,7 @@ readonly CADDY_DATA_DIR="/var/lib/caddy"
 readonly CADDY_WEB_ROOT="/var/www/html"
 
 readonly CONNECTION_INFO_FILE="/root/ai-gateway-connection.txt"
-readonly DEPLOY_STATE_DIR="/root/.ai-gateway-bridge"
+readonly DEPLOY_STATE_DIR="/root/.bifrost"
 
 readonly XRAY_INSTALL_SCRIPT_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 readonly HYSTERIA_INSTALL_URL="https://get.hy2.sh/"
@@ -450,7 +450,7 @@ SERVICE_EOF
     log_info "Saving connection info to ${CONNECTION_INFO_FILE}..."
     cat > "${CONNECTION_INFO_FILE}" <<CONN_EOF
 # ==============================================================================
-# AI Gateway Bridge - Server B Connection Info
+# Bifrost - Server B Connection Info
 # Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
 # ==============================================================================
 
@@ -1067,7 +1067,7 @@ setup_caddy_b() {
         cat > "${CADDY_CONFIG_DIR}/Caddyfile" <<CADDY_EOF
 # ==============================================================================
 # Caddy Configuration - Server B (Overseas)
-# AI Gateway Bridge - Decoy Website + Reverse Proxy
+# Bifrost - Decoy Website + Reverse Proxy
 # ==============================================================================
 
 ${caddy_domain} {
@@ -1119,7 +1119,7 @@ CADDY_EOF
         cat > "${CADDY_CONFIG_DIR}/Caddyfile" <<CADDY_EOF
 # ==============================================================================
 # Caddy Configuration - Server B (Overseas) - IP Access Mode
-# AI Gateway Bridge - Decoy Website + Reverse Proxy
+# Bifrost - Decoy Website + Reverse Proxy
 # ==============================================================================
 
 :80 {
@@ -1771,7 +1771,7 @@ enable_bbr() {
     cat > "${sysctl_bbr_file}" <<'BBR_EOF'
 # ==============================================================================
 # BBR TCP Congestion Control
-# AI Gateway Bridge - Network Optimization
+# Bifrost - Network Optimization
 # ==============================================================================
 
 # Use fq (Fair Queueing) as the default packet scheduler
@@ -1960,7 +1960,7 @@ deploy_server_b() {
     # Create state directory with restricted permissions (contains secrets)
     mkdir -p "${DEPLOY_STATE_DIR}"
     chmod 700 "${DEPLOY_STATE_DIR}"
-    echo "# AI Gateway Bridge - Server B Deployment State" > "${DEPLOY_STATE_DIR}/state.env"
+    echo "# Bifrost - Server B Deployment State" > "${DEPLOY_STATE_DIR}/state.env"
     echo "# Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "${DEPLOY_STATE_DIR}/state.env"
     echo "" >> "${DEPLOY_STATE_DIR}/state.env"
     chmod 600 "${DEPLOY_STATE_DIR}/state.env"

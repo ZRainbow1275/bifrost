@@ -1,11 +1,11 @@
-# AI Gateway Bridge - 疑难排查指南 (v2.0)
+# Bifrost - 疑难排查指南 (v2.0)
 
 ## 快速诊断
 
 运行自带的健康检查脚本，一键诊断所有组件：
 
 ```bash
-cd /path/to/ai-gateway-bridge
+cd /path/to/bifrost
 ./install.sh --health-check
 ```
 
@@ -392,10 +392,10 @@ docker exec new-api env | grep -i proxy
 echo | openssl s_client -connect dl.google.com:443 -tls1_3 -alpn h2 2>/dev/null | grep 'Protocol\|ALPN'
 
 # 2. 检查 dest-pool 文件
-cat /opt/ai-gateway-bridge/dest-pool.txt
+cat /opt/bifrost/dest-pool.txt
 
 # 3. 手动轮换 dest
-bash /opt/ai-gateway-bridge/rotate-dest.sh
+bash /opt/bifrost/rotate-dest.sh
 ```
 
 ### 症状：Dest 自动轮换没有执行
@@ -405,10 +405,10 @@ bash /opt/ai-gateway-bridge/rotate-dest.sh
 crontab -l | grep rotate
 
 # 2. 检查轮换日志
-tail -50 /var/log/ai-gateway-bridge-rotate.log
+tail -50 /var/log/bifrost-rotate.log
 
 # 3. 手动执行轮换测试
-bash /opt/ai-gateway-bridge/rotate-dest.sh
+bash /opt/bifrost/rotate-dest.sh
 ```
 
 ### 症状：怀疑被 GFW 识别
@@ -500,7 +500,7 @@ systemctl restart mihomo
 
 | 组件 | 日志位置 |
 |------|---------|
-| 安装日志 | `/var/log/ai-gateway-bridge.log` |
+| 安装日志 | `/var/log/bifrost.log` |
 | Xray | `/var/log/xray/access.log`, `/var/log/xray/error.log` |
 | Mihomo | `journalctl -u mihomo`, `/var/log/mihomo/` |
 | Caddy | `/var/log/caddy/access.log` |
@@ -511,9 +511,9 @@ systemctl restart mihomo
 | Headscale | `journalctl -u headscale` |
 | fail2ban | `/var/log/fail2ban.log` |
 | SSH | `/var/log/auth.log` (Debian) / `/var/log/secure` (CentOS) |
-| 健康检查 | `/var/log/ai-gateway-bridge/health.json` |
-| 告警 | `/var/log/ai-gateway-bridge/alerts.log` |
-| Dest 轮换 | `/var/log/ai-gateway-bridge-rotate.log` |
+| 健康检查 | `/var/log/bifrost/health.json` |
+| 告警 | `/var/log/bifrost/alerts.log` |
+| Dest 轮换 | `/var/log/bifrost-rotate.log` |
 | Watchdog | `journalctl -u ai-gw-watchdog` |
 | 心跳探测 | `journalctl -u ai-gw-heartbeat` |
 | 诊断报告 | `bash scripts/diagnostics.sh report` (输出 JSON) |
@@ -603,7 +603,7 @@ firewall-cmd --complete-reload
 ### 完全卸载
 
 ```bash
-cd /path/to/ai-gateway-bridge
+cd /path/to/bifrost
 ./install.sh --uninstall
 ```
 
