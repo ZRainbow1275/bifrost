@@ -620,7 +620,7 @@ v2.0 模块部署:
   docs/TROUBLESHOOTING.md   疑难排查 (含 VPN/Mihomo/DPI/Keepalive)
   docs/SECURITY.md          安全说明
 
-项目地址: https://github.com/your-org/bifrost
+项目地址: https://github.com/ZRainbow1275/bifrost
 HELP
 }
 
