@@ -40,6 +40,9 @@ COPY app/ ./app/
 # Ensure the non-root user owns the workdir
 RUN chown -R bifrost:bifrost /app
 
+# Ensure /data is writable by bifrost for persistent state (e.g. registration-state.json)
+RUN mkdir -p /data && chown bifrost:bifrost /data
+
 USER bifrost
 
 EXPOSE 8000

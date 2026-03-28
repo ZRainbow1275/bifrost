@@ -946,6 +946,13 @@ audit_ports() {
     # Define whitelist: SSH (custom), HTTP, HTTPS, and other known service ports
     local -a whitelist_ports=("${ssh_port}" "80" "443" "19999")
 
+    # Dynamically add ports for active services
+    command -v wg &>/dev/null && whitelist_ports+=("51820")
+    pgrep -x mihomo &>/dev/null && whitelist_ports+=("7890" "7891" "9090")
+    pgrep -x xray &>/dev/null && whitelist_ports+=("10808" "10809")
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qw "new-api" && whitelist_ports+=("3000")
+    [[ -f /etc/x-ui/x-ui.db ]] && whitelist_ports+=("2053")
+
     # Load any additional custom ports from state
     local custom_ports
     custom_ports="$(_load_state "CUSTOM_WHITELIST_PORTS")"

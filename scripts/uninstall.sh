@@ -179,13 +179,28 @@ stop_services() {
 
     # Stop New API Docker container
     if command_exists docker; then
-        for container_name in "new-api" "newapi" "one-api" "oneapi"; do
+        for container_name in "new-api" "newapi" "one-api" "oneapi" "bifrost-api"; do
             if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qw "${container_name}"; then
                 log_info "Stopping Docker container: ${container_name}..."
                 docker stop "${container_name}" 2>/dev/null || true
                 add_removed "Docker container stopped: ${container_name}"
             fi
         done
+    fi
+
+    # Stop and remove WireGuard
+    if command_exists systemctl; then
+        if systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
+            log_info "Stopping WireGuard (wg-quick@wg0)..."
+            systemctl stop wg-quick@wg0 2>/dev/null || true
+            systemctl disable wg-quick@wg0 2>/dev/null || true
+            add_removed "Service stopped and disabled: wg-quick@wg0"
+        fi
+    fi
+    if [[ -d "/etc/wireguard" ]]; then
+        log_info "Removing WireGuard configuration: /etc/wireguard..."
+        rm -rf "/etc/wireguard"
+        add_removed "Directory: /etc/wireguard"
     fi
 
     log_info "Services stopped."
@@ -228,6 +243,22 @@ remove_docker_resources() {
             docker volume rm "${vol_name}" 2>/dev/null && add_removed "Docker volume removed: ${vol_name}" || add_failed "Failed to remove volume: ${vol_name}"
         fi
     done
+
+    # Remove Bifrost API container, volume, and image
+    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qw "bifrost-api"; then
+        log_info "Removing container: bifrost-api..."
+        docker rm -f "bifrost-api" 2>/dev/null && add_removed "Docker container removed: bifrost-api" || add_failed "Failed to remove container: bifrost-api"
+    fi
+    if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qw "bifrost-api-data"; then
+        log_info "Removing Docker volume: bifrost-api-data..."
+        docker volume rm "bifrost-api-data" 2>/dev/null && add_removed "Docker volume removed: bifrost-api-data" || add_failed "Failed to remove volume: bifrost-api-data"
+    fi
+    local bifrost_image
+    bifrost_image="$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -i 'bifrost-api' | head -1)" || true
+    if [[ -n "${bifrost_image}" ]]; then
+        log_info "Removing Docker image: ${bifrost_image}..."
+        docker rmi "${bifrost_image}" 2>/dev/null && add_removed "Docker image removed: ${bifrost_image}" || add_failed "Failed to remove image: ${bifrost_image}"
+    fi
 
     # Remove docker-compose files
     local compose_dirs=("/opt/new-api" "/opt/bifrost/new-api" "${INSTALL_DIR}/docker")
@@ -384,6 +415,13 @@ remove_configs() {
             add_removed "Netdata config: ${dir}"
         fi
     done
+
+    # Remove Bifrost persistent data (contains admin token, VPN credentials)
+    if [[ -d "/etc/bifrost" ]]; then
+        log_info "Removing Bifrost persistent data: /etc/bifrost..."
+        rm -rf "/etc/bifrost"
+        add_removed "Directory: /etc/bifrost"
+    fi
 
     # Main install directory
     if [[ -d "${INSTALL_DIR}" ]]; then

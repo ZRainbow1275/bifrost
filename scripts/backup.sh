@@ -82,22 +82,23 @@ fi
 # =============================================================================
 # Constants
 # =============================================================================
-BACKUP_BASE_DIR="/var/backups/bifrost"
-BACKUP_ENCRYPTION_KEY_FILE="/root/.bifrost-backup-key"
-BACKUP_MAX_KEEP=7
+# Guarded — may already be defined by server-a.sh or mihomo.sh
+[[ -v BACKUP_BASE_DIR ]]           || readonly BACKUP_BASE_DIR="/var/backups/bifrost"
+[[ -v BACKUP_ENCRYPTION_KEY_FILE ]] || readonly BACKUP_ENCRYPTION_KEY_FILE="/root/.bifrost-backup-key"
+[[ -v BACKUP_MAX_KEEP ]]           || readonly BACKUP_MAX_KEEP=7
 
 # Config paths to back up
-XRAY_CONFIG_DIR="/usr/local/etc/xray"
-CADDY_CONFIG_DIR="/etc/caddy"
-MIHOMO_CONFIG_DIR="/etc/mihomo"
-NEW_API_DIR="/opt/new-api"
-INSTALL_DIR="/opt/bifrost"
-SECURITY_STATE_DIR="/etc/bifrost"
-WHITELIST_INSTALLED="/opt/bifrost/configs/whitelist"
-FAIL2BAN_CONFIG="/etc/fail2ban"
-SYSCTL_HARDENING="/etc/sysctl.d/99-ai-gateway-hardening.conf"
-SERVER_B_CONF="/root/server-b-connection.conf"
-CONNECTION_INFO="/root/ai-gateway-connection.txt"
+[[ -v XRAY_CONFIG_DIR ]]           || readonly XRAY_CONFIG_DIR="/usr/local/etc/xray"
+[[ -v CADDY_CONFIG_DIR ]]          || readonly CADDY_CONFIG_DIR="/etc/caddy"
+[[ -v MIHOMO_CONFIG_DIR ]]         || readonly MIHOMO_CONFIG_DIR="/etc/mihomo"
+[[ -v NEW_API_DIR ]]               || readonly NEW_API_DIR="/opt/new-api"
+[[ -v INSTALL_DIR ]]               || readonly INSTALL_DIR="/opt/bifrost"
+[[ -v SECURITY_STATE_DIR ]]        || readonly SECURITY_STATE_DIR="/etc/bifrost"
+[[ -v WHITELIST_INSTALLED ]]       || readonly WHITELIST_INSTALLED="/opt/bifrost/configs/whitelist"
+[[ -v FAIL2BAN_CONFIG ]]           || readonly FAIL2BAN_CONFIG="/etc/fail2ban"
+[[ -v SYSCTL_HARDENING ]]          || readonly SYSCTL_HARDENING="/etc/sysctl.d/99-ai-gateway-hardening.conf"
+[[ -v SERVER_B_CONF ]]             || readonly SERVER_B_CONF="/root/server-b-connection.conf"
+[[ -v CONNECTION_INFO ]]           || readonly CONNECTION_INFO="/root/ai-gateway-connection.txt"
 
 ###############################################################################
 # _ensure_backup_dir()

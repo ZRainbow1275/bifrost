@@ -88,7 +88,7 @@
 	# --------------------------------------------------
 
 	# 3x-ui panel routes
-	handle /xui/* {
+	handle /xui-panel/* {
 		# IP whitelist for panel access (restrict to admin IPs)
 		# Uncomment and modify to restrict access:
 		# @allowed remote_ip 你的管理IP/32

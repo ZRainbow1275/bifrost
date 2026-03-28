@@ -53,8 +53,8 @@ readonly NETDATA_PORT=19999
 readonly XUI_PORT="${IPTABLES_XUI_PORT:-2053}"
 
 # Rate limiting
-readonly SSH_RATE_LIMIT="4/minute"
-readonly SSH_RATE_BURST=10
+readonly SSH_RATE_LIMIT="10/minute"
+readonly SSH_RATE_BURST=20
 readonly ICMP_RATE_LIMIT="10/second"
 readonly ICMP_RATE_BURST=20
 
@@ -320,11 +320,8 @@ apply_rules() {
     # -------------------------------------------------------------------------
     log_fw "Blocking external access to service/internal networks..."
 
-    # Drop external traffic destined for internal subnets
-    iptables -A INPUT -i "${wan_iface}" -d "${SERVICE_SUBNET}" -j AI_GW_LOG_DROP
-    iptables -A INPUT -i "${wan_iface}" -d "${VPN_SUBNET}" -j AI_GW_LOG_DROP
-
     # New API - only accessible from localhost, Docker, VPN, and service network
+    # NOTE: ACCEPT rules must precede the blanket DROP below to avoid being shadowed
     iptables -A INPUT -p tcp --dport "${NEW_API_PORT}" -s 127.0.0.0/8 -j ACCEPT
     iptables -A INPUT -p tcp --dport "${NEW_API_PORT}" -s "${DOCKER_SUBNET}" -j ACCEPT
     iptables -A INPUT -p tcp --dport "${NEW_API_PORT}" -s "${VPN_SUBNET}" -j ACCEPT
@@ -338,6 +335,10 @@ apply_rules() {
         iptables -A INPUT -p tcp --dport "${port}" -s "${SERVICE_SUBNET}" -j ACCEPT
         iptables -A INPUT -p tcp --dport "${port}" -j AI_GW_LOG_DROP
     done
+
+    # Drop external traffic destined for internal subnets (after service-specific ACCEPT rules)
+    iptables -A INPUT -i "${wan_iface}" -d "${SERVICE_SUBNET}" -j AI_GW_LOG_DROP
+    iptables -A INPUT -i "${wan_iface}" -d "${VPN_SUBNET}" -j AI_GW_LOG_DROP
 
     # -------------------------------------------------------------------------
     # Step 12: NAT / MASQUERADE

@@ -1656,6 +1656,19 @@ _rewrite_xray_config_with_routing() {
         short_id=$(grep '^XRAY_SHORT_ID=' "${DEPLOY_STATE_DIR}/state.env" 2>/dev/null | tail -1 | cut -d= -f2) || true
     fi
 
+    # If private_key was not in deploy state, parse from existing config
+    if [[ -z "${private_key}" ]] && [[ -f "${XRAY_CONFIG_FILE:-${XRAY_CONFIG_DIR}/config.json}" ]]; then
+        private_key=$(grep -oP '"privateKey"\s*:\s*"\K[^"]+' "${XRAY_CONFIG_FILE:-${XRAY_CONFIG_DIR}/config.json}" 2>/dev/null || true)
+        if [[ -n "${private_key}" ]]; then
+            log_info "Recovered private key from existing Xray config."
+        fi
+    fi
+
+    if [[ -z "${private_key}" ]]; then
+        log_error "Cannot rewrite Xray config: private key not found in deploy state or existing config."
+        return 1
+    fi
+
     # If we can't read from state, parse from existing config
     if [[ -z "${uuid}" ]]; then
         uuid=$(grep -oP '"id"\s*:\s*"\K[^"]+' "${XRAY_CONFIG_FILE}" | head -1) || true

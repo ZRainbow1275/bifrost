@@ -85,21 +85,22 @@ fi
 # =============================================================================
 # Constants
 # =============================================================================
-XRAY_BIN="/usr/local/bin/xray"
-XRAY_CONFIG="/usr/local/etc/xray/config.json"
-XRAY_GEODATA_DIR="/usr/local/share/xray"
-XRAY_INSTALL_SCRIPT_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
-XRAY_RELEASES_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
+# Guarded — may already be defined by server-a.sh or mihomo.sh
+[[ -v XRAY_BIN ]]                  || readonly XRAY_BIN="/usr/local/bin/xray"
+[[ -v XRAY_CONFIG ]]               || readonly XRAY_CONFIG="/usr/local/etc/xray/config.json"
+[[ -v XRAY_GEODATA_DIR ]]          || readonly XRAY_GEODATA_DIR="/usr/local/share/xray"
+[[ -v XRAY_INSTALL_SCRIPT_URL ]]   || readonly XRAY_INSTALL_SCRIPT_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
+[[ -v XRAY_RELEASES_API ]]         || readonly XRAY_RELEASES_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 
-MIHOMO_BIN="/usr/local/bin/mihomo"
-MIHOMO_CONFIG_DIR="/etc/mihomo"
-MIHOMO_RELEASES_API="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
+[[ -v MIHOMO_BIN ]]                || readonly MIHOMO_BIN="/usr/local/bin/mihomo"
+[[ -v MIHOMO_CONFIG_DIR ]]         || readonly MIHOMO_CONFIG_DIR="/etc/mihomo"
+[[ -v MIHOMO_RELEASES_API ]]       || readonly MIHOMO_RELEASES_API="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
 
-GEOIP_URL="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
-GEOSITE_URL="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
+[[ -v GEOIP_URL ]]                 || readonly GEOIP_URL="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
+[[ -v GEOSITE_URL ]]               || readonly GEOSITE_URL="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
 
-NEW_API_IMAGES=("justsong/new-api" "calciumion/new-api")
-NEW_API_CONTAINER_NAMES=("new-api" "newapi" "one-api" "oneapi")
+[[ -v NEW_API_IMAGES ]]            || readonly NEW_API_IMAGES=("justsong/new-api" "calciumion/new-api")
+[[ -v NEW_API_CONTAINER_NAMES ]]   || readonly NEW_API_CONTAINER_NAMES=("new-api" "newapi" "one-api" "oneapi")
 
 # =============================================================================
 # Internal helpers
@@ -870,12 +871,14 @@ check_updates() {
                 img="$(docker inspect --format '{{.Config.Image}}' "${name}" 2>/dev/null)" || img=""
                 if [[ -n "${img}" ]]; then
                     newapi_current="${img}"
-                    # Check if there's a newer image available
-                    local local_id remote_id
-                    local_id="$(docker inspect --format '{{.Image}}' "${name}" 2>/dev/null)" || local_id=""
-                    # Pull quietly to check for updates
-                    if docker pull "${img}" 2>/dev/null | grep -q "Status: Image is up to date"; then
+                    # Check if there's a newer image available (dry-run: no pull)
+                    local local_digest remote_digest
+                    local_digest="$(docker image inspect --format '{{index .RepoDigests 0}}' "${img}" 2>/dev/null | sed 's/.*@//')" || local_digest=""
+                    remote_digest="$(docker manifest inspect --verbose "${img}" 2>/dev/null | grep -m1 '"digest"' | sed 's/.*"digest"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/')" || remote_digest=""
+                    if [[ -n "${local_digest}" && -n "${remote_digest}" && "${local_digest}" == "${remote_digest}" ]]; then
                         newapi_status="up to date"
+                    elif [[ -z "${remote_digest}" ]]; then
+                        newapi_status="unable to check"
                     else
                         newapi_status="UPDATE AVAILABLE"
                         updates_available=$(( updates_available + 1 ))

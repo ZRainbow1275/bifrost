@@ -29,11 +29,7 @@ source "${SCRIPT_DIR}/scripts/common.sh"
 run_flow_command() {
     local failure_message="$1"
     shift
-
-    if "$@"; then
-        return 0
-    fi
-
+    "$@" && return 0
     local status=$?
     log_error "${failure_message}"
     return "${status}"
@@ -42,11 +38,7 @@ run_flow_command() {
 run_cli_command() {
     local failure_message="$1"
     shift
-
-    if "$@"; then
-        exit 0
-    fi
-
+    "$@" && exit 0
     local status=$?
     log_error "${failure_message}"
     exit "${status}"

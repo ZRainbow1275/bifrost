@@ -167,6 +167,29 @@
 	}
 
 	# --------------------------------------------------
+	# Bifrost Management API
+	# Proxies /manage/* to the Bifrost API service (port 8000)
+	# Accessible at: https://{{DOMAIN}}/manage/api/v1/...
+	#                 https://{{DOMAIN}}/manage/register
+	#                 https://{{DOMAIN}}/manage/docs
+	# --------------------------------------------------
+	handle /manage/* {
+		uri strip_prefix /manage
+		reverse_proxy 127.0.0.1:8000 {
+			header_up Host {host}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-Prefix /manage
+
+			transport http {
+				dial_timeout 10s
+				response_header_timeout 60s
+			}
+		}
+	}
+
+	# --------------------------------------------------
 	# Decoy Website - Static files for camouflage
 	# Serves a legitimate-looking company website for
 	# any path not matched by the API routes above.
