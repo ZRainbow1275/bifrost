@@ -258,8 +258,8 @@ install_xray_client() {
     local xray_download_url="https://github.com/XTLS/Xray-core/releases/latest/download/${xray_arch}.zip"
 
     if ! github_download "$xray_download_url" "$xray_zip" 120; then
-        log_error "Failed to download Xray-core from all sources (direct + mirrors)."
-        log_error "If GitHub is blocked, ensure your network can reach ghproxy.net or mirror.ghproxy.com."
+        log_error "Failed to download Xray-core from all sources (direct + configured mirrors)."
+        log_error "$(github_mirror_help)"
         rm -rf "$tmp_dir"
         return 1
     fi
@@ -692,19 +692,39 @@ _ensure_xray_geodata() {
 
     local geoip_url="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
     local geosite_url="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
+    local geoip_file="${XRAY_GEODATA_DIR}/geoip.dat"
+    local geosite_file="${XRAY_GEODATA_DIR}/geosite.dat"
+    local tmp_file=""
 
-    if [[ ! -f "${XRAY_GEODATA_DIR}/geoip.dat" ]]; then
-        log_info "Downloading geoip.dat (with China mirror fallback)..."
-        if ! github_download "$geoip_url" "${XRAY_GEODATA_DIR}/geoip.dat" 120; then
-            log_warn "Failed to download geoip.dat from all sources. Routing by IP may not work correctly."
+    if [[ ! -s "${geoip_file}" ]]; then
+        log_info "Downloading geoip.dat (with configured GitHub mirror fallback)..."
+        tmp_file="$(mktemp "${XRAY_GEODATA_DIR}/geoip.dat.XXXXXX")"
+        if github_download "$geoip_url" "${tmp_file}" 120 && [[ -s "${tmp_file}" ]]; then
+            mv "${tmp_file}" "${geoip_file}"
+            chmod 644 "${geoip_file}"
+        else
+            rm -f "${tmp_file}" 2>/dev/null || true
+            log_error "Failed to download required geoip.dat from all sources."
+            return 1
         fi
     fi
 
-    if [[ ! -f "${XRAY_GEODATA_DIR}/geosite.dat" ]]; then
-        log_info "Downloading geosite.dat (with China mirror fallback)..."
-        if ! github_download "$geosite_url" "${XRAY_GEODATA_DIR}/geosite.dat" 120; then
-            log_warn "Failed to download geosite.dat from all sources. Routing by domain may not work correctly."
+    if [[ ! -s "${geosite_file}" ]]; then
+        log_info "Downloading geosite.dat (with configured GitHub mirror fallback)..."
+        tmp_file="$(mktemp "${XRAY_GEODATA_DIR}/geosite.dat.XXXXXX")"
+        if github_download "$geosite_url" "${tmp_file}" 120 && [[ -s "${tmp_file}" ]]; then
+            mv "${tmp_file}" "${geosite_file}"
+            chmod 644 "${geosite_file}"
+        else
+            rm -f "${tmp_file}" 2>/dev/null || true
+            log_error "Failed to download required geosite.dat from all sources."
+            return 1
         fi
+    fi
+
+    if [[ ! -s "${geoip_file}" || ! -s "${geosite_file}" ]]; then
+        log_error "Required Xray geodata files are missing under ${XRAY_GEODATA_DIR}."
+        return 1
     fi
 
     # Set Xray asset directory environment variable
@@ -790,6 +810,10 @@ install_new_api() {
     # Ensure docker compose plugin is available
     if ! docker compose version &>/dev/null; then
         log_error "Docker Compose plugin not available. Please install docker-compose-plugin."
+        return 1
+    fi
+    if ! require_docker_server_version "20.10.0" "New API Docker host-gateway mapping"; then
+        log_error "Upgrade Docker Engine before deploying New API. The compose file depends on host.docker.internal:host-gateway."
         return 1
     fi
 
@@ -959,9 +983,8 @@ COMPOSEEOF
     log_info "--------------------------------------------"
     log_info "  Local URL    : http://127.0.0.1:3000"
     log_info "  Dashboard    : http://127.0.0.1:3000/dashboard"
-    log_info "  Default Admin: root"
-    log_info "  Default Pass : 123456"
-    log_warn "  IMPORTANT: Change the default password immediately after first login!"
+    log_info "  First Visit  : Open the dashboard and complete the initial admin setup"
+    log_warn "  IMPORTANT: Complete the New API initialization page immediately and set a strong admin password."
     log_info "--------------------------------------------"
 
     return 0
@@ -1083,6 +1106,19 @@ ${domain} {
         }
     }
 
+    # ===== Bifrost Management Platform =====
+    # Exposes the FastAPI admin/register interface under /manage/*
+    handle /manage* {
+        uri strip_prefix /manage
+        reverse_proxy 127.0.0.1:8000 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            header_up X-Forwarded-Prefix /manage
+        }
+    }
+
     # ===== Default: Reverse Proxy to New API =====
     # Catches any path not matched above (e.g. /login, /panel, /token, etc.)
     handle {
@@ -1154,6 +1190,7 @@ CADDYEOF
     log_info "  HTTPS: https://${domain}"
     log_info "  API:   https://${domain}/v1/"
     log_info "  Panel: https://${domain}/dashboard/"
+    log_info "  Manage: https://${domain}/manage/docs"
 
     return 0
 }
@@ -1178,8 +1215,16 @@ _install_caddy() {
         debian)
             apt-get update -qq
             apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl
-            curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-            curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
+            if ! curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+                | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg; then
+                log_error "Failed to import the Caddy repository key. Refusing to trust an unverified repository."
+                return 1
+            fi
+            if ! curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+                | tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null; then
+                log_error "Failed to install the Caddy repository definition."
+                return 1
+            fi
             apt-get update -qq
             apt-get install -y -qq caddy
             ;;
@@ -2117,6 +2162,7 @@ test_connectivity() {
 deploy_server_a() {
     local start_time
     start_time=$(date +%s)
+    local failed_steps=()
 
     echo ""
     log_info "######################################################"
@@ -2135,7 +2181,10 @@ deploy_server_a() {
         # shellcheck source=scripts/dd-reinstall.sh
         source "${_script_dir}/dd-reinstall.sh"
         if declare -f pre_deploy_check &>/dev/null; then
-            pre_deploy_check || log_warn "Pre-deploy check encountered issues (non-fatal)."
+            if ! pre_deploy_check; then
+                log_error "Pre-deploy check failed. Cannot continue with Server A deployment."
+                return 1
+            fi
         fi
     else
         log_warn "dd-reinstall.sh not found. Skipping cloud agent cleanup."
@@ -2158,24 +2207,40 @@ deploy_server_a() {
     # --- Step 2: Security Hardening ---
     log_info "[Step 2/14] Applying security hardening..."
     if declare -f setup_firewall &>/dev/null; then
-        setup_firewall
+        if ! setup_firewall; then
+            log_error "Firewall setup failed."
+            failed_steps+=("Firewall Setup")
+        fi
     else
-        log_warn "setup_firewall not available. Skipping firewall setup."
+        log_error "setup_firewall not available. Cannot apply firewall rules."
+        failed_steps+=("Firewall Setup")
     fi
     if declare -f harden_ssh &>/dev/null; then
-        harden_ssh
+        if ! harden_ssh; then
+            log_error "SSH hardening failed."
+            failed_steps+=("SSH Hardening")
+        fi
     else
-        log_warn "harden_ssh not available. Skipping SSH hardening."
+        log_error "harden_ssh not available. Cannot harden SSH."
+        failed_steps+=("SSH Hardening")
     fi
     if declare -f setup_fail2ban &>/dev/null; then
-        setup_fail2ban
+        if ! setup_fail2ban; then
+            log_error "fail2ban setup failed."
+            failed_steps+=("fail2ban")
+        fi
     else
-        log_warn "setup_fail2ban not available. Skipping fail2ban."
+        log_error "setup_fail2ban not available. Cannot configure fail2ban."
+        failed_steps+=("fail2ban")
     fi
     if declare -f harden_kernel &>/dev/null; then
-        harden_kernel
+        if ! harden_kernel; then
+            log_error "Kernel hardening failed."
+            failed_steps+=("Kernel Hardening")
+        fi
     else
-        log_warn "harden_kernel not available. Skipping sysctl hardening."
+        log_error "harden_kernel not available. Cannot apply kernel hardening."
+        failed_steps+=("Kernel Hardening")
     fi
     echo ""
 
@@ -2198,10 +2263,17 @@ deploy_server_a() {
         # shellcheck source=scripts/mihomo.sh
         source "${_script_dir}/mihomo.sh"
         if declare -f deploy_mihomo &>/dev/null; then
-            deploy_mihomo || log_warn "Mihomo deployment failed (non-fatal). Falling back to direct Xray proxy."
+            if ! deploy_mihomo; then
+                log_error "Mihomo deployment failed. Direct Xray fallback may work, but smart routing is not ready."
+                failed_steps+=("Mihomo")
+            fi
+        else
+            log_error "deploy_mihomo not available after sourcing mihomo.sh."
+            failed_steps+=("Mihomo")
         fi
     else
-        log_warn "mihomo.sh not found. Skipping Mihomo deployment (New API will use Xray directly)."
+        log_error "mihomo.sh not found. Cannot deploy Mihomo smart routing."
+        failed_steps+=("Mihomo")
     fi
     echo ""
 
@@ -2231,12 +2303,18 @@ deploy_server_a() {
     if [[ -f "${_script_dir}/vpn.sh" ]]; then
         # shellcheck source=scripts/vpn.sh
         source "${_script_dir}/vpn.sh"
-        if declare -f deploy_vpn &>/dev/null; then
-            if confirm_action "Deploy enterprise VPN (WireGuard/Firezone)?"; then
-                deploy_vpn || log_warn "VPN deployment failed (non-fatal)."
+        if confirm_action "Deploy enterprise VPN (WireGuard/Firezone)?"; then
+            if declare -f deploy_vpn &>/dev/null; then
+                if ! deploy_vpn; then
+                    log_error "VPN deployment failed."
+                    failed_steps+=("VPN")
+                fi
             else
-                log_info "Skipping VPN deployment."
+                log_error "deploy_vpn not available after sourcing vpn.sh."
+                failed_steps+=("VPN")
             fi
+        else
+            log_info "Skipping VPN deployment."
         fi
     else
         log_warn "vpn.sh not found. Skipping VPN deployment."
@@ -2249,10 +2327,17 @@ deploy_server_a() {
         # shellcheck source=scripts/keepalive.sh
         source "${_script_dir}/keepalive.sh"
         if declare -f deploy_keepalive &>/dev/null; then
-            deploy_keepalive || log_warn "Keepalive deployment failed (non-fatal)."
+            if ! deploy_keepalive; then
+                log_error "Keepalive deployment failed."
+                failed_steps+=("Keepalive")
+            fi
+        else
+            log_error "deploy_keepalive not available after sourcing keepalive.sh."
+            failed_steps+=("Keepalive")
         fi
     else
-        log_warn "keepalive.sh not found. Skipping keepalive deployment."
+        log_error "keepalive.sh not found. Cannot deploy keepalive."
+        failed_steps+=("Keepalive")
     fi
     echo ""
 
@@ -2262,10 +2347,17 @@ deploy_server_a() {
         # shellcheck source=scripts/split-tunnel.sh
         source "${_script_dir}/split-tunnel.sh"
         if declare -f deploy_split_tunnel &>/dev/null; then
-            deploy_split_tunnel || log_warn "Split tunnel deployment failed (non-fatal)."
+            if ! deploy_split_tunnel; then
+                log_error "Split tunnel deployment failed."
+                failed_steps+=("Split Tunnel")
+            fi
+        else
+            log_error "deploy_split_tunnel not available after sourcing split-tunnel.sh."
+            failed_steps+=("Split Tunnel")
         fi
     else
-        log_warn "split-tunnel.sh not found. Skipping split tunnel deployment."
+        log_error "split-tunnel.sh not found. Cannot deploy split tunnel."
+        failed_steps+=("Split Tunnel")
     fi
     echo ""
 
@@ -2273,11 +2365,14 @@ deploy_server_a() {
     log_info "[Step 12/14] Setting up log rotation and monitoring..."
     # Log rotation is critical to prevent disk exhaustion from unbounded log growth
     if declare -f setup_logrotate &>/dev/null; then
-        setup_logrotate || log_warn "Log rotation setup failed (non-fatal but disk may fill up)."
+        if ! setup_logrotate; then
+            log_error "Log rotation setup failed."
+            failed_steps+=("Log Rotation")
+        fi
     else
         # Inline minimal logrotate if monitoring.sh not loaded
         log_info "Setting up minimal log rotation..."
-        cat > /etc/logrotate.d/bifrost <<'_LOGROTATE_MINIMAL'
+        if cat > /etc/logrotate.d/bifrost <<'_LOGROTATE_MINIMAL'
 /var/log/xray/*.log {
     daily
     rotate 7
@@ -2309,15 +2404,27 @@ deploy_server_a() {
     size 50M
 }
 _LOGROTATE_MINIMAL
-        log_success "Minimal log rotation configured."
+        then
+            log_success "Minimal log rotation configured."
+        else
+            log_error "Minimal log rotation setup failed."
+            failed_steps+=("Log Rotation")
+        fi
     fi
 
     if declare -f deploy_monitoring &>/dev/null; then
-        deploy_monitoring || log_warn "Monitoring setup failed (non-fatal)."
+        if ! deploy_monitoring; then
+            log_error "Monitoring setup failed."
+            failed_steps+=("Monitoring")
+        fi
     elif declare -f install_netdata &>/dev/null; then
-        install_netdata || log_warn "Netdata setup failed (non-fatal)."
+        if ! install_netdata; then
+            log_error "Netdata setup failed."
+            failed_steps+=("Monitoring")
+        fi
     else
-        log_warn "Monitoring functions not available. Skipping monitoring setup."
+        log_error "Monitoring functions not available. Cannot set up monitoring."
+        failed_steps+=("Monitoring")
     fi
     echo ""
 
@@ -2326,13 +2433,14 @@ _LOGROTATE_MINIMAL
     if ! test_connectivity; then
         log_warn "============================================================================"
         log_warn "CONNECTIVITY TESTS FAILED - Some services may not be working correctly."
-        log_warn "Deployment completed but manual verification is recommended."
+        log_warn "Deployment is incomplete until connectivity tests pass."
         log_warn "Common causes:"
         log_warn "  - Server B is not yet running or unreachable"
         log_warn "  - Firewall blocking required ports"
         log_warn "  - DNS not yet propagated for the domain"
         log_warn "Re-run tests later: bash scripts/server-a.sh test"
         log_warn "============================================================================"
+        failed_steps+=("Connectivity Tests")
     fi
     echo ""
 
@@ -2352,12 +2460,21 @@ _LOGROTATE_MINIMAL
     fi
 
     echo ""
-    log_info "####################################################################"
-    log_info "#                                                                  #"
-    log_info "#    Server A Deployment Complete!                                  #"
-    log_info "#    Elapsed: ${minutes}m ${seconds}s                              #"
-    log_info "#                                                                  #"
-    log_info "####################################################################"
+    if [[ ${#failed_steps[@]} -eq 0 ]]; then
+        log_info "####################################################################"
+        log_info "#                                                                  #"
+        log_info "#    Server A Deployment Complete!                                  #"
+        log_info "#    Elapsed: ${minutes}m ${seconds}s                              #"
+        log_info "#                                                                  #"
+        log_info "####################################################################"
+    else
+        log_error "####################################################################"
+        log_error "#                                                                  #"
+        log_error "#    Server A Deployment Incomplete                                 #"
+        log_error "#    Elapsed: ${minutes}m ${seconds}s                              #"
+        log_error "#                                                                  #"
+        log_error "####################################################################"
+    fi
     echo ""
     log_info "==================== Service URLs ===================="
     log_info ""
@@ -2418,11 +2535,26 @@ _LOGROTATE_MINIMAL
     log_info ""
     log_info "==================== Security Reminders =============="
     log_info ""
-    log_warn "  1. Change New API default password (root/123456) NOW"
+    log_warn "  1. Complete the New API initialization page and set a strong admin password NOW"
     log_warn "  2. Add API keys for upstream AI providers in New API dashboard"
     log_warn "  3. Create user accounts and distribute per-user API keys"
     log_warn "  4. Review firewall rules: ufw status / firewall-cmd --list-all"
     log_warn "  5. Back up ${SERVER_B_CONF} and ${NEW_API_DIR}/data/"
     log_info ""
+    if [[ ${#failed_steps[@]} -gt 0 ]]; then
+        log_error "==================== Failed Steps ===================="
+        for step in "${failed_steps[@]}"; do
+            log_error "  - ${step}"
+        done
+        log_info ""
+        log_error "Review the failed steps above before using this deployment as ready."
+        log_info ""
+    fi
     log_info "####################################################################"
+
+    if [[ ${#failed_steps[@]} -gt 0 ]]; then
+        return 1
+    fi
+
+    return 0
 }

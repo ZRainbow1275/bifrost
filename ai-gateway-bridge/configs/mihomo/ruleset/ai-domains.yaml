@@ -1,0 +1,112 @@
+# =============================================================================
+# AI Gateway Bridge - AI Domain Ruleset for Mihomo
+# =============================================================================
+# Format: Mihomo classical ruleset
+# Behavior: classical (supports DOMAIN, DOMAIN-SUFFIX, DOMAIN-KEYWORD, etc.)
+#
+# These domains are routed through the AI-Proxy group (Xray upstream).
+# Corresponds to configs/whitelist/ai-domains.txt
+#
+# Rule logic:
+#   - DOMAIN-SUFFIX: matches the domain and ALL subdomains
+#     e.g., DOMAIN-SUFFIX,anthropic.com matches api.anthropic.com, console.anthropic.com
+#   - DOMAIN: matches an exact domain only
+#     e.g., DOMAIN,ai.google.dev matches only ai.google.dev
+# =============================================================================
+payload:
+  # =========================================================================
+  # Anthropic (Claude AI)
+  # Claude Code, Claude API, Claude Web, Console
+  # =========================================================================
+  - DOMAIN-SUFFIX,anthropic.com
+  - DOMAIN-SUFFIX,claude.ai
+
+  # =========================================================================
+  # OpenAI (GPT, Codex CLI, ChatGPT)
+  # API endpoint, CDN, Platform dashboard, ChatGPT web, Auth
+  # =========================================================================
+  - DOMAIN-SUFFIX,openai.com
+
+  # =========================================================================
+  # Google (Gemini, AI Studio)
+  # Generative Language API, AI Studio, Google AI dev portal
+  # =========================================================================
+  - DOMAIN,generativelanguage.googleapis.com
+  - DOMAIN,aistudio.google.com
+  - DOMAIN,ai.google.dev
+  - DOMAIN,alkalimakersuite-pa.clients6.google.com
+  - DOMAIN,makersuite-pa.googleapis.com
+
+  # =========================================================================
+  # DeepSeek
+  # =========================================================================
+  - DOMAIN-SUFFIX,deepseek.com
+
+  # =========================================================================
+  # Mistral AI
+  # =========================================================================
+  - DOMAIN-SUFFIX,mistral.ai
+
+  # =========================================================================
+  # Groq
+  # =========================================================================
+  - DOMAIN-SUFFIX,groq.com
+
+  # =========================================================================
+  # GitHub / Copilot
+  # GitHub API, Copilot proxy, Copilot auth, GH web
+  # =========================================================================
+  - DOMAIN-SUFFIX,github.com
+  - DOMAIN-SUFFIX,githubusercontent.com
+  - DOMAIN-SUFFIX,githubcopilot.com
+  - DOMAIN,default.exp-tas.com
+
+  # =========================================================================
+  # Hugging Face
+  # Model hub, Inference API, LFS CDN
+  # =========================================================================
+  - DOMAIN-SUFFIX,huggingface.co
+
+  # =========================================================================
+  # Cohere
+  # Embeddings, generation, reranking APIs
+  # =========================================================================
+  - DOMAIN-SUFFIX,cohere.ai
+  - DOMAIN-SUFFIX,cohere.com
+
+  # =========================================================================
+  # Perplexity AI
+  # Search-augmented generation API
+  # =========================================================================
+  - DOMAIN-SUFFIX,perplexity.ai
+
+  # =========================================================================
+  # Together AI
+  # Open-source model hosting and inference
+  # =========================================================================
+  - DOMAIN-SUFFIX,together.xyz
+  - DOMAIN-SUFFIX,together.ai
+
+  # =========================================================================
+  # Package Registries (Development Tool Dependencies)
+  # Required for npm, pip, cargo package installation
+  # =========================================================================
+  - DOMAIN-SUFFIX,npmjs.org
+  - DOMAIN-SUFFIX,pypi.org
+  - DOMAIN-SUFFIX,pythonhosted.org
+  - DOMAIN-SUFFIX,crates.io
+
+  # =========================================================================
+  # Container Registries
+  # Docker Hub, GitHub Container Registry
+  # =========================================================================
+  - DOMAIN-SUFFIX,docker.com
+  - DOMAIN-SUFFIX,docker.io
+  - DOMAIN-SUFFIX,ghcr.io
+
+  # =========================================================================
+  # Error Tracking / Telemetry (required by AI tools)
+  # Sentry (Claude Code telemetry), Statsig (Anthropic feature flags)
+  # =========================================================================
+  - DOMAIN-SUFFIX,sentry.io
+  - DOMAIN,statsig.anthropic.com

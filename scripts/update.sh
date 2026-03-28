@@ -117,25 +117,22 @@ NEW_API_CONTAINER_NAMES=("new-api" "newapi" "one-api" "oneapi")
 _get_github_latest_version() {
     local api_url="${1:?}"
     local version=""
+    local api_response=""
 
-    if command_exists curl && command_exists jq; then
-        version="$(curl -s --connect-timeout 10 --max-time 20 "${api_url}" 2>/dev/null \
-            | jq -r '.tag_name // empty' 2>/dev/null)" || version=""
-    elif command_exists curl; then
-        # Fallback without jq: extract tag_name from JSON manually
-        version="$(curl -s --connect-timeout 10 --max-time 20 "${api_url}" 2>/dev/null \
-            | grep -oP '"tag_name"\s*:\s*"\K[^"]+' | head -1)" || version=""
+    if command_exists curl; then
+        api_response="$(github_fetch_text "${api_url}" 20 10)" || api_response=""
     fi
 
-    # If direct API request failed, try via ghproxy.net mirror (China fallback)
+    if [[ -n "${api_response}" ]] && command_exists jq; then
+        version="$(printf '%s' "${api_response}" | jq -r '.tag_name // empty' 2>/dev/null)" || version=""
+    elif [[ -n "${api_response}" ]]; then
+        version="$(printf '%s' "${api_response}" | grep -oP '"tag_name"\s*:\s*"\K[^"]+' | head -1)" || version=""
+    fi
+
     if [[ -z "${version}" ]] && command_exists curl; then
-        log_warn "GitHub API unreachable directly. Trying mirror for version lookup..."
+        log_warn "GitHub API version lookup failed via direct and configured mirror URLs."
         if command_exists jq; then
-            version="$(curl -s --connect-timeout 10 --max-time 20 "https://ghproxy.net/${api_url}" 2>/dev/null \
-                | jq -r '.tag_name // empty' 2>/dev/null)" || version=""
-        else
-            version="$(curl -s --connect-timeout 10 --max-time 20 "https://ghproxy.net/${api_url}" 2>/dev/null \
-                | grep -oP '"tag_name"\s*:\s*"\K[^"]+' | head -1)" || version=""
+            log_warn "Install jq for more robust JSON parsing during update checks."
         fi
     fi
 
@@ -215,15 +212,12 @@ _pre_update_check() {
         die "curl is required for updates but not found."
     fi
 
-    # Quick connectivity check (try GitHub directly, then via mirror)
-    if ! curl -s --connect-timeout 5 --max-time 10 -o /dev/null "https://api.github.com" 2>/dev/null; then
-        if curl -s --connect-timeout 5 --max-time 10 -o /dev/null "https://ghproxy.net/https://api.github.com" 2>/dev/null; then
-            log_info "GitHub API not directly reachable but accessible via mirror. Proceeding with mirror support."
-        else
-            log_warn "Cannot reach GitHub API (direct or mirror). Check internet connectivity."
-            if ! confirm_action "Continue anyway?"; then
-                return 1
-            fi
+    # Quick connectivity check (try GitHub directly, then configured mirrors)
+    if ! github_fetch_text "https://api.github.com" 10 5 >/dev/null; then
+        log_warn "Cannot reach GitHub API via direct or configured mirror URLs."
+        log_warn "$(github_mirror_help)"
+        if ! confirm_action "Continue anyway?"; then
+            return 1
         fi
     fi
 }
@@ -235,7 +229,7 @@ _pre_update_check() {
 #
 # Steps:
 #   1. Check current version vs latest GitHub release
-#   2. If already latest, skip (unless --force)
+#   2. If already latest, skip
 #   3. Download and run the official Xray install script
 #   4. Preserve existing config (the install script doesn't touch it)
 #   5. Restart Xray service
@@ -256,18 +250,17 @@ update_xray() {
     latest_ver="$(_get_github_latest_version "${XRAY_RELEASES_API}")"
 
     if [[ -z "${latest_ver}" ]]; then
-        log_warn "Could not determine latest Xray version from GitHub."
-        if ! confirm_action "Proceed with reinstall anyway?"; then
-            return 1
-        fi
-    else
-        log_info "Current version: ${current_ver}"
-        log_info "Latest version:  ${latest_ver}"
+        log_error "Could not determine latest Xray version from GitHub."
+        log_error "Refusing to perform a blind reinstall without verified release metadata."
+        return 1
+    fi
 
-        if [[ "${current_ver}" == "${latest_ver}" ]]; then
-            log_success "Xray is already at the latest version (${current_ver}). No update needed."
-            return 0
-        fi
+    log_info "Current version: ${current_ver}"
+    log_info "Latest version:  ${latest_ver}"
+
+    if [[ "${current_ver}" == "${latest_ver}" ]]; then
+        log_success "Xray is already at the latest version (${current_ver}). No update needed."
+        return 0
     fi
 
     if ! confirm_action "Update Xray from ${current_ver} to ${latest_ver:-latest}?"; then
@@ -323,6 +316,14 @@ update_xray() {
     # Verify version
     local new_ver
     new_ver="$(_get_installed_xray_version)"
+    if [[ -z "${new_ver}" || "${new_ver}" == "unknown" || "${new_ver}" == "not_installed" ]]; then
+        log_error "Unable to verify installed Xray version after update."
+        return 1
+    fi
+    if [[ "${new_ver}" != "${latest_ver}" ]]; then
+        log_error "Xray version verification failed: expected ${latest_ver}, got ${new_ver}."
+        return 1
+    fi
     log_success "Xray updated: ${current_ver} -> ${new_ver}"
 
     # Cascade restart: Mihomo depends on Xray as its upstream SOCKS5 proxy.
@@ -376,18 +377,17 @@ update_mihomo() {
     latest_ver="$(_get_github_latest_version "${MIHOMO_RELEASES_API}")"
 
     if [[ -z "${latest_ver}" ]]; then
-        log_warn "Could not determine latest Mihomo version."
-        if ! confirm_action "Proceed with reinstall anyway?"; then
-            return 1
-        fi
-    else
-        log_info "Current version: ${current_ver}"
-        log_info "Latest version:  ${latest_ver}"
+        log_error "Could not determine latest Mihomo version."
+        log_error "Refusing to perform a blind reinstall without verified release metadata."
+        return 1
+    fi
 
-        if [[ "${current_ver}" == "${latest_ver}" ]]; then
-            log_success "Mihomo is already at the latest version (${current_ver}). No update needed."
-            return 0
-        fi
+    log_info "Current version: ${current_ver}"
+    log_info "Latest version:  ${latest_ver}"
+
+    if [[ "${current_ver}" == "${latest_ver}" ]]; then
+        log_success "Mihomo is already at the latest version (${current_ver}). No update needed."
+        return 0
     fi
 
     if ! confirm_action "Update Mihomo from ${current_ver} to ${latest_ver:-latest}?"; then
@@ -413,15 +413,13 @@ update_mihomo() {
     if [[ -n "${latest_ver}" ]]; then
         download_url="https://github.com/MetaCubeX/mihomo/releases/download/v${latest_ver}/mihomo-${mihomo_arch}-v${latest_ver}.gz"
     else
-        # Get download URL from API (try direct, then mirror)
-        download_url="$(curl -s --connect-timeout 10 --max-time 20 "${MIHOMO_RELEASES_API}" 2>/dev/null \
+        local api_response=""
+        api_response="$(github_fetch_text "${MIHOMO_RELEASES_API}" 20 10)" || api_response=""
+        download_url="$(printf '%s' "${api_response}" \
             | jq -r ".assets[] | select(.name | test(\"${mihomo_arch}\")) | select(.name | endswith(\".gz\")) | .browser_download_url" \
             | head -1)" || download_url=""
         if [[ -z "${download_url}" ]]; then
-            log_warn "GitHub API unreachable. Trying mirror for Mihomo release info..."
-            download_url="$(curl -s --connect-timeout 10 --max-time 20 "https://ghproxy.net/${MIHOMO_RELEASES_API}" 2>/dev/null \
-                | jq -r ".assets[] | select(.name | test(\"${mihomo_arch}\")) | select(.name | endswith(\".gz\")) | .browser_download_url" \
-                | head -1)" || download_url=""
+            log_warn "GitHub API did not return Mihomo release info via direct or configured mirror URLs."
         fi
     fi
 
@@ -488,6 +486,14 @@ update_mihomo() {
 
     local new_ver
     new_ver="$(_get_installed_mihomo_version)"
+    if [[ -z "${new_ver}" || "${new_ver}" == "unknown" || "${new_ver}" == "not_installed" ]]; then
+        log_error "Unable to verify installed Mihomo version after update."
+        return 1
+    fi
+    if [[ "${new_ver}" != "${latest_ver}" ]]; then
+        log_error "Mihomo version verification failed: expected ${latest_ver}, got ${new_ver}."
+        return 1
+    fi
     log_success "Mihomo updated: ${current_ver} -> ${new_ver}"
 
     # Cascade restart: New API Docker container depends on Mihomo as its HTTP proxy.
@@ -612,29 +618,29 @@ update_new_api() {
         log_info "Recreating container manually..."
 
         # Extract the container's environment, ports, volumes, and restart policy
-        local env_args=""
-        local port_args=""
-        local volume_args=""
+        local -a env_args=()
+        local -a port_args=()
+        local -a volume_args=()
         local restart_policy=""
 
         # Environment variables
         while IFS= read -r env_line; do
             if [[ -n "${env_line}" && "${env_line}" != "null" ]]; then
-                env_args+=" -e ${env_line}"
+                env_args+=(-e "${env_line}")
             fi
         done < <(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${container_name}" 2>/dev/null)
 
         # Port mappings
         while IFS= read -r port_line; do
             if [[ -n "${port_line}" && "${port_line}" != "null" ]]; then
-                port_args+=" -p ${port_line}"
+                port_args+=(-p "${port_line}")
             fi
         done < <(docker inspect --format '{{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostIp}}:{{.HostPort}}:{{$p}}{{"\n"}}{{end}}{{end}}' "${container_name}" 2>/dev/null | sed 's|/tcp||g; s|0.0.0.0:||g')
 
         # Volume mounts
         while IFS= read -r vol_line; do
             if [[ -n "${vol_line}" && "${vol_line}" != "null" ]]; then
-                volume_args+=" -v ${vol_line}"
+                volume_args+=(-v "${vol_line}")
             fi
         done < <(docker inspect --format '{{range .Mounts}}{{.Source}}:{{.Destination}}{{"\n"}}{{end}}' "${container_name}" 2>/dev/null)
 
@@ -649,15 +655,17 @@ update_new_api() {
         docker rm "${container_name}" 2>/dev/null || true
 
         # Recreate container
-        local run_cmd="docker run -d --name ${container_name} --restart=${restart_policy}"
-        run_cmd+="${env_args}${port_args}${volume_args}"
-        run_cmd+=" ${container_image}"
+        local -a run_cmd=(docker run -d --name "${container_name}" "--restart=${restart_policy}")
+        run_cmd+=("${env_args[@]}")
+        run_cmd+=("${port_args[@]}")
+        run_cmd+=("${volume_args[@]}")
+        run_cmd+=("${container_image}")
 
-        log_info "Running: ${run_cmd}"
-        eval "${run_cmd}" || {
+        log_info "Running docker container recreation for ${container_name} (${#env_args[@]} env, ${#port_args[@]} ports, ${#volume_args[@]} mounts)."
+        if ! "${run_cmd[@]}"; then
             log_error "Failed to recreate container."
             return 1
-        }
+        fi
     fi
 
     # Wait for container to be healthy

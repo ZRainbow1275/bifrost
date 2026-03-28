@@ -395,7 +395,10 @@ export OPENAI_API_KEY=sk-xxxxx  # 管理员提供
 
 ```bash
 ./install.sh --health-check
+bash scripts/health-check.sh --verbose
 ```
+
+当前健康检查除了 `xray` / 隧道 / NewAPI 之外，还会校验 `bifrost-api` 本地 `/health` 与管理员鉴权 `401/403` 语义、`caddy` 服务状态，以及公网 `https://<DOMAIN>/manage/health`、`/manage/register`、`/manage/docs` 的可达性和前缀契约。结果会落到 `/var/log/bifrost/health.json`，适合作为真实部署后的第一道验收门。
 
 ### 深度诊断
 
@@ -407,6 +410,8 @@ bash scripts/diagnostics.sh full      # 全链路诊断
 bash scripts/diagnostics.sh gfw       # GFW 检测分析
 bash scripts/diagnostics.sh report    # 导出 JSON 诊断报告
 ```
+
+默认情况下，诊断报告会写入 `/var/log/bifrost/diagnostic-report.json`；如果当前 shell 无法写入该目录（例如本机非 root 的 Git Bash / 本地预演环境），脚本会自动回退到 `/tmp/bifrost/diagnostic-report.json`，并在终端明确提示 fallback 路径。
 
 ### 白名单管理
 

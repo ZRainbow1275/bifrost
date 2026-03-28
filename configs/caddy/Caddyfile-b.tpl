@@ -7,6 +7,11 @@
 #   3. Automatic TLS certificate management
 #   4. Security headers and access logging
 #
+# Contract note:
+#   This template is a parity fixture checked by tests/test-in-docker.sh.
+#   Runtime deployment may still render inline variants in scripts/server-b.sh
+#   (for example IP-only mode), so panel routes/headers here must stay in sync.
+#
 # Template variables:
 #   {{DOMAIN}}      - Your overseas domain name (e.g., panel.example.com)
 #   {{PANEL_PORT}}  - 3x-ui panel port (default: 2053)
@@ -88,7 +93,7 @@
 	# --------------------------------------------------
 
 	# 3x-ui panel routes
-	handle /xui/* {
+	handle /xui-panel/* {
 		# IP whitelist for panel access (restrict to admin IPs)
 		# Uncomment and modify to restrict access:
 		# @allowed remote_ip 你的管理IP/32

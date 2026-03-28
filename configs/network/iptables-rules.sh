@@ -48,7 +48,7 @@ readonly NEW_API_PORT=3000
 readonly MIHOMO_SOCKS_PORT=7891
 readonly MIHOMO_MIXED_PORT=7890
 readonly MIHOMO_HTTP_PORT=7890  # Same as mixed-port; Mihomo uses a single port for HTTP+SOCKS5
-readonly MIHOMO_DNS_PORT=53
+readonly MIHOMO_DNS_PORT=1053
 readonly NETDATA_PORT=19999
 readonly XUI_PORT="${IPTABLES_XUI_PORT:-2053}"
 
@@ -64,6 +64,7 @@ readonly DOCKER_INTERFACE="${IPTABLES_DOCKER_IFACE:-docker0}"
 
 # Persistent rules file
 readonly RULES_SAVE_FILE="/etc/iptables/bifrost.rules"
+readonly ALLOW_IPTABLES_TAKEOVER="${BIFROST_ALLOW_IPTABLES_TAKEOVER:-0}"
 
 # Log prefix for dropped packets
 readonly LOG_PREFIX="AI-GW-DROP: "
@@ -75,6 +76,41 @@ readonly LOG_RATE_LIMIT="5/minute"
 
 log_fw() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [iptables] $*"
+}
+
+detect_conflicting_firewall_owners() {
+    if iptables -S INPUT 2>/dev/null | grep -q -- '-A INPUT -j VPN_INPUT'; then
+        return 0
+    fi
+    if iptables -S FORWARD 2>/dev/null | grep -q -- '-A FORWARD -j VPN_FORWARD'; then
+        return 0
+    fi
+    if iptables -L VPN_INPUT -n >/dev/null 2>&1; then
+        return 0
+    fi
+    if iptables -L VPN_FORWARD -n >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+mihomo_tcp_ports() {
+    printf '%s\n' "${MIHOMO_SOCKS_PORT}" "${MIHOMO_HTTP_PORT}" "${MIHOMO_MIXED_PORT}" | awk '!seen[$0]++'
+}
+
+ensure_firewall_takeover_allowed() {
+    if [[ "${ALLOW_IPTABLES_TAKEOVER}" == "1" ]]; then
+        return 0
+    fi
+
+    if detect_conflicting_firewall_owners; then
+        log_fw "ERROR: Existing VPN iptables chains detected (VPN_INPUT/VPN_FORWARD)."
+        log_fw "ERROR: Refusing to take over the firewall because this would remove VPN isolation rules."
+        log_fw "ERROR: Remove the VPN firewall first, or rerun with BIFROST_ALLOW_IPTABLES_TAKEOVER=1 if takeover is intentional."
+        return 1
+    fi
+
+    return 0
 }
 
 # Detect the primary public-facing network interface
@@ -101,6 +137,7 @@ detect_vpn_interface() {
 
 # Flush all existing rules (clean slate)
 flush_rules() {
+    ensure_firewall_takeover_allowed || return 1
     log_fw "Flushing all iptables rules..."
 
     # Flush all chains in filter, nat, mangle tables
@@ -120,6 +157,7 @@ flush_rules() {
 # =============================================================================
 
 apply_rules() {
+    ensure_firewall_takeover_allowed || return 1
     local wan_iface
     wan_iface="$(detect_wan_interface)"
     local vpn_iface
@@ -256,12 +294,11 @@ apply_rules() {
     log_fw "Configuring Docker -> Mihomo proxy access..."
 
     # Docker containers can reach Mihomo proxy ports
-    iptables -A INPUT -i "${DOCKER_INTERFACE}" -s "${DOCKER_SUBNET}" \
-        -p tcp --dport "${MIHOMO_SOCKS_PORT}" -j ACCEPT
-    iptables -A INPUT -i "${DOCKER_INTERFACE}" -s "${DOCKER_SUBNET}" \
-        -p tcp --dport "${MIHOMO_HTTP_PORT}" -j ACCEPT
-    iptables -A INPUT -i "${DOCKER_INTERFACE}" -s "${DOCKER_SUBNET}" \
-        -p tcp --dport "${MIHOMO_MIXED_PORT}" -j ACCEPT
+    local mihomo_port=""
+    while IFS= read -r mihomo_port; do
+        iptables -A INPUT -i "${DOCKER_INTERFACE}" -s "${DOCKER_SUBNET}" \
+            -p tcp --dport "${mihomo_port}" -j ACCEPT
+    done < <(mihomo_tcp_ports)
 
     # Docker containers can use Mihomo DNS
     iptables -A INPUT -i "${DOCKER_INTERFACE}" -s "${DOCKER_SUBNET}" \
@@ -295,7 +332,7 @@ apply_rules() {
     iptables -A INPUT -p tcp --dport "${NEW_API_PORT}" -j AI_GW_LOG_DROP
 
     # Mihomo ports - only localhost, Docker, and VPN
-    for port in "${MIHOMO_SOCKS_PORT}" "${MIHOMO_HTTP_PORT}" "${MIHOMO_MIXED_PORT}"; do
+    for port in $(mihomo_tcp_ports); do
         iptables -A INPUT -p tcp --dport "${port}" -s 127.0.0.0/8 -j ACCEPT
         iptables -A INPUT -p tcp --dport "${port}" -s "${VPN_SUBNET}" -j ACCEPT
         iptables -A INPUT -p tcp --dport "${port}" -s "${SERVICE_SUBNET}" -j ACCEPT

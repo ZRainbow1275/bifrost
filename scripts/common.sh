@@ -31,14 +31,15 @@ readonly _COMMON_SH_LOADED=1
 readonly _COMMON_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly PROJECT_ROOT="$(cd "${_COMMON_SCRIPT_DIR}/.." && pwd)"
 
-readonly LOG_FILE="/var/log/bifrost.log"
+readonly LOG_FILE="/var/log/bifrost/bifrost.log"
 readonly BACKUP_DIR="/var/backups/bifrost"
 
-# Ensure the log file directory exists; fall back to /tmp if not writable.
-if ! mkdir -p "$(dirname "${LOG_FILE}")" 2>/dev/null; then
+# Ensure the log file is actually appendable; fall back to /tmp if not writable.
+_LOG_FILE_FALLBACK="${LOG_FILE}"
+if ! mkdir -p "$(dirname "${LOG_FILE}")" 2>/dev/null || ! touch "${LOG_FILE}" 2>/dev/null; then
     _LOG_FILE_FALLBACK="/tmp/bifrost.log"
-else
-    _LOG_FILE_FALLBACK="${LOG_FILE}"
+    mkdir -p "$(dirname "${_LOG_FILE_FALLBACK}")" 2>/dev/null || true
+    touch "${_LOG_FILE_FALLBACK}" 2>/dev/null || true
 fi
 readonly EFFECTIVE_LOG_FILE="${_LOG_FILE_FALLBACK}"
 
@@ -406,6 +407,45 @@ install_if_missing() {
 # Section 8 : Docker Helpers
 # =============================================================================
 
+# Retrieve the Docker server version in normalized form.
+# Returns the version via stdout, or "unknown" if it cannot be determined.
+docker_server_version() {
+    local docker_ver
+    docker_ver="$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo 'unknown')"
+    docker_ver="${docker_ver%%[-+~]*}"
+    echo "${docker_ver:-unknown}"
+}
+
+# Compare two dotted versions.
+# Returns 0 when current_version >= minimum_version.
+version_gte() {
+    local current_version="${1:?version_gte requires a current version}"
+    local minimum_version="${2:?version_gte requires a minimum version}"
+
+    [[ "$(printf '%s\n%s\n' "${minimum_version}" "${current_version}" | LC_ALL=C sort -V | head -n1)" == "${minimum_version}" ]]
+}
+
+# Require a minimum Docker server version for a specific feature.
+# Returns 0 when the requirement is met, 1 otherwise.
+require_docker_server_version() {
+    local minimum_version="${1:?require_docker_server_version requires a minimum version}"
+    local feature_name="${2:-this feature}"
+    local docker_ver
+    docker_ver="$(docker_server_version)"
+
+    if [[ -z "${docker_ver}" || "${docker_ver}" == "unknown" ]]; then
+        log_error "Unable to determine Docker server version. Cannot validate support for ${feature_name}."
+        return 1
+    fi
+
+    if ! version_gte "${docker_ver}" "${minimum_version}"; then
+        log_error "Docker ${minimum_version}+ is required for ${feature_name}. Current server version: ${docker_ver}."
+        return 1
+    fi
+
+    return 0
+}
+
 # Check if Docker Engine is installed and the daemon is running.
 # Returns 0 if healthy, 1 otherwise.
 check_docker() {
@@ -420,7 +460,7 @@ check_docker() {
     fi
 
     local docker_ver
-    docker_ver="$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo 'unknown')"
+    docker_ver="$(docker_server_version)"
     log_info "Docker version: ${docker_ver}"
     return 0
 }
@@ -725,8 +765,8 @@ template_render() {
         value="${kv#*=}"
         # Escape special characters in value for sed.
         local escaped_value
-        escaped_value="$(printf '%s' "${value}" | sed -e 's/[\/&]/\\&/g')"
-        content="$(echo "${content}" | sed "s/{{${key}}}/${escaped_value}/g")"
+        escaped_value="$(printf '%s' "${value}" | sed -e 's/[\\/&]/\\&/g')"
+        content="$(printf '%s' "${content}" | sed "s/{{${key}}}/${escaped_value}/g")"
     done
 
     echo "${content}" > "${output}"
@@ -871,14 +911,21 @@ _spinner_loop() {
 
 # Internal: stop the running spinner.
 _spinner_stop() {
+    local had_spinner=0
     if [[ -n "${_SPINNER_PID}" ]]; then
+        had_spinner=1
         kill "${_SPINNER_PID}" 2>/dev/null || true
         wait "${_SPINNER_PID}" 2>/dev/null || true
         _SPINNER_PID=""
     fi
-    # Restore cursor and clear the spinner line.
-    tput cnorm 2>/dev/null || true
-    printf "\r%*s\r" 80 ""
+
+    # Restore cursor and clear the spinner line only when a spinner actually ran
+    # on an interactive terminal. This avoids polluting `--help` / `--version`
+    # stdout with carriage-return padding via the EXIT trap.
+    if [[ "${had_spinner}" -eq 1 && -t 1 ]]; then
+        tput cnorm 2>/dev/null || true
+        printf "\r%*s\r" 80 ""
+    fi
 }
 
 # Start a spinner with a message.  Must call spinner_stop to clear it.
@@ -1031,62 +1078,114 @@ is_in_china() {
     return 1
 }
 
-# Download a file from a GitHub release URL, with automatic China mirror fallback.
+# Return newline-delimited GitHub mirror prefixes.
+# Override with BIFROST_GITHUB_MIRROR_PREFIXES="https://mirror1,https://mirror2".
+github_mirror_prefixes() {
+    local configured="${BIFROST_GITHUB_MIRROR_PREFIXES:-}"
+    local defaults=$'https://ghproxy.net\nhttps://mirror.ghproxy.com\nhttps://gh-proxy.com'
+    local prefixes="${configured:-${defaults}}"
+
+    printf '%s\n' "${prefixes}" \
+        | tr ',; ' '\n\n\n' \
+        | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' \
+        | awk '!seen[$0]++'
+}
+
+# Return a concise remediation hint for GitHub mirror overrides.
+github_mirror_help() {
+    echo "Override GitHub mirrors with BIFROST_GITHUB_MIRROR_PREFIXES='https://mirror1.example,https://mirror2.example' and retry."
+}
+
+# Return newline-delimited candidate URLs for a GitHub asset/API URL.
+github_url_candidates() {
+    local url="${1:?github_url_candidates requires a URL}"
+    local prefix=""
+
+    printf '%s\n' "${url}"
+
+    while IFS= read -r prefix; do
+        [[ -n "${prefix}" ]] || continue
+        printf '%s\n' "${prefix%/}/${url}"
+    done < <(github_mirror_prefixes)
+
+    if [[ "${url}" == *"raw.githubusercontent.com"* ]]; then
+        local jsdelivr_url=""
+        jsdelivr_url="$(printf '%s' "${url}" | sed -E 's|https://raw.githubusercontent.com/([^/]+)/([^/]+)/([^/]+)/(.*)|https://cdn.jsdelivr.net/gh/\1/\2@\3/\4|')"
+        [[ -n "${jsdelivr_url}" ]] && printf '%s\n' "${jsdelivr_url}"
+    fi
+}
+
+# Download a GitHub asset/API URL to disk, with configurable mirror fallback.
 # Usage: github_download "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip" "/tmp/xray.zip"
-# Tries mirrors in order: original -> ghproxy.com -> mirror.ghproxy.com -> jsdelivr (for raw only)
 github_download() {
     local url="${1:?github_download requires a URL}"
     local dest="${2:?github_download requires a destination path}"
     local max_time="${3:-120}"
+    local candidate_url=""
+    local attempt_index=0
 
-    # Try original URL first (works outside China or with proxy)
-    if curl -fsSL --connect-timeout 15 --max-time "${max_time}" --retry 2 --retry-delay 3 -o "${dest}" "${url}" 2>/dev/null; then
-        if [[ -s "${dest}" ]]; then
-            return 0
+    while IFS= read -r candidate_url; do
+        [[ -n "${candidate_url}" ]] || continue
+
+        if [[ "${attempt_index}" -gt 0 ]]; then
+            log_info "Trying GitHub mirror URL: ${candidate_url}"
         fi
-    fi
 
-    log_warn "Direct download failed: ${url}"
-    log_info "Trying China-friendly mirror URLs..."
-
-    # Mirror list for GitHub releases/raw content
-    local mirrors=()
-
-    # ghproxy.net mirror (reliable China proxy for GitHub)
-    mirrors+=("https://ghproxy.net/${url}")
-    # mirror.ghproxy.com
-    mirrors+=("https://mirror.ghproxy.com/${url}")
-    # gh-proxy.com
-    mirrors+=("https://gh-proxy.com/${url}")
-
-    # For raw.githubusercontent.com URLs, also try jsdelivr CDN
-    if [[ "${url}" == *"raw.githubusercontent.com"* ]]; then
-        # Convert: https://raw.githubusercontent.com/OWNER/REPO/BRANCH/PATH
-        #      to: https://cdn.jsdelivr.net/gh/OWNER/REPO@BRANCH/PATH
-        local jsdelivr_url
-        jsdelivr_url="$(echo "${url}" | sed -E 's|https://raw.githubusercontent.com/([^/]+)/([^/]+)/([^/]+)/(.*)|https://cdn.jsdelivr.net/gh/\1/\2@\3/\4|')"
-        mirrors+=("${jsdelivr_url}")
-    fi
-
-    # For github.com/OWNER/REPO/releases/download URLs, try jsdelivr release proxy
-    if [[ "${url}" == *"github.com/"*"/releases/"* ]]; then
-        # Also try the direct ghproxy format with /https:// prefix stripped
-        local clean_url="${url#https://}"
-        mirrors+=("https://ghproxy.net/https://${clean_url}")
-    fi
-
-    for mirror_url in "${mirrors[@]}"; do
-        log_info "Trying mirror: ${mirror_url}"
-        if curl -fsSL --connect-timeout 20 --max-time "${max_time}" --retry 2 --retry-delay 3 -o "${dest}" "${mirror_url}" 2>/dev/null; then
+        if curl -fsSL --connect-timeout 15 --max-time "${max_time}" --retry 2 --retry-delay 3 -o "${dest}" "${candidate_url}" 2>/dev/null; then
             if [[ -s "${dest}" ]]; then
-                log_success "Downloaded via mirror: ${mirror_url}"
+                if [[ "${attempt_index}" -gt 0 ]]; then
+                    log_success "Downloaded via configured GitHub mirror: ${candidate_url}"
+                fi
                 return 0
             fi
         fi
-    done
 
-    log_error "All download attempts failed for: ${url}"
-    rm -f "${dest}" 2>/dev/null || true
+        rm -f "${dest}" 2>/dev/null || true
+
+        if [[ "${attempt_index}" -eq 0 ]]; then
+            log_warn "Direct GitHub download failed: ${url}"
+        fi
+
+        attempt_index=$(( attempt_index + 1 ))
+    done < <(github_url_candidates "${url}" | awk '!seen[$0]++')
+
+    log_error "All GitHub download attempts failed for: ${url}"
+    log_error "$(github_mirror_help)"
+    return 1
+}
+
+# Fetch text content from a GitHub URL, with configurable mirror fallback.
+# Returns the body on stdout and writes diagnostics to stderr.
+github_fetch_text() {
+    local url="${1:?github_fetch_text requires a URL}"
+    local max_time="${2:-60}"
+    local connect_timeout="${3:-10}"
+    local candidate_url=""
+    local response=""
+    local attempt_index=0
+
+    while IFS= read -r candidate_url; do
+        [[ -n "${candidate_url}" ]] || continue
+
+        if [[ "${attempt_index}" -gt 0 ]]; then
+            log_info "Trying GitHub mirror fetch: ${candidate_url}" >&2
+        fi
+
+        response="$(curl -fsSL --connect-timeout "${connect_timeout}" --max-time "${max_time}" "${candidate_url}" 2>/dev/null)" || response=""
+        if [[ -n "${response}" ]]; then
+            printf '%s' "${response}"
+            return 0
+        fi
+
+        if [[ "${attempt_index}" -eq 0 ]]; then
+            log_warn "Direct GitHub fetch failed: ${url}" >&2
+        fi
+
+        attempt_index=$(( attempt_index + 1 ))
+    done < <(github_url_candidates "${url}" | awk '!seen[$0]++')
+
+    log_error "All GitHub fetch attempts failed for: ${url}" >&2
+    log_error "$(github_mirror_help)" >&2
     return 1
 }
 
@@ -1099,13 +1198,48 @@ github_download_script() {
     local tmp_script
     tmp_script="$(mktemp /tmp/gh-script.XXXXXX.sh)"
 
-    if github_download "${url}" "${tmp_script}" 60; then
+    if github_download "${url}" "${tmp_script}" 60 >&2; then
         cat "${tmp_script}"
         rm -f "${tmp_script}"
         return 0
     fi
 
     rm -f "${tmp_script}"
+    return 1
+}
+
+# Clone a GitHub repository with configurable mirror fallback.
+github_clone_repo() {
+    local repo_url="${1:?github_clone_repo requires a repository URL}"
+    local dest="${2:?github_clone_repo requires a destination path}"
+    local candidate_url=""
+    local attempt_index=0
+
+    while IFS= read -r candidate_url; do
+        [[ -n "${candidate_url}" ]] || continue
+
+        if [[ "${attempt_index}" -gt 0 ]]; then
+            log_info "Trying GitHub mirror clone: ${candidate_url}"
+        fi
+
+        if git clone --quiet "${candidate_url}" "${dest}" 2>/dev/null; then
+            if [[ "${attempt_index}" -gt 0 ]]; then
+                log_success "Cloned via configured GitHub mirror: ${candidate_url}"
+            fi
+            return 0
+        fi
+
+        rm -rf "${dest}" 2>/dev/null || true
+
+        if [[ "${attempt_index}" -eq 0 ]]; then
+            log_warn "Direct GitHub clone failed: ${repo_url}"
+        fi
+
+        attempt_index=$(( attempt_index + 1 ))
+    done < <(github_url_candidates "${repo_url}" | awk '!seen[$0]++')
+
+    log_error "All GitHub clone attempts failed for: ${repo_url}"
+    log_error "$(github_mirror_help)"
     return 1
 }
 
@@ -1391,4 +1525,6 @@ _install_base_dependencies() {
 # =============================================================================
 # End of common.sh
 # =============================================================================
-log_info "common.sh loaded successfully."
+if [[ "${BIFROST_TRACE_COMMON_LOAD:-0}" == "1" ]]; then
+    log_info "common.sh loaded successfully."
+fi

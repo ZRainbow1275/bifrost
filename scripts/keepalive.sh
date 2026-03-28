@@ -91,6 +91,8 @@ fi
 # Project paths
 : "${INSTALL_DIR:=/opt/bifrost}"
 : "${LOG_DIR:=/var/log/bifrost}"
+: "${KEEPALIVE_STATE_DIR:=/var/lib/bifrost}"
+: "${SYSTEMD_UNIT_DIR:=/etc/systemd/system}"
 
 readonly KEEPALIVE_SYSCTL_SRC="${_KA_PROJECT_DIR}/configs/keepalive/keepalive-sysctl.conf"
 readonly KEEPALIVE_SYSCTL_DEST="/etc/sysctl.d/98-ai-gateway-keepalive.conf"
@@ -100,6 +102,9 @@ readonly HEARTBEAT_SRC="${_KA_PROJECT_DIR}/configs/keepalive/heartbeat.sh"
 readonly WATCHDOG_SRC="${_KA_PROJECT_DIR}/configs/keepalive/watchdog.sh"
 readonly HEARTBEAT_DEST="${INSTALL_DIR}/heartbeat.sh"
 readonly WATCHDOG_DEST="${INSTALL_DIR}/watchdog.sh"
+readonly HEARTBEAT_SERVICE_UNIT="${SYSTEMD_UNIT_DIR}/ai-gateway-heartbeat.service"
+readonly HEARTBEAT_TIMER_UNIT="${SYSTEMD_UNIT_DIR}/ai-gateway-heartbeat.timer"
+readonly WATCHDOG_SERVICE_UNIT="${SYSTEMD_UNIT_DIR}/ai-gateway-watchdog.service"
 
 ###############################################################################
 # setup_tcp_keepalive()
@@ -191,14 +196,14 @@ setup_xray_keepalive() {
 
     # Validate Xray config exists
     if [[ ! -f "${XRAY_CONFIG}" ]]; then
-        log_warn "Xray config not found at ${XRAY_CONFIG}. Skipping Xray keepalive setup."
+        log_error "Xray config not found at ${XRAY_CONFIG}. Refusing to deploy keepalive without a real Xray config."
         log_info "Run this again after Xray is installed and configured."
-        return 0
+        return 1
     fi
 
     # Validate JSON syntax
     if ! jq empty "${XRAY_CONFIG}" 2>/dev/null; then
-        log_error "Xray config at ${XRAY_CONFIG} is not valid JSON. Skipping."
+        log_error "Xray config at ${XRAY_CONFIG} is not valid JSON. Refusing to patch keepalive settings."
         return 1
     fi
 
@@ -331,7 +336,8 @@ setup_heartbeat_service() {
     # Create directories
     mkdir -p "${INSTALL_DIR}"
     mkdir -p "${LOG_DIR}"
-    mkdir -p /var/lib/bifrost
+    mkdir -p "${KEEPALIVE_STATE_DIR}"
+    mkdir -p "${SYSTEMD_UNIT_DIR}"
 
     # Deploy heartbeat script
     if [[ -f "${HEARTBEAT_SRC}" ]]; then
@@ -344,7 +350,7 @@ setup_heartbeat_service() {
     chmod +x "${HEARTBEAT_DEST}"
 
     # Create systemd service unit
-    cat > /etc/systemd/system/ai-gateway-heartbeat.service <<HBSERVICE_EOF
+    cat > "${HEARTBEAT_SERVICE_UNIT}" <<HBSERVICE_EOF
 [Unit]
 Description=Bifrost - Heartbeat Probe
 Documentation=https://github.com/bifrost
@@ -364,12 +370,12 @@ CPUQuota=10%
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=${LOG_DIR} /var/lib/bifrost
+ReadWritePaths=${LOG_DIR} ${KEEPALIVE_STATE_DIR}
 PrivateTmp=true
 HBSERVICE_EOF
 
     # Create systemd timer (30-second interval)
-    cat > /etc/systemd/system/ai-gateway-heartbeat.timer <<HBTIMER_EOF
+    cat > "${HEARTBEAT_TIMER_UNIT}" <<HBTIMER_EOF
 [Unit]
 Description=Bifrost - Heartbeat Probe Timer (every 30s)
 Documentation=https://github.com/bifrost
@@ -385,11 +391,27 @@ WantedBy=timers.target
 HBTIMER_EOF
 
     # Enable and start the timer
-    systemctl daemon-reload
-    systemctl enable ai-gateway-heartbeat.timer
-    systemctl start ai-gateway-heartbeat.timer
+    systemctl daemon-reload || {
+        log_error "Failed to reload systemd before enabling heartbeat timer."
+        return 1
+    }
+    systemctl enable ai-gateway-heartbeat.timer || {
+        log_error "Failed to enable heartbeat timer."
+        return 1
+    }
+    systemctl start ai-gateway-heartbeat.timer || {
+        log_error "Failed to start heartbeat timer."
+        return 1
+    }
 
-    log_success "Heartbeat service deployed."
+    sleep 1
+    if systemctl is-active --quiet ai-gateway-heartbeat.timer; then
+        log_success "Heartbeat service deployed."
+    else
+        log_error "Heartbeat timer is not active after startup. Check: journalctl -u ai-gateway-heartbeat"
+        return 1
+    fi
+
     log_info "  Script:  ${HEARTBEAT_DEST}"
     log_info "  Timer:   ai-gateway-heartbeat.timer (every 30s)"
     log_info "  Status:  ${LOG_DIR}/heartbeat.json"
@@ -417,7 +439,8 @@ setup_watchdog() {
     # Create directories
     mkdir -p "${INSTALL_DIR}"
     mkdir -p "${LOG_DIR}"
-    mkdir -p /var/lib/bifrost/watchdog
+    mkdir -p "${KEEPALIVE_STATE_DIR}/watchdog"
+    mkdir -p "${SYSTEMD_UNIT_DIR}"
 
     # Deploy watchdog script
     if [[ -f "${WATCHDOG_SRC}" ]]; then
@@ -430,7 +453,7 @@ setup_watchdog() {
     chmod +x "${WATCHDOG_DEST}"
 
     # Create systemd service unit
-    cat > /etc/systemd/system/ai-gateway-watchdog.service <<WDSERVICE_EOF
+    cat > "${WATCHDOG_SERVICE_UNIT}" <<WDSERVICE_EOF
 [Unit]
 Description=Bifrost - Service Watchdog
 Documentation=https://github.com/bifrost
@@ -454,22 +477,32 @@ CPUQuota=5%
 # Security hardening
 NoNewPrivileges=false
 ProtectSystem=full
-ReadWritePaths=${LOG_DIR} /var/lib/bifrost
+ReadWritePaths=${LOG_DIR} ${KEEPALIVE_STATE_DIR}
 
 [Install]
 WantedBy=multi-user.target
 WDSERVICE_EOF
 
     # Enable and start the watchdog service
-    systemctl daemon-reload
-    systemctl enable ai-gateway-watchdog.service
-    systemctl start ai-gateway-watchdog.service
+    systemctl daemon-reload || {
+        log_error "Failed to reload systemd before enabling watchdog service."
+        return 1
+    }
+    systemctl enable ai-gateway-watchdog.service || {
+        log_error "Failed to enable watchdog service."
+        return 1
+    }
+    systemctl start ai-gateway-watchdog.service || {
+        log_error "Failed to start watchdog service."
+        return 1
+    }
 
     sleep 2
     if systemctl is-active --quiet ai-gateway-watchdog.service; then
         log_success "Watchdog service is running."
     else
-        log_warn "Watchdog service may not have started. Check: journalctl -u ai-gateway-watchdog"
+        log_error "Watchdog service failed to reach active state. Check: journalctl -u ai-gateway-watchdog"
+        return 1
     fi
 
     log_info "  Script:  ${WATCHDOG_DEST}"
@@ -490,19 +523,19 @@ deploy_keepalive() {
     echo ""
 
     # Step 1: TCP keepalive kernel parameters
-    setup_tcp_keepalive
+    setup_tcp_keepalive || return 1
     echo ""
 
     # Step 2: Xray sockopt keepalive
-    setup_xray_keepalive
+    setup_xray_keepalive || return 1
     echo ""
 
     # Step 3: Heartbeat probe service
-    setup_heartbeat_service
+    setup_heartbeat_service || return 1
     echo ""
 
     # Step 4: Service watchdog
-    setup_watchdog
+    setup_watchdog || return 1
     echo ""
 
     log_step "============================================"

@@ -292,7 +292,8 @@ _remove_xray_user() {
     local uuid="${1:?}"
 
     if [[ ! -f "${XRAY_CONFIG}" ]]; then
-        return 0
+        log_error "Xray config not found at ${XRAY_CONFIG}. Cannot revoke UUID ${uuid}."
+        return 1
     fi
 
     if ! command_exists jq; then
@@ -305,7 +306,9 @@ _remove_xray_user() {
         return 1
     fi
 
-    cp "${XRAY_CONFIG}" "${XRAY_CONFIG}.bak.$(date +%Y%m%d%H%M%S)"
+    local backup
+    backup="${XRAY_CONFIG}.bak.$(date +%Y%m%d%H%M%S)"
+    cp "${XRAY_CONFIG}" "${backup}"
 
     local tmp_config
     tmp_config="$(mktemp)"
@@ -317,13 +320,27 @@ _remove_xray_user() {
         log_success "VPN user (UUID: ${uuid}) removed from Xray config."
     else
         rm -f "${tmp_config}"
-        log_warn "Failed to remove user from Xray config."
+        log_error "Failed to remove user from Xray config."
+        return 1
     fi
 
     if command_exists systemctl && systemctl is-active --quiet xray 2>/dev/null; then
-        systemctl restart xray 2>/dev/null || true
+        if ! systemctl restart xray 2>/dev/null; then
+            log_error "Xray restart failed after removing UUID ${uuid}. Restoring previous config."
+            cp "${backup}" "${XRAY_CONFIG}"
+            systemctl restart xray 2>/dev/null || true
+            return 1
+        fi
         sleep 2
+        if ! systemctl is-active --quiet xray 2>/dev/null; then
+            log_error "Xray did not come back after removing UUID ${uuid}. Restoring previous config."
+            cp "${backup}" "${XRAY_CONFIG}"
+            systemctl restart xray 2>/dev/null || true
+            return 1
+        fi
     fi
+
+    return 0
 }
 
 ###############################################################################
@@ -447,12 +464,104 @@ _disable_api_token() {
         -X DELETE "${NEW_API_BASE_URL}/api/token/${token_id}" \
         -H "Authorization: Bearer ${admin_token}" 2>/dev/null)" || response=""
 
-    # Log only success/failure status, not the full API response (may contain tokens)
-    if [[ -n "${response}" ]]; then
-        log_info "API token disable/delete completed (response received)."
-    else
+    if [[ -z "${response}" ]]; then
         log_warn "API token disable/delete: no response received."
+        return 1
     fi
+
+    if command_exists jq; then
+        local success err_msg
+        success="$(echo "${response}" | jq -r '.success // false' 2>/dev/null)" || success="false"
+        if [[ "${success}" == "true" ]]; then
+            log_success "API token ID ${token_id} deleted."
+            return 0
+        fi
+        err_msg="$(echo "${response}" | jq -r '.message // "unknown error"' 2>/dev/null)" || err_msg="unknown"
+        log_warn "API token delete failed: ${err_msg}"
+        return 1
+    fi
+
+    if grep -q '"success"[[:space:]]*:[[:space:]]*true' <<< "${response}"; then
+        log_success "API token ID ${token_id} deleted."
+        return 0
+    fi
+
+    log_warn "API token disable/delete could not be verified."
+    return 1
+}
+
+###############################################################################
+# _force_revoke_vpn_user()
+#
+# Revoke a VPN user non-interactively by temporarily auto-approving prompts.
+###############################################################################
+_force_revoke_vpn_user() {
+    local username="${1:?}"
+
+    if ! declare -f revoke_vpn_user >/dev/null 2>&1; then
+        return 1
+    fi
+
+    local saved_confirm_action=""
+    if declare -f confirm_action >/dev/null 2>&1; then
+        saved_confirm_action="$(declare -f confirm_action)"
+    fi
+
+    confirm_action() { return 0; }
+    local status=0
+    revoke_vpn_user "${username}" >/dev/null 2>&1 || status=$?
+
+    if [[ -n "${saved_confirm_action}" ]]; then
+        eval "${saved_confirm_action}"
+    else
+        unset -f confirm_action
+    fi
+
+    return "${status}"
+}
+
+###############################################################################
+# _rollback_user_creation()
+#
+# Best-effort rollback for partially created user access artifacts.
+#
+# Arguments:
+#   $1 - username
+#   $2 - VPN UUID
+#   $3 - API token ID (optional)
+#   $4 - whether a VPN peer was provisioned (true/false)
+###############################################################################
+_rollback_user_creation() {
+    local username="${1:?}"
+    local user_uuid="${2:-}"
+    local api_token_id="${3:-}"
+    local vpn_peer_created="${4:-false}"
+    local rollback_failed=false
+
+    log_warn "Rolling back partially created access artifacts for '${username}'..."
+
+    if [[ -n "${api_token_id}" && "${api_token_id}" != "none" ]]; then
+        if ! _disable_api_token "${api_token_id}"; then
+            log_warn "Failed to disable API token ID ${api_token_id} during rollback."
+            rollback_failed=true
+        fi
+    fi
+
+    if [[ -n "${user_uuid}" ]]; then
+        if ! _remove_xray_user "${user_uuid}"; then
+            log_warn "Failed to remove Xray user ${user_uuid:0:8}... during rollback."
+            rollback_failed=true
+        fi
+    fi
+
+    if [[ "${vpn_peer_created}" == "true" ]]; then
+        if ! _force_revoke_vpn_user "${username}"; then
+            log_warn "Failed to revoke WireGuard peer for '${username}' during rollback."
+            rollback_failed=true
+        fi
+    fi
+
+    [[ "${rollback_failed}" == "false" ]]
 }
 
 ###############################################################################
@@ -523,14 +632,14 @@ create_user() {
 
     # --- 2. Add to Xray config ---
     log_info "[2/${total_steps}] Adding to Xray VPN server..."
-    local xray_ok=false
-    if _add_xray_user "${user_uuid}" "${email}"; then
-        xray_ok=true
-    else
-        log_warn "Xray user addition had issues (see above). VPN access may need manual setup."
+    if ! _add_xray_user "${user_uuid}" "${email}"; then
+        log_error "Aborting user creation because Xray access could not be provisioned."
+        return 1
     fi
+    local xray_ok=true
 
     # --- 2.5: Create WireGuard peer (if VPN deployed) ---
+    local vpn_peer_ok=false
     if ${vpn_deployed}; then
         log_info "[3/${total_steps}] Creating WireGuard VPN peer..."
         local _vpn_script_dir
@@ -539,19 +648,25 @@ create_user() {
             # shellcheck source=scripts/vpn.sh
             source "${_vpn_script_dir}/vpn.sh" 2>/dev/null || true
             if declare -f create_vpn_user &>/dev/null; then
-                create_vpn_user "${username}" || log_warn "WireGuard peer creation failed (non-fatal)."
-                # Check if WireGuard config was generated
                 local vpn_users_dir="/etc/bifrost/vpn/users"
-                if [[ -f "${vpn_users_dir}/${username}/wg-${username}.conf" ]]; then
+                if create_vpn_user "${username}" && [[ -f "${vpn_users_dir}/${username}/wg-${username}.conf" ]]; then
                     wg_config_file="${vpn_users_dir}/${username}/wg-${username}.conf"
+                    vpn_peer_ok=true
                     log_success "WireGuard config: ${wg_config_file}"
+                else
+                    log_error "WireGuard peer creation did not produce a client config for '${username}'."
                 fi
             else
-                log_warn "create_vpn_user function not available. WireGuard peer not created."
-                log_warn "Create WireGuard peer manually: bash scripts/vpn.sh create_user ${username}"
+                log_error "create_vpn_user function not available. Cannot complete WireGuard credential delivery."
             fi
         else
-            log_warn "vpn.sh not found. WireGuard peer not created."
+            log_error "vpn.sh not found. Cannot complete WireGuard credential delivery."
+        fi
+
+        if ! ${vpn_peer_ok}; then
+            _rollback_user_creation "${username}" "${user_uuid}" "" "false" || true
+            log_error "Aborting user creation because required WireGuard credentials were not provisioned."
+            return 1
         fi
     fi
 
@@ -569,7 +684,9 @@ create_user() {
         api_token_id="$(echo "${api_result}" | cut -d'|' -f2)"
         log_success "API token created: sk-${api_token_key:0:8}..."
     else
-        log_warn "API token creation failed. User can use VPN only, or token can be created later."
+        _rollback_user_creation "${username}" "${user_uuid}" "" "${vpn_peer_ok}" || true
+        log_error "Aborting user creation because API token provisioning failed."
+        return 1
     fi
 
     # --- 4. Register in local registry ---
@@ -610,16 +727,12 @@ create_user() {
     echo "  Username:    ${username}"
     echo "  Email:       ${email}"
     echo "  VPN UUID:    ${user_uuid}"
-    echo "  VPN Status:  $(if ${xray_ok}; then echo -e "${GREEN}active${NC}"; else echo -e "${YELLOW}pending${NC}"; fi)"
+    echo "  VPN Status:  $(if ${xray_ok}; then echo -e "${GREEN}active${NC}"; else echo -e "${YELLOW}failed${NC}"; fi)"
     if [[ -n "${wg_config_file}" ]]; then
         echo "  WireGuard:   ${wg_config_file}"
-    elif ${vpn_deployed}; then
-        echo "  WireGuard:   pending (create manually via VPN menu)"
     fi
     if [[ -n "${api_token_key}" ]]; then
         echo "  API Token:   sk-${api_token_key}"
-    else
-        echo "  API Token:   not created (create manually in New API panel)"
     fi
     echo "  Credentials: ${user_creds_file}"
     echo "  Guide:       ${USER_GUIDES_DIR}/${username}-guide.md"
@@ -712,14 +825,48 @@ disable_user() {
         return 0
     fi
 
+    local disable_failed=false
+    local wireguard_revoked=false
+    local vpn_users_dir="/etc/bifrost/vpn/users"
+
     # --- Revoke VPN access ---
     log_info "Revoking VPN access..."
-    _remove_xray_user "${user_uuid}"
+    if ! _remove_xray_user "${user_uuid}"; then
+        log_error "Failed to revoke Xray access for '${username}'."
+        disable_failed=true
+    fi
+
+    if [[ -d "${vpn_users_dir}/${username}" ]]; then
+        log_info "Revoking WireGuard access..."
+        local _vpn_script_dir
+        _vpn_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        if [[ -f "${_vpn_script_dir}/vpn.sh" ]]; then
+            # shellcheck source=scripts/vpn.sh
+            source "${_vpn_script_dir}/vpn.sh" 2>/dev/null || true
+            if _force_revoke_vpn_user "${username}"; then
+                wireguard_revoked=true
+            else
+                log_error "Failed to revoke WireGuard access for '${username}'."
+                disable_failed=true
+            fi
+        else
+            log_error "vpn.sh not found. Cannot revoke WireGuard access for '${username}'."
+            disable_failed=true
+        fi
+    fi
 
     # --- Revoke API token ---
     if [[ -n "${api_token_id}" && "${api_token_id}" != "none" ]]; then
         log_info "Disabling API token (ID: ${api_token_id})..."
-        _disable_api_token "${api_token_id}" || log_warn "API token disable may have failed."
+        if ! _disable_api_token "${api_token_id}"; then
+            log_error "Failed to disable API token ${api_token_id}."
+            disable_failed=true
+        fi
+    fi
+
+    if [[ "${disable_failed}" == "true" ]]; then
+        log_error "Disable operation for '${username}' did not complete cleanly. Local registry was NOT updated."
+        return 1
     fi
 
     # --- Update registry ---
@@ -748,7 +895,14 @@ disable_user() {
 
     log_success "User '${username}' has been disabled."
     log_info "  VPN: revoked"
-    log_info "  API: revoked"
+    if [[ "${wireguard_revoked}" == "true" ]]; then
+        log_info "  WireGuard: revoked"
+    fi
+    if [[ -n "${api_token_id}" && "${api_token_id}" != "none" ]]; then
+        log_info "  API: revoked"
+    else
+        log_info "  API: none"
+    fi
     log_info "  Status: disabled (${disabled_date})"
 }
 

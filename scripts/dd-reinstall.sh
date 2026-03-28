@@ -510,7 +510,9 @@ detect_preinstalled_agents() {
                     done
                     ;;
                 cron)
-                    if crontab -l 2>/dev/null | grep -qF "${value}"; then
+                    local current_crontab=""
+                    current_crontab="$(crontab -l 2>/dev/null)" || current_crontab=""
+                    if grep -qF "${value}" <<<"${current_crontab}"; then
                         _add_unique DETECTED_AGENTS_CRONS "${value}"
                     fi
                     # Also check system crontabs
@@ -821,8 +823,12 @@ remove_cloud_agents() {
         print_step 5 "Removing cron entries..."
         for cron_pattern in ${DETECTED_AGENTS_CRONS[@]+"${DETECTED_AGENTS_CRONS[@]}"}; do
             # Remove from user crontab
-            if crontab -l 2>/dev/null | grep -qF "${cron_pattern}"; then
-                crontab -l 2>/dev/null | grep -vF "${cron_pattern}" | crontab - 2>/dev/null || true
+            local current_crontab=""
+            local updated_crontab=""
+            current_crontab="$(crontab -l 2>/dev/null)" || current_crontab=""
+            if grep -qF "${cron_pattern}" <<<"${current_crontab}"; then
+                updated_crontab="$(printf '%s\n' "${current_crontab}" | grep -vF "${cron_pattern}" || true)"
+                printf '%s\n' "${updated_crontab}" | crontab - 2>/dev/null || true
                 log_info "  Removed from user crontab: ${cron_pattern}"
             fi
             # Remove from system crontabs
@@ -960,12 +966,16 @@ offer_dd_reinstall() {
 
     case "${MENU_RESULT}" in
         1)
-            _do_light_clean
-            return 0
+            if _do_light_clean; then
+                return 0
+            fi
+            return 1
             ;;
         2)
-            _do_dd_reinstall
-            return 0
+            if _do_dd_reinstall; then
+                return 0
+            fi
+            return 1
             ;;
         3)
             log_info "Skipping cleanup. Proceeding with current system."
@@ -1342,6 +1352,8 @@ pre_deploy_check() {
 
     # Step 2: Scan for agents
     local agents_found=0
+    local cleanup_completed=1
+    local verification_ok=0
     if detect_preinstalled_agents; then
         agents_found=1
     fi
@@ -1349,7 +1361,10 @@ pre_deploy_check() {
     # Step 3: Offer cleanup if agents found
     if [[ ${agents_found} -eq 1 ]]; then
         echo ""
-        offer_dd_reinstall || true
+        if ! offer_dd_reinstall; then
+            cleanup_completed=0
+            log_error "Cloud agent cleanup was skipped, cancelled, or failed. Deployment must stop."
+        fi
         echo ""
     else
         log_success "No cloud agents detected. System is ready for deployment."
@@ -1357,10 +1372,20 @@ pre_deploy_check() {
 
     # Step 4: Verify system
     echo ""
-    verify_clean_system || true
+    if verify_clean_system; then
+        verification_ok=1
+    else
+        log_error "System verification detected unresolved issues. Deployment must stop."
+    fi
 
     echo ""
-    log_info "Pre-deployment check complete. Proceeding with deployment..."
+    if [[ ${cleanup_completed} -ne 1 || ${verification_ok} -ne 1 ]]; then
+        log_error "Pre-deployment check failed. Resolve the issues above before deployment."
+        echo ""
+        return 1
+    fi
+
+    log_success "Pre-deployment check complete. Proceeding with deployment..."
     echo ""
 
     return 0

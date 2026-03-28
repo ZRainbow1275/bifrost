@@ -86,6 +86,9 @@ fi
 # Paths (use := to avoid overwriting readonly vars set by install.sh)
 : "${INSTALL_DIR:=/opt/bifrost}"
 : "${LOG_DIR:=/var/log/bifrost}"
+: "${ANTI_DPI_ROTATE_CRON_SCRIPT:=/opt/bifrost/rotate-dest.sh}"
+: "${RKHUNTER_CRON_FILE:=/etc/cron.weekly/rkhunter-scan}"
+: "${LYNIS_CRON_FILE:=/etc/cron.monthly/lynis-audit}"
 
 # Track what was removed for final summary
 declare -a REMOVED_ITEMS=()
@@ -424,11 +427,13 @@ remove_logs() {
 remove_cron_jobs() {
     log_step "[6/9] Removing cron jobs..."
 
-    local cron_markers=(
-        "bifrost"
-        "health-check"
-        "rkhunter"
+    local cron_patterns=(
+        "# bifrost-daily-backup"
+        "# bifrost-health-check"
+        "# bifrost: dest rotation"
+        "${ANTI_DPI_ROTATE_CRON_SCRIPT}"
     )
+    local cron_pattern=""
 
     local current_crontab
     current_crontab="$(crontab -l 2>/dev/null)" || current_crontab=""
@@ -437,16 +442,16 @@ remove_cron_jobs() {
         local new_crontab="${current_crontab}"
         local found_any=false
 
-        for marker in ${cron_markers[@]+"${cron_markers[@]}"}; do
-            if echo "${new_crontab}" | grep -q "${marker}"; then
-                new_crontab="$(echo "${new_crontab}" | grep -v "${marker}")"
+        for cron_pattern in ${cron_patterns[@]+"${cron_patterns[@]}"}; do
+            if echo "${new_crontab}" | grep -qF "${cron_pattern}"; then
+                new_crontab="$(printf '%s\n' "${new_crontab}" | grep -vF "${cron_pattern}" || true)"
                 found_any=true
-                add_removed "Cron job: ${marker}"
+                add_removed "Cron entry: ${cron_pattern}"
             fi
         done
 
         if [[ "${found_any}" == "true" ]]; then
-            echo "${new_crontab}" | crontab -
+            printf '%s\n' "${new_crontab}" | crontab -
             log_info "Cron jobs removed."
         else
             add_skipped "No Bifrost cron jobs found"
@@ -454,6 +459,15 @@ remove_cron_jobs() {
     else
         add_skipped "No crontab exists"
     fi
+
+    local system_cron_file=""
+    for system_cron_file in "${RKHUNTER_CRON_FILE}" "${LYNIS_CRON_FILE}"; do
+        if [[ -f "${system_cron_file}" ]]; then
+            rm -f "${system_cron_file}" && \
+                add_removed "Cron file: ${system_cron_file}" || \
+                add_failed "Failed to remove cron file: ${system_cron_file}"
+        fi
+    done
 }
 
 ###############################################################################

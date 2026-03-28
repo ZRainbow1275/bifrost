@@ -82,7 +82,8 @@ fi
 # =============================================================================
 # Constants
 # =============================================================================
-REPORT_DIR="/var/log/bifrost"
+: "${BIFROST_REPORT_DIR:=/var/log/bifrost}"
+REPORT_DIR="${BIFROST_REPORT_DIR}"
 PROXY_SOCKS="socks5://127.0.0.1:10808"
 PROXY_HTTP="http://127.0.0.1:10809"
 
@@ -119,6 +120,23 @@ DIAG_TIMESTAMP=""
 DIAG_OVERALL="healthy"
 
 ###############################################################################
+# _resolve_report_dir()
+#
+# Resolve a writable report directory. Falls back to /tmp/bifrost when the
+# default report directory is unavailable in non-root/local verification flows.
+###############################################################################
+_resolve_report_dir() {
+    if mkdir -p "${REPORT_DIR}" 2>/dev/null; then
+        printf '%s' "${REPORT_DIR}"
+        return 0
+    fi
+
+    local fallback_dir="${TMPDIR:-/tmp}/bifrost"
+    mkdir -p "${fallback_dir}"
+    printf '%s' "${fallback_dir}"
+}
+
+###############################################################################
 # _record_result()
 #
 # Record a diagnostic result to a category.
@@ -136,6 +154,89 @@ _record_result() {
         speed)    DIAG_SPEED["${key}"]="${value}" ;;
         gfw)      DIAG_GFW["${key}"]="${value}" ;;
     esac
+}
+
+###############################################################################
+# _json_escape()
+#
+# Escape a string value so it can be embedded safely in JSON output.
+###############################################################################
+_json_escape() {
+    local value="${1-}"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    value="${value//$'\r'/\\r}"
+    value="${value//$'\t'/\\t}"
+    printf '%s' "${value}"
+}
+
+###############################################################################
+# _append_assoc_json_section()
+#
+# Render an associative-array-backed diagnostics section as a JSON object.
+###############################################################################
+_append_assoc_json_section() {
+    local section_name="${1:?}"
+    local assoc_name="${2:?}"
+    local -n assoc_ref="${assoc_name}"
+    local json_fragment="\"$(_json_escape "${section_name}")\":{"
+    local first=true
+
+    for key in "${!assoc_ref[@]}"; do
+        if [[ "${first}" == "true" ]]; then
+            first=false
+        else
+            json_fragment+=","
+        fi
+        json_fragment+="\"$(_json_escape "${key}")\":\"$(_json_escape "${assoc_ref[${key}]}")\""
+    done
+
+    json_fragment+="}"
+    printf '%s' "${json_fragment}"
+}
+
+###############################################################################
+# _write_report_json()
+#
+# Persist a JSON report and fail if the rendered payload cannot be validated
+# or written successfully.
+###############################################################################
+_write_report_json() {
+    local json_payload="${1:?}"
+    local report_file="${2:?}"
+
+    if command_exists jq; then
+        if ! printf '%s\n' "${json_payload}" | jq '.' > "${report_file}" 2>/dev/null; then
+            log_error "Failed to validate rendered diagnostic JSON."
+            return 1
+        fi
+    else
+        if ! printf '%s\n' "${json_payload}" > "${report_file}"; then
+            log_error "Failed to write diagnostic report to ${report_file}."
+            return 1
+        fi
+    fi
+
+    if [[ ! -s "${report_file}" ]]; then
+        log_error "Diagnostic report was not written correctly: ${report_file}"
+        return 1
+    fi
+}
+
+###############################################################################
+# _reset_diagnostic_results()
+#
+# Clear previous run state so reports never mix stale observations with new
+# evidence from the current execution.
+###############################################################################
+_reset_diagnostic_results() {
+    DIAG_SYSTEM=()
+    DIAG_SERVICES=()
+    DIAG_NETWORK=()
+    DIAG_DNS=()
+    DIAG_SPEED=()
+    DIAG_GFW=()
 }
 
 ###############################################################################
@@ -167,8 +268,10 @@ _diag_system() {
     echo -e "  Architecture: ${arch}"
 
     # Uptime
-    local uptime_str
-    uptime_str="$(uptime -p 2>/dev/null || uptime | awk -F',' '{print $1}' | awk -F'up' '{print $2}')"
+    local uptime_str="unknown"
+    if command_exists uptime; then
+        uptime_str="$(uptime -p 2>/dev/null || uptime 2>/dev/null | awk -F',' '{print $1}' | awk -F'up' '{print $2}' | xargs || echo 'unknown')"
+    fi
     _record_result system "uptime" "${uptime_str}"
     echo -e "  Uptime:       ${uptime_str}"
 
@@ -190,7 +293,7 @@ _diag_system() {
     # Memory
     if command_exists free; then
         local mem_info
-        mem_info="$(free -m | grep '^Mem:')"
+        mem_info="$(free -m 2>/dev/null | grep '^Mem:' || true)"
         local mem_total mem_used mem_avail
         mem_total="$(echo "${mem_info}" | awk '{print $2}')"
         mem_used="$(echo "${mem_info}" | awk '{print $3}')"
@@ -215,24 +318,30 @@ _diag_system() {
     fi
 
     # Disk
-    local disk_info
-    disk_info="$(df -h / 2>/dev/null | tail -1)"
+    local disk_info=""
+    if command_exists df; then
+        disk_info="$(df -hP / 2>/dev/null | tail -1 || true)"
+    fi
     if [[ -n "${disk_info}" ]]; then
         local disk_size disk_used disk_avail disk_pct
-        disk_size="$(echo "${disk_info}" | awk '{print $2}')"
-        disk_used="$(echo "${disk_info}" | awk '{print $3}')"
-        disk_avail="$(echo "${disk_info}" | awk '{print $4}')"
-        disk_pct="$(echo "${disk_info}" | awk '{print $5}' | tr -d '%')"
+        disk_size="$(echo "${disk_info}" | awk '{print $(NF-4)}')"
+        disk_used="$(echo "${disk_info}" | awk '{print $(NF-3)}')"
+        disk_avail="$(echo "${disk_info}" | awk '{print $(NF-2)}')"
+        disk_pct="$(echo "${disk_info}" | awk '{print $(NF-1)}' | tr -d '%')"
         _record_result system "disk_size" "${disk_size}"
         _record_result system "disk_used" "${disk_used}"
         _record_result system "disk_avail" "${disk_avail}"
         _record_result system "disk_usage_pct" "${disk_pct}"
 
         local disk_color="${GREEN}"
-        if (( disk_pct > 90 )); then
-            disk_color="${RED}"
-            DIAG_OVERALL="degraded"
-        elif (( disk_pct > 75 )); then
+        if [[ "${disk_pct}" =~ ^[0-9]+$ ]]; then
+            if (( disk_pct > 90 )); then
+                disk_color="${RED}"
+                DIAG_OVERALL="degraded"
+            elif (( disk_pct > 75 )); then
+                disk_color="${YELLOW}"
+            fi
+        else
             disk_color="${YELLOW}"
         fi
         echo -e "  Disk /:       ${disk_used} / ${disk_size} (${disk_color}${disk_pct}%${NC}) avail=${disk_avail}"
@@ -247,8 +356,10 @@ _diag_system() {
     echo -e "  Virt:         ${virt_type}"
 
     # Public IP
-    local pub_ip
-    pub_ip="$(curl -4 -s --connect-timeout 5 --max-time 8 'https://ifconfig.me' 2>/dev/null | tr -d '[:space:]')" || pub_ip="unknown"
+    local pub_ip="unknown"
+    if command_exists curl; then
+        pub_ip="$(curl -4 -s --connect-timeout 5 --max-time 8 'https://ifconfig.me' 2>/dev/null | tr -d '[:space:]')" || pub_ip="unknown"
+    fi
     _record_result system "public_ip" "${pub_ip}"
     echo -e "  Public IP:    ${pub_ip}"
 }
@@ -709,13 +820,26 @@ test_gfw_detection() {
         printf "    %-12s (%-10s): " "${ip}" "${label}"
 
         local ping_result
-        ping_result="$(ping -c 10 -W 3 "${ip}" 2>&1)" || ping_result=""
+        if ! ping_result="$(ping -c 10 -W 3 "${ip}" 2>&1)"; then
+            :
+        fi
 
         local loss_pct
-        loss_pct="$(echo "${ping_result}" | grep -oP '[0-9]+(?=% packet loss)')" || loss_pct="100"
+        loss_pct="$(echo "${ping_result}" | grep -oP '[0-9]+(?=% packet loss)' | head -1 || true)"
 
         local avg_ms
-        avg_ms="$(echo "${ping_result}" | tail -1 | awk -F'/' '{print $5}')" || avg_ms="?"
+        avg_ms="$(echo "${ping_result}" | tail -1 | awk -F'/' '{print $5}' || true)"
+
+        if [[ -z "${loss_pct}" ]]; then
+            if echo "${ping_result}" | grep -qiE 'requires administrative privileges|access denied|usage:'; then
+                echo -e "${YELLOW}SKIP${NC}, avg=? (ping flags unsupported in current shell)"
+                _record_result gfw "packet_loss_${label}" "skip"
+                continue
+            fi
+            loss_pct="100"
+        fi
+
+        avg_ms="${avg_ms:-?}"
 
         local color="${GREEN}"
         if [[ "${loss_pct}" =~ ^[0-9]+$ ]]; then
@@ -811,6 +935,7 @@ test_gfw_detection() {
 run_full_diagnostic() {
     DIAG_TIMESTAMP="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     DIAG_OVERALL="healthy"
+    _reset_diagnostic_results
 
     echo ""
     echo -e "${BOLD}${BLUE}============================================${NC}"
@@ -856,118 +981,49 @@ generate_diagnostic_report() {
     # Run all diagnostics (output goes to terminal too)
     run_full_diagnostic
 
-    # Create report directory
-    mkdir -p "${REPORT_DIR}"
+    local report_dir
+    report_dir="$(_resolve_report_dir)"
 
-    local report_file="${REPORT_DIR}/diagnostic-report-$(date +%Y%m%d_%H%M%S).json"
-    local latest_link="${REPORT_DIR}/diagnostic-report.json"
+    local report_file="${report_dir}/diagnostic-report-$(date +%Y%m%d_%H%M%S).json"
+    local latest_link="${report_dir}/diagnostic-report.json"
 
     # Build JSON manually (works without jq)
     local json="{"
-    json+="\"timestamp\":\"${DIAG_TIMESTAMP}\","
-    json+="\"overall_status\":\"${DIAG_OVERALL}\","
-    json+="\"hostname\":\"$(hostname -f 2>/dev/null || hostname)\","
-
-    # System section
-    json+="\"system\":{"
-    local first=true
-    for key in "${!DIAG_SYSTEM[@]}"; do
-        if [[ "${first}" == "true" ]]; then
-            first=false
-        else
-            json+=","
-        fi
-        local val="${DIAG_SYSTEM[${key}]}"
-        val="$(echo "${val}" | sed 's/\\/\\\\/g; s/"/\\"/g')"
-        json+="\"${key}\":\"${val}\""
-    done
-    json+="},"
-
-    # Services section
-    json+="\"services\":{"
-    first=true
-    for key in "${!DIAG_SERVICES[@]}"; do
-        if [[ "${first}" == "true" ]]; then
-            first=false
-        else
-            json+=","
-        fi
-        json+="\"${key}\":\"${DIAG_SERVICES[${key}]}\""
-    done
-    json+="},"
-
-    # Network section
-    json+="\"network\":{"
-    first=true
-    for key in "${!DIAG_NETWORK[@]}"; do
-        if [[ "${first}" == "true" ]]; then
-            first=false
-        else
-            json+=","
-        fi
-        json+="\"${key}\":\"${DIAG_NETWORK[${key}]}\""
-    done
-    json+="},"
-
-    # DNS section
-    json+="\"dns\":{"
-    first=true
-    for key in "${!DIAG_DNS[@]}"; do
-        if [[ "${first}" == "true" ]]; then
-            first=false
-        else
-            json+=","
-        fi
-        json+="\"${key}\":\"${DIAG_DNS[${key}]}\""
-    done
-    json+="},"
-
-    # Speed section
-    json+="\"speed\":{"
-    first=true
-    for key in "${!DIAG_SPEED[@]}"; do
-        if [[ "${first}" == "true" ]]; then
-            first=false
-        else
-            json+=","
-        fi
-        json+="\"${key}\":\"${DIAG_SPEED[${key}]}\""
-    done
-    json+="},"
-
-    # GFW section
-    json+="\"gfw_detection\":{"
-    first=true
-    for key in "${!DIAG_GFW[@]}"; do
-        if [[ "${first}" == "true" ]]; then
-            first=false
-        else
-            json+=","
-        fi
-        json+="\"${key}\":\"${DIAG_GFW[${key}]}\""
-    done
+    json+="\"timestamp\":\"$(_json_escape "${DIAG_TIMESTAMP}")\","
+    json+="\"overall_status\":\"$(_json_escape "${DIAG_OVERALL}")\","
+    json+="\"hostname\":\"$(_json_escape "$(hostname -f 2>/dev/null || hostname)")\","
+    json+="$(_append_assoc_json_section "system" DIAG_SYSTEM),"
+    json+="$(_append_assoc_json_section "services" DIAG_SERVICES),"
+    json+="$(_append_assoc_json_section "network" DIAG_NETWORK),"
+    json+="$(_append_assoc_json_section "dns" DIAG_DNS),"
+    json+="$(_append_assoc_json_section "speed" DIAG_SPEED),"
+    json+="$(_append_assoc_json_section "gfw_detection" DIAG_GFW)"
     json+="}"
 
-    json+="}"
-
-    # Pretty-print with jq if available, otherwise write raw
-    if command_exists jq; then
-        echo "${json}" | jq '.' > "${report_file}" 2>/dev/null || echo "${json}" > "${report_file}"
-    else
-        echo "${json}" > "${report_file}"
+    if ! _write_report_json "${json}" "${report_file}"; then
+        return 1
     fi
 
     # Restrict permissions — report may contain service details, IPs, and config info
-    chmod 600 "${report_file}"
+    if ! chmod 600 "${report_file}"; then
+        log_error "Failed to restrict permissions on ${report_file}"
+        return 1
+    fi
 
     # Create/update symlink to latest report
-    ln -sf "${report_file}" "${latest_link}"
+    if ! ln -sf "${report_file}" "${latest_link}"; then
+        log_error "Failed to update latest diagnostic report link: ${latest_link}"
+        return 1
+    fi
 
     echo ""
     log_success "Diagnostic report saved."
     log_info "  Report: ${report_file}"
     log_info "  Latest: ${latest_link}"
     log_info "  View:   cat ${latest_link} | jq ."
+    if [[ "${report_dir}" != "${REPORT_DIR}" ]]; then
+        log_warn "Default report directory ${REPORT_DIR} was not writable; used fallback ${report_dir}"
+    fi
 }
 
 ###############################################################################
@@ -996,7 +1052,8 @@ manage_diagnostics() {
             3) echo ""; generate_diagnostic_report ;;
             4)
                 echo ""
-                local latest="${REPORT_DIR}/diagnostic-report.json"
+                local latest
+                latest="$(_resolve_report_dir)/diagnostic-report.json"
                 if [[ -f "${latest}" ]]; then
                     if command_exists jq; then
                         jq '.' "${latest}"

@@ -89,7 +89,7 @@
 | 层 | 技术 | 版本 | 用途 |
 |----|------|------|------|
 | VPN | WireGuard | 内核模块 | 员工零信任接入 |
-| VPN 管理 | Firezone / Headscale | 0.7+ / 0.23+ | VPN 用户管理 UI |
+| VPN 管理 | Firezone / Headscale | 0.7+ / latest | VPN 用户管理 UI，Headscale 版本由官方 Releases 动态解析或环境变量覆盖 |
 | 反向代理 | Caddy v2 | 2.7+ | HTTPS 自动证书 + 反代 |
 | AI 网关 | New API (Calcium-Ion) | latest | 30+ AI 供应商统一接口 |
 | 管理平台 | FastAPI + httpx | Python 3.12 | 注册机 + 监控 + 管理 |
@@ -126,7 +126,7 @@ bifrost/
 │   ├── multi-server.sh         # 多节点: Server B 负载均衡 + 故障转移
 │   ├── user-management.sh      # 用户: VPN凭据 + API Token + 入职指南
 │   ├── diagnostics.sh          # 诊断: 系统/服务/网络/DNS/GFW 全链路
-│   ├── health-check.sh         # 健康检查: 服务存活 + API可达 + 自动恢复
+│   ├── health-check.sh         # 健康检查: 服务存活 + /manage 合同 + TLS reachability + 自动恢复
 │   ├── monitoring.sh           # 监控: Netdata + logrotate
 │   ├── whitelist.sh            # 白名单: AI域名管理
 │   ├── uninstall.sh            # 卸载: 全组件清理
@@ -147,7 +147,7 @@ bifrost/
 │   │       ├── models.py       # 模型可用性 + 渠道延迟测试
 │   │       ├── channels.py     # 渠道 CRUD + 并行连通测试
 │   │       └── stats.py        # 用量统计 + 用户/模型排行
-│   ├── Dockerfile              # 多阶段构建, 非root运行
+│   ├── Dockerfile              # 多阶段构建, 非root运行, 单 worker 保持注册状态一致
 │   └── docker-compose.yml      # host.docker.internal:3000 → NewAPI
 │
 ├── configs/
@@ -170,7 +170,8 @@ bifrost/
 │   └── TROUBLESHOOTING.md      # 故障排查 (623 行)
 │
 └── tests/
-    └── test-in-docker.sh       # Docker 模拟测试 (语法/函数/配置/端口/菜单/文档)
+    └── test-in-docker.sh       # 统一回归: 语法/函数/配置/端口/菜单/文档/
+                                # Bifrost API 合同测试/Windows Git Bash Docker 兼容
 ```
 
 ---
@@ -246,27 +247,30 @@ bifrost/
 
 ## 6. 配置模板渲染机制
 
-**两套并行机制**（当前存在不一致，见审计报告）：
+**两套并行机制**（当前已通过 parity fixture 与统一回归显式收敛）：
 
 | 机制 | 使用场景 | 模板格式 |
 |------|----------|----------|
-| `template_render()` | Mihomo, WireGuard | `{{VARIABLE}}` sed 替换 |
+| `template_render()` | Mihomo, WireGuard | `{{VARIABLE}}` sed 替换，当前会同时转义 `\`、`/`、`&` |
 | Bash heredoc 内联 | Xray, Caddy, Docker Compose | `${variable}` bash 变量 |
 
 `template_render()` 位于 `common.sh:715-740`，接受 `KEY=VALUE` 对，用 sed 替换 `{{KEY}}`。
+
+补充约束:
+- `configs/xray/*.tpl` 与 `configs/caddy/*.tpl` 不再被误视为“隐藏运行态入口”，而是明确作为 parity fixture 保留。
+- `/manage` 前缀、`X-Forwarded-Prefix` 头、`/xui-panel/*` 等关键契约必须同时在模板、运行时代码与 `tests/test-in-docker.sh` 中保持一致。
 
 ---
 
 ## 7. 已知问题与技术债务
 
-见 `docs/0325/AUDIT-REPORT.md`，4 BLOCKER + 7 HIGH 需在生产部署前修复。
+仓库内已确认的脚本层 / 产品层缺陷，见 `docs/0325/AUDIT-REPORT.md` 的历史台账与产品级补审项；截至 2026-03-26，仓库内静态问题已完成闭环，统一回归结果为 `166 通过, 0 失败, 0 跳过`。
 
-核心风险:
-1. 端口冲突（Xray 443 vs Caddy 443）
-2. 防火墙规则不完整（Xray 端口未开放）
-3. DNS 端口不匹配（1053 vs 53）
-4. 防火墙脚本互斥
-5. 配置模板与实际部署代码不同步（死代码）
+当前仍值得继续投入的技术债务，已经从“仓库内必修 bug”转为“真实部署环境 assurance”：
+1. 真实域名、证书签发与续期演练
+2. 上游 NewAPI / AI 渠道健康与失效切换
+3. 生产日志、运行中告警与 runbook 演练
+4. 单机注册状态如果未来扩容，需要继续下沉到共享持久层
 
 ---
 
@@ -276,8 +280,11 @@ bifrost/
 - 共享函数通过 `common.sh` 提供，double-source guard (`_COMMON_SH_LOADED`)
 - 日志函数: `log_info`, `log_warn`, `log_error`, `log_success`, `log_step`
 - 交互菜单: `show_menu` + `MENU_RESULT` 全局变量
-- GitHub 下载: `github_download()` 自动尝试中国镜像
+- GitHub 下载: `github_download()` 先直连 GitHub，再按 `BIFROST_GITHUB_MIRROR_PREFIXES` / 默认镜像前缀链路回退
 - Docker 安装: `install_docker_china_aware()` 中国镜像源
 - 进度显示: `with_spinner "message" command`
 - 错误处理: `die "message"` 终止 + `trap cleanup EXIT`
 - Python: FastAPI + Pydantic v2 + httpx async + `from __future__ import annotations`
+- `configs/xray/*.tpl` 与 `configs/caddy/*.tpl` 作为测试 parity fixture 保留，关键路由/头部需与运行时代码同步
+- `tests/test-in-docker.sh` 是统一合同测试入口；`bash tests/test-in-docker.sh bifrost` 必须覆盖 `/manage` 前缀、管理员鉴权 `401/403`、默认 same-origin CORS
+- Windows Git Bash 下调用 Docker 时，必须显式考虑 MSYS 路径转换；涉及容器内 Linux 路径（如 `/opt/bifrost`）时，应使用 `MSYS_NO_PATHCONV=1`，宿主挂载路径优先转为 `D:/...` 形式

@@ -273,6 +273,118 @@ STREAM_CONF
 #
 # Registers the health check in cron to run every 5 minutes.
 ###############################################################################
+ensure_crontab_available() {
+    _cron_scheduler_running() {
+        if command_exists systemctl; then
+            if systemctl is-active --quiet cron 2>/dev/null || systemctl is-active --quiet crond 2>/dev/null; then
+                return 0
+            fi
+        fi
+
+        if command_exists pgrep; then
+            if pgrep -x cron >/dev/null 2>&1 || pgrep -x crond >/dev/null 2>&1; then
+                return 0
+            fi
+        fi
+
+        return 1
+    }
+
+    _start_cron_scheduler() {
+        if command_exists systemctl; then
+            if systemctl enable --now cron 2>/dev/null; then
+                _cron_scheduler_running && return 0
+                log_error "cron service did not become active after systemctl enable --now cron."
+                return 1
+            fi
+            if systemctl enable --now crond 2>/dev/null; then
+                _cron_scheduler_running && return 0
+                log_error "crond service did not become active after systemctl enable --now crond."
+                return 1
+            fi
+        fi
+
+        if command_exists service; then
+            if service cron start 2>/dev/null; then
+                _cron_scheduler_running && return 0
+                log_error "cron service did not stay active after service cron start."
+                return 1
+            fi
+            if service crond start 2>/dev/null; then
+                _cron_scheduler_running && return 0
+                log_error "crond service did not stay active after service crond start."
+                return 1
+            fi
+        fi
+
+        log_error "Unable to start a cron scheduler service (cron/crond)."
+        return 1
+    }
+
+    if ! command_exists crontab; then
+        log_warn "crontab command not found. Attempting to install cron scheduler..."
+        if declare -f install_packages >/dev/null 2>&1; then
+            case "${PKG_MGR:-unknown}" in
+                apt)
+                    install_packages cron || return 1
+                    ;;
+                dnf|yum)
+                    install_packages cronie || return 1
+                    ;;
+                *)
+                    log_error "Unsupported package manager for cron bootstrap: ${PKG_MGR:-unknown}"
+                    return 1
+                    ;;
+            esac
+        fi
+
+        if ! command_exists crontab; then
+            log_error "crontab is still unavailable after attempted bootstrap."
+            return 1
+        fi
+    fi
+
+    if _cron_scheduler_running; then
+        return 0
+    fi
+
+    log_warn "crontab is available but no active cron scheduler was detected. Attempting to start cron/crond..."
+    _start_cron_scheduler || return 1
+
+    if ! _cron_scheduler_running; then
+        log_error "cron scheduler is still not active after bootstrap."
+        return 1
+    fi
+
+    return 0
+}
+
+read_existing_crontab() {
+    local crontab_output=""
+    local stderr_file=""
+    local status=0
+    local stderr_text=""
+
+    stderr_file="$(mktemp)"
+    if crontab_output="$(crontab -l 2>"${stderr_file}")"; then
+        rm -f "${stderr_file}"
+        if [[ -n "${crontab_output}" ]]; then
+            printf '%s\n' "${crontab_output}"
+        fi
+        return 0
+    fi
+    status=$?
+    stderr_text="$(tr -d '\r' < "${stderr_file}")"
+    rm -f "${stderr_file}"
+
+    if [[ "${status}" -eq 1 ]] && { [[ -z "${stderr_text}" ]] || grep -qi 'no crontab' <<<"${stderr_text}"; }; then
+        return 0
+    fi
+
+    log_error "Failed to read current crontab: ${stderr_text:-exit ${status}}"
+    return "${status}"
+}
+
 setup_health_check() {
     log_step "Setting up health check script and cron job..."
 
@@ -280,38 +392,47 @@ setup_health_check() {
     mkdir -p "${INSTALL_DIR}"
     mkdir -p "${LOG_DIR}"
 
-    # Copy the standalone health-check.sh script
-    if [[ -f "${_MON_SCRIPT_DIR}/health-check.sh" ]]; then
-        cp "${_MON_SCRIPT_DIR}/health-check.sh" "${HEALTH_CHECK_SCRIPT}"
-    else
-        log_warn "health-check.sh not found in scripts directory. Creating from template..."
-        # Generate a minimal health check if the standalone script is missing
-        cat > "${HEALTH_CHECK_SCRIPT}" <<'HEALTH_EOF'
-#!/usr/bin/env bash
-# Minimal health check - see scripts/health-check.sh for the full version
-set -euo pipefail
-LOG_DIR="/var/log/bifrost"
-mkdir -p "${LOG_DIR}"
-echo "{\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"status\":\"ok\",\"note\":\"minimal check\"}" > "${LOG_DIR}/health.json"
-HEALTH_EOF
+    local source_health_check="${_MON_SCRIPT_DIR}/health-check.sh"
+    if [[ ! -f "${source_health_check}" ]]; then
+        log_error "health-check.sh not found in ${_MON_SCRIPT_DIR}. Refusing to deploy a stale/minimal fallback."
+        return 1
+    fi
+
+    cp "${source_health_check}" "${HEALTH_CHECK_SCRIPT}"
+
+    if ! grep -q 'check_bifrost_api' "${HEALTH_CHECK_SCRIPT}" || ! grep -q 'check_public_manage_surface' "${HEALTH_CHECK_SCRIPT}"; then
+        log_error "Installed health-check.sh is missing Bifrost manage assurance checks. Aborting deployment."
+        return 1
     fi
 
     chmod +x "${HEALTH_CHECK_SCRIPT}"
     log_info "Health check script installed at: ${HEALTH_CHECK_SCRIPT}"
 
+    ensure_crontab_available || return 1
+
     # Add cron job (every 5 minutes)
     local cron_entry="*/5 * * * * ${HEALTH_CHECK_SCRIPT} >> ${LOG_DIR}/health-cron.log 2>&1"
     local cron_marker="# bifrost-health-check"
+    local existing_crontab=""
+    local updated_crontab=""
+
+    existing_crontab="$(read_existing_crontab)" || return 1
 
     # Check if cron job already exists
-    if crontab -l 2>/dev/null | grep -qF "${cron_marker}"; then
+    if grep -qF "${cron_marker}" <<<"${existing_crontab}"; then
         log_warn "Health check cron job already exists. Updating..."
-        # Remove existing entry
-        crontab -l 2>/dev/null | grep -vF "${cron_marker}" | crontab -
+        updated_crontab="$(printf '%s\n' "${existing_crontab}" | grep -vF "${cron_marker}" || true)"
+    else
+        updated_crontab="${existing_crontab}"
     fi
 
     # Add the cron job
-    (crontab -l 2>/dev/null; echo "${cron_entry} ${cron_marker}") | crontab -
+    {
+        if [[ -n "${updated_crontab}" ]]; then
+            printf '%s\n' "${updated_crontab}"
+        fi
+        printf '%s %s\n' "${cron_entry}" "${cron_marker}"
+    } | crontab -
 
     log_info "Health check cron job registered (every 5 minutes)."
     log_info "  Script: ${HEALTH_CHECK_SCRIPT}"

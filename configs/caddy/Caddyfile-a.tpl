@@ -7,6 +7,11 @@
 #   3. Automatic TLS certificate management
 #   4. Security headers and access logging
 #
+# Contract note:
+#   This template is a parity fixture checked by tests/test-in-docker.sh.
+#   Runtime deployment may still render branch-specific inline Caddyfiles in
+#   scripts/server-a.sh, so salient routes/headers here must stay in sync.
+#
 # Template variables:
 #   {{DOMAIN}}        - Your domain name (e.g., gateway.example.com)
 #   {{NEW_API_PORT}}  - New API container port (default: 3000)
@@ -176,10 +181,11 @@
 	handle /manage/* {
 		uri strip_prefix /manage
 		reverse_proxy 127.0.0.1:8000 {
+			header_up Host {host}
 			header_up X-Real-IP {remote_host}
 			header_up X-Forwarded-For {remote_host}
 			header_up X-Forwarded-Proto {scheme}
-			header_up Host {host}
+			header_up X-Forwarded-Prefix /manage
 
 			transport http {
 				dial_timeout 10s

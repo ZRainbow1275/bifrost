@@ -26,6 +26,32 @@ readonly LOG_DIR="/var/log/bifrost"
 # shellcheck source=scripts/common.sh
 source "${SCRIPT_DIR}/scripts/common.sh"
 
+run_flow_command() {
+    local failure_message="$1"
+    shift
+
+    if "$@"; then
+        return 0
+    fi
+
+    local status=$?
+    log_error "${failure_message}"
+    return "${status}"
+}
+
+run_cli_command() {
+    local failure_message="$1"
+    shift
+
+    if "$@"; then
+        exit 0
+    fi
+
+    local status=$?
+    log_error "${failure_message}"
+    exit "${status}"
+}
+
 # --- Main Menu ---
 show_main_menu() {
     print_banner "${PROJECT_NAME} v${SCRIPT_VERSION}"
@@ -58,6 +84,7 @@ show_main_menu() {
         "组件更新管理"
         "多节点 Server B 管理"
         "用户管理 (VPN + API)"
+        "管理平台部署 (Bifrost API 注册/监控)"
         "深度诊断 (网络/服务/GFW检测)"
         "卸载所有组件"
         "退出"
@@ -82,9 +109,10 @@ show_main_menu() {
         15) update_flow ;;
         16) multi_server_flow ;;
         17) user_management_flow ;;
-        18) diagnostics_flow ;;
-        19) uninstall_flow ;;
-        20) log_info "再见！"; exit 0 ;;
+        18) bifrost_api_flow ;;
+        19) diagnostics_flow ;;
+        20) uninstall_flow ;;
+        21) log_info "再见！"; exit 0 ;;
         *) log_error "无效选择"; show_main_menu ;;
     esac
 }
@@ -124,7 +152,12 @@ deploy_server_b_flow() {
     # shellcheck source=scripts/monitoring.sh
     source "${SCRIPT_DIR}/scripts/monitoring.sh"
 
-    deploy_server_b
+    if ! deploy_server_b; then
+        echo ""
+        print_section "部署失败"
+        log_error "Server B 部署未完成，请先处理上方失败步骤后再继续。"
+        return 1
+    fi
 
     echo ""
     print_section "部署完成"
@@ -178,7 +211,28 @@ deploy_server_a_flow() {
     # shellcheck source=scripts/monitoring.sh
     source "${SCRIPT_DIR}/scripts/monitoring.sh"
 
-    deploy_server_a
+    if ! deploy_server_a; then
+        echo ""
+        print_section "部署失败"
+        log_error "Server A 部署未完成，请先处理上方失败步骤后再继续。"
+        return 1
+    fi
+
+    if [[ -f "${SCRIPT_DIR}/scripts/bifrost-api.sh" ]]; then
+        echo ""
+        if confirm_action "是否继续部署 Bifrost 管理平台 (/manage 注册/监控)？" "y"; then
+            # shellcheck source=scripts/bifrost-api.sh
+            source "${SCRIPT_DIR}/scripts/bifrost-api.sh"
+            if ! deploy_bifrost_api; then
+                echo ""
+                print_section "部署失败"
+                log_error "Bifrost 管理平台部署未完成，请先处理上方失败步骤。"
+                return 1
+            fi
+        else
+            log_info "已跳过 Bifrost 管理平台部署。后续可运行 ./install.sh --bifrost-api"
+        fi
+    fi
 
     echo ""
     print_section "部署完成"
@@ -223,13 +277,13 @@ security_only_flow() {
     show_menu "安全加固" sec_options
 
     case "${MENU_RESULT}" in
-        1) full_security_hardening ;;
-        2) harden_ssh ;;
-        3) setup_firewall ;;
-        4) setup_fail2ban ;;
-        5) harden_kernel ;;
-        6) install_security_tools ;;
-        7) run_security_audit ;;
+        1) run_flow_command "完整安全加固失败，请先处理上方错误。" full_security_hardening || return $? ;;
+        2) run_flow_command "SSH 加固失败，请先处理上方错误。" harden_ssh || return $? ;;
+        3) run_flow_command "防火墙配置失败，请先处理上方错误。" setup_firewall || return $? ;;
+        4) run_flow_command "fail2ban 部署失败，请先处理上方错误。" setup_fail2ban || return $? ;;
+        5) run_flow_command "内核安全参数配置失败，请先处理上方错误。" harden_kernel || return $? ;;
+        6) run_flow_command "安全工具安装失败，请先处理上方错误。" install_security_tools || return $? ;;
+        7) run_flow_command "安全审计执行失败，请先处理上方错误。" run_security_audit || return $? ;;
         8) show_main_menu; return ;;
     esac
 
@@ -244,7 +298,10 @@ monitoring_only_flow() {
     # shellcheck source=scripts/monitoring.sh
     source "${SCRIPT_DIR}/scripts/monitoring.sh"
 
-    deploy_monitoring
+    if ! deploy_monitoring; then
+        log_error "监控系统部署未完成，请先处理上方错误。"
+        return 1
+    fi
 
     log_success "监控系统部署完成"
     log_info "Netdata 面板: http://127.0.0.1:19999 (仅本地访问，如需远程请通过 SSH 隧道)"
@@ -255,7 +312,10 @@ whitelist_flow() {
     # shellcheck source=scripts/whitelist.sh
     source "${SCRIPT_DIR}/scripts/whitelist.sh"
 
-    manage_whitelist
+    if ! manage_whitelist; then
+        log_error "白名单管理执行失败，请先处理上方错误。"
+        return 1
+    fi
 }
 
 # --- Flow: Health Check ---
@@ -263,9 +323,13 @@ health_check_flow() {
     print_banner "系统健康检查"
 
     if [[ -f "${SCRIPT_DIR}/scripts/health-check.sh" ]]; then
-        bash "${SCRIPT_DIR}/scripts/health-check.sh" --verbose
+        if ! bash "${SCRIPT_DIR}/scripts/health-check.sh" --verbose; then
+            log_error "健康检查失败，请先处理上方错误。"
+            return 1
+        fi
     else
         log_error "健康检查脚本不存在"
+        return 1
     fi
 }
 
@@ -323,7 +387,10 @@ dd_reinstall_flow() {
     # shellcheck source=scripts/dd-reinstall.sh
     source "${SCRIPT_DIR}/scripts/dd-reinstall.sh"
 
-    pre_deploy_check
+    if ! pre_deploy_check; then
+        log_error "预部署环境清理未完成，请先处理上方错误。"
+        return 1
+    fi
 }
 
 # --- Flow: VPN ---
@@ -334,7 +401,10 @@ vpn_flow() {
     # shellcheck source=scripts/vpn.sh
     source "${SCRIPT_DIR}/scripts/vpn.sh"
 
-    deploy_vpn
+    if ! deploy_vpn; then
+        log_error "VPN 部署未完成，请先处理上方错误。"
+        return 1
+    fi
 }
 
 # --- Flow: Anti-DPI ---
@@ -345,7 +415,10 @@ anti_dpi_flow() {
     # shellcheck source=scripts/anti-dpi.sh
     source "${SCRIPT_DIR}/scripts/anti-dpi.sh"
 
-    deploy_anti_dpi
+    if ! deploy_anti_dpi; then
+        log_error "DPI 防护部署未完成，请先处理上方错误。"
+        return 1
+    fi
 }
 
 # --- Flow: Mihomo ---
@@ -356,7 +429,10 @@ mihomo_flow() {
     # shellcheck source=scripts/mihomo.sh
     source "${SCRIPT_DIR}/scripts/mihomo.sh"
 
-    deploy_mihomo
+    if ! deploy_mihomo; then
+        log_error "Mihomo 部署未完成，请先处理上方错误。"
+        return 1
+    fi
 }
 
 # --- Flow: Keepalive ---
@@ -367,7 +443,10 @@ keepalive_flow() {
     # shellcheck source=scripts/keepalive.sh
     source "${SCRIPT_DIR}/scripts/keepalive.sh"
 
-    deploy_keepalive
+    if ! deploy_keepalive; then
+        log_error "Keepalive 部署未完成，请先处理上方错误。"
+        return 1
+    fi
 }
 
 # --- Flow: Split Tunnel ---
@@ -378,7 +457,10 @@ split_tunnel_flow() {
     # shellcheck source=scripts/split-tunnel.sh
     source "${SCRIPT_DIR}/scripts/split-tunnel.sh"
 
-    deploy_split_tunnel
+    if ! deploy_split_tunnel; then
+        log_error "网络分流部署未完成，请先处理上方错误。"
+        return 1
+    fi
 }
 
 # --- Flow: Backup ---
@@ -389,7 +471,10 @@ backup_flow() {
     # shellcheck source=scripts/backup.sh
     source "${SCRIPT_DIR}/scripts/backup.sh"
 
-    manage_backups
+    if ! manage_backups; then
+        log_error "备份与恢复管理执行失败，请先处理上方错误。"
+        return 1
+    fi
 }
 
 # --- Flow: Update ---
@@ -400,7 +485,10 @@ update_flow() {
     # shellcheck source=scripts/update.sh
     source "${SCRIPT_DIR}/scripts/update.sh"
 
-    manage_updates
+    if ! manage_updates; then
+        log_error "组件更新管理执行失败，请先处理上方错误。"
+        return 1
+    fi
 }
 
 # --- Flow: Multi Server ---
@@ -411,7 +499,10 @@ multi_server_flow() {
     # shellcheck source=scripts/multi-server.sh
     source "${SCRIPT_DIR}/scripts/multi-server.sh"
 
-    manage_servers
+    if ! manage_servers; then
+        log_error "多节点 Server B 管理执行失败，请先处理上方错误。"
+        return 1
+    fi
 }
 
 # --- Flow: User Management ---
@@ -422,7 +513,24 @@ user_management_flow() {
     # shellcheck source=scripts/user-management.sh
     source "${SCRIPT_DIR}/scripts/user-management.sh"
 
-    manage_users
+    if ! manage_users; then
+        log_error "用户管理执行失败，请先处理上方错误。"
+        return 1
+    fi
+}
+
+# --- Flow: Bifrost API Management Platform ---
+bifrost_api_flow() {
+    print_banner "管理平台部署 (Bifrost API)"
+    require_root
+
+    # shellcheck source=scripts/bifrost-api.sh
+    source "${SCRIPT_DIR}/scripts/bifrost-api.sh"
+
+    if ! deploy_bifrost_api; then
+        log_error "Bifrost 管理平台部署未完成，请先处理上方错误。"
+        return 1
+    fi
 }
 
 # --- Flow: Diagnostics ---
@@ -432,7 +540,10 @@ diagnostics_flow() {
     # shellcheck source=scripts/diagnostics.sh
     source "${SCRIPT_DIR}/scripts/diagnostics.sh"
 
-    manage_diagnostics
+    if ! manage_diagnostics; then
+        log_error "深度诊断执行失败，请先处理上方错误。"
+        return 1
+    fi
 }
 
 # --- Flow: Uninstall ---
@@ -443,7 +554,10 @@ uninstall_flow() {
     # shellcheck source=scripts/uninstall.sh
     source "${SCRIPT_DIR}/scripts/uninstall.sh"
 
-    uninstall_all
+    if ! uninstall_all; then
+        log_error "卸载未完成，请先处理上方错误。"
+        return 1
+    fi
 }
 
 # --- Argument Parsing ---
@@ -455,7 +569,7 @@ parse_args() {
                 source "${SCRIPT_DIR}/scripts/security.sh"
                 source "${SCRIPT_DIR}/scripts/server-a.sh"
                 source "${SCRIPT_DIR}/scripts/monitoring.sh"
-                deploy_server_a
+                deploy_server_a || exit 1
                 exit 0
                 ;;
             --server-b)
@@ -463,89 +577,80 @@ parse_args() {
                 source "${SCRIPT_DIR}/scripts/security.sh"
                 source "${SCRIPT_DIR}/scripts/server-b.sh"
                 source "${SCRIPT_DIR}/scripts/monitoring.sh"
-                deploy_server_b
+                deploy_server_b || exit 1
                 exit 0
                 ;;
             --security)
                 require_root
                 source "${SCRIPT_DIR}/scripts/security.sh"
-                full_security_hardening
-                exit 0
+                run_cli_command "安全加固失败，请先处理上方错误。" full_security_hardening
                 ;;
             --health-check)
-                bash "${SCRIPT_DIR}/scripts/health-check.sh" --verbose
-                exit 0
+                run_cli_command "健康检查失败，请先处理上方错误。" bash "${SCRIPT_DIR}/scripts/health-check.sh" --verbose
                 ;;
             --uninstall)
                 require_root
                 source "${SCRIPT_DIR}/scripts/uninstall.sh"
-                uninstall_all
-                exit 0
+                run_cli_command "卸载未完成，请先处理上方错误。" uninstall_all
                 ;;
             --vpn)
                 require_root
                 source "${SCRIPT_DIR}/scripts/vpn.sh"
-                deploy_vpn
-                exit 0
+                run_cli_command "VPN 部署未完成，请先处理上方错误。" deploy_vpn
                 ;;
             --anti-dpi)
                 require_root
                 source "${SCRIPT_DIR}/scripts/anti-dpi.sh"
-                deploy_anti_dpi
-                exit 0
+                run_cli_command "DPI 防护部署未完成，请先处理上方错误。" deploy_anti_dpi
                 ;;
             --mihomo)
                 require_root
                 source "${SCRIPT_DIR}/scripts/mihomo.sh"
-                deploy_mihomo
-                exit 0
+                run_cli_command "Mihomo 部署未完成，请先处理上方错误。" deploy_mihomo
                 ;;
             --keepalive)
                 require_root
                 source "${SCRIPT_DIR}/scripts/keepalive.sh"
-                deploy_keepalive
-                exit 0
+                run_cli_command "Keepalive 部署未完成，请先处理上方错误。" deploy_keepalive
                 ;;
             --split-tunnel)
                 require_root
                 source "${SCRIPT_DIR}/scripts/split-tunnel.sh"
-                deploy_split_tunnel
-                exit 0
+                run_cli_command "网络分流部署未完成，请先处理上方错误。" deploy_split_tunnel
                 ;;
             --backup)
                 require_root
                 source "${SCRIPT_DIR}/scripts/backup.sh"
-                manage_backups
-                exit 0
+                run_cli_command "备份与恢复管理执行失败，请先处理上方错误。" manage_backups
                 ;;
             --update)
                 require_root
                 source "${SCRIPT_DIR}/scripts/update.sh"
-                manage_updates
-                exit 0
+                run_cli_command "组件更新管理执行失败，请先处理上方错误。" manage_updates
                 ;;
             --multi-server)
                 require_root
                 source "${SCRIPT_DIR}/scripts/multi-server.sh"
-                manage_servers
-                exit 0
+                run_cli_command "多节点 Server B 管理执行失败，请先处理上方错误。" manage_servers
                 ;;
             --user-mgmt)
                 require_root
                 source "${SCRIPT_DIR}/scripts/user-management.sh"
-                manage_users
-                exit 0
+                run_cli_command "用户管理执行失败，请先处理上方错误。" manage_users
+                ;;
+            --bifrost-api)
+                require_root
+                source "${SCRIPT_DIR}/scripts/bifrost-api.sh"
+                run_cli_command "Bifrost 管理平台部署未完成，请先处理上方错误。" deploy_bifrost_api
                 ;;
             --diagnostics)
                 source "${SCRIPT_DIR}/scripts/diagnostics.sh"
-                manage_diagnostics
-                exit 0
+                run_cli_command "深度诊断执行失败，请先处理上方错误。" manage_diagnostics
                 ;;
             --dd-reinstall)
                 require_root
                 source "${SCRIPT_DIR}/scripts/dd-reinstall.sh"
-                pre_deploy_check
-                exit 0
+                run_cli_command "预部署环境清理未完成，请先处理上方错误。" pre_deploy_check
                 ;;
             --version)
                 echo "${PROJECT_NAME} v${SCRIPT_VERSION}"
@@ -585,6 +690,7 @@ v2.0 模块部署:
   ./install.sh --mihomo       部署 Mihomo 智能路由引擎
   ./install.sh --keepalive    部署连接保活 (Keepalive + Watchdog)
   ./install.sh --split-tunnel 部署网络分流 (Split Tunnel)
+  ./install.sh --bifrost-api  部署管理平台 (Bifrost API 注册/监控)
 
 运维管理:
   ./install.sh --backup       备份与恢复管理
@@ -603,10 +709,11 @@ v2.0 模块部署:
   0. (可选) DD 系统重装: ./install.sh --dd-reinstall
   1. 海外服务器: ./install.sh --server-b + --anti-dpi
   2. 国内服务器: ./install.sh --server-a
-  3. 部署 VPN:   ./install.sh --vpn
-  4. 部署路由:   ./install.sh --mihomo
-  5. 部署增强:   ./install.sh --keepalive --split-tunnel --backup
-  6. 创建用户:   ./install.sh --user-mgmt
+  3. 管理平台:   ./install.sh --bifrost-api
+  4. 部署 VPN:   ./install.sh --vpn
+  5. 部署路由:   ./install.sh --mihomo
+  6. 部署增强:   ./install.sh --keepalive --split-tunnel --backup
+  7. 创建用户:   ./install.sh --user-mgmt
 
 支持系统:
   Ubuntu 22.04 / 24.04 LTS
@@ -629,13 +736,11 @@ main() {
     # Ensure we're in the script directory
     cd "${SCRIPT_DIR}"
 
-    # Create necessary directories
-    mkdir -p "${CONFIG_DIR}" "${LOG_DIR}" 2>/dev/null || true
-
     if [[ $# -gt 0 ]]; then
         parse_args "$@"
     else
         # Interactive mode
+        mkdir -p "${CONFIG_DIR}" "${LOG_DIR}" 2>/dev/null || true
         detect_system
         show_main_menu
     fi

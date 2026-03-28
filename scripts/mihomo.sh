@@ -107,23 +107,14 @@ _mihomo_latest_version() {
     local tag=""
     local api_response
 
-    # Try direct GitHub API first
-    api_response="$(curl -fsSL --connect-timeout 10 --max-time 20 "${api_url}" 2>/dev/null)" || true
+    # Try direct GitHub API first, then configured mirrors
+    api_response="$(github_fetch_text "${api_url}" 20 10)" || true
     if [[ -n "${api_response}" ]]; then
         tag=$(echo "${api_response}" | grep '"tag_name"' | head -1 | sed -E 's/.*"tag_name":\s*"([^"]+)".*/\1/')
     fi
 
-    # If direct API fails, try via mirror
     if [[ -z "${tag}" ]]; then
-        log_warn "Direct GitHub API unreachable. Trying mirror..."
-        api_response="$(curl -fsSL --connect-timeout 10 --max-time 20 "https://ghproxy.net/${api_url}" 2>/dev/null)" || true
-        if [[ -n "${api_response}" ]]; then
-            tag=$(echo "${api_response}" | grep '"tag_name"' | head -1 | sed -E 's/.*"tag_name":\s*"([^"]+)".*/\1/')
-        fi
-    fi
-
-    if [[ -z "${tag}" ]]; then
-        log_error "Failed to fetch latest Mihomo version from GitHub API (direct + mirrors)."
+        log_error "Failed to fetch latest Mihomo version from GitHub API (direct + configured mirrors)."
         return 1
     fi
     echo "${tag}"
@@ -302,8 +293,9 @@ _mihomo_download_geodata() {
         local dest="${entry##*|}"
         local filename
         filename="$(basename "${dest}")"
+        local require_fresh_download=0
 
-        if [[ -f "${dest}" ]]; then
+        if [[ -s "${dest}" ]]; then
             # Check if file is older than 7 days
             local age_days
             age_days="$(( ($(date +%s) - $(stat -c %Y "${dest}" 2>/dev/null || echo 0)) / 86400 ))"
@@ -312,12 +304,23 @@ _mihomo_download_geodata() {
                 continue
             fi
             log_info "GeoData '${filename}' is ${age_days} days old. Updating..."
+        else
+            log_info "GeoData '${filename}' is missing or empty. A fresh download is required."
+            require_fresh_download=1
         fi
 
         log_info "Downloading ${filename} (with China mirror fallback)..."
-        if github_download "${url}" "${dest}" 120; then
+        local tmp_file
+        tmp_file="$(mktemp "${dest}.tmp.XXXXXX")"
+        if github_download "${url}" "${tmp_file}" 120 && [[ -s "${tmp_file}" ]]; then
+            mv "${tmp_file}" "${dest}"
             log_success "Downloaded: ${filename}"
         else
+            rm -f "${tmp_file}" 2>/dev/null || true
+            if (( require_fresh_download )); then
+                log_error "Failed to download required ${filename} from all sources."
+                return 1
+            fi
             log_warn "Failed to download ${filename} from all sources. Routing may use cached data."
         fi
     done
@@ -447,7 +450,7 @@ configure_mihomo() {
 
     # --- Print connection info ---
     # NOTE: Print API secret ONLY to stdout (not to log file) to avoid
-    # persisting secrets in /var/log/bifrost.log.
+    # persisting secrets in /var/log/bifrost/bifrost.log.
     log_success "Mihomo routing engine configured successfully."
     log_info "  Mixed proxy (HTTP+SOCKS5): 0.0.0.0:${MIHOMO_MIXED_PORT}"
     log_info "  SOCKS5 proxy:              127.0.0.1:${MIHOMO_SOCKS_PORT}"
@@ -876,6 +879,20 @@ add_mihomo_node() {
         return 1
     fi
 
+    # Reject shell/YAML/meta characters before feeding values into yq/sed.
+    # These values are later interpolated into expressions and config blocks.
+    if [[ ! "${node_name}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+        log_error "Invalid node name: ${node_name}"
+        log_error "Node name may only contain letters, digits, dot, underscore, colon, and hyphen."
+        return 1
+    fi
+
+    if [[ ! "${node_addr}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+        log_error "Invalid node address: ${node_addr}"
+        log_error "Node address may only contain letters, digits, dot, underscore, colon, and hyphen."
+        return 1
+    fi
+
     # Validate port
     if ! [[ "${node_port}" =~ ^[0-9]+$ ]] || (( node_port < 1 || node_port > 65535 )); then
         log_error "Invalid port: ${node_port}"
@@ -889,6 +906,10 @@ add_mihomo_node() {
 
     # Check dependencies
     install_if_missing yq yq 2>/dev/null || true
+    if ! check_command yq; then
+        log_error "yq is required for safe Mihomo config edits. Install yq and retry."
+        return 1
+    fi
 
     # Backup current config
     backup_file "${MIHOMO_CONFIG}" || true
@@ -901,38 +922,37 @@ add_mihomo_node() {
         return 0
     fi
 
-    # If yq is available, use it for structured editing
-    if check_command yq; then
-        # Add proxy entry
-        yq -i ".proxies += [{\"name\": \"${node_name}\", \"type\": \"socks5\", \"server\": \"${node_addr}\", \"port\": ${node_port}, \"udp\": true}]" \
-            "${MIHOMO_CONFIG}"
+    # Add proxy entry
+    if ! yq -i ".proxies += [{\"name\": \"${node_name}\", \"type\": \"socks5\", \"server\": \"${node_addr}\", \"port\": ${node_port}, \"udp\": true}]" \
+        "${MIHOMO_CONFIG}"; then
+        log_error "Failed to add proxy entry to Mihomo config."
+        if [[ -n "${BACKUP_RESULT:-}" && -f "${BACKUP_RESULT}" ]]; then
+            cp -f "${BACKUP_RESULT}" "${MIHOMO_CONFIG}"
+            log_info "Backup restored."
+        fi
+        return 1
+    fi
 
-        # Add to AI-Proxy group
-        yq -i '(.proxy-groups[] | select(.name == "AI-Proxy") | .proxies) += ["'"${node_name}"'"]' \
-            "${MIHOMO_CONFIG}"
+    # Add to AI-Proxy group
+    if ! yq -i '(.proxy-groups[] | select(.name == "AI-Proxy") | .proxies) += ["'"${node_name}"'"]' \
+        "${MIHOMO_CONFIG}"; then
+        log_error "Failed to add node to AI-Proxy group."
+        if [[ -n "${BACKUP_RESULT:-}" && -f "${BACKUP_RESULT}" ]]; then
+            cp -f "${BACKUP_RESULT}" "${MIHOMO_CONFIG}"
+            log_info "Backup restored."
+        fi
+        return 1
+    fi
 
-        # Add to Fallback group
-        yq -i '(.proxy-groups[] | select(.name == "Fallback") | .proxies) += ["'"${node_name}"'"]' \
-            "${MIHOMO_CONFIG}"
-    else
-        # Fallback: sed-based insertion (less safe but works without yq)
-        log_warn "yq not found. Using sed-based insertion (less reliable)."
-
-        # Insert new proxy after the last proxy entry
-        local proxy_block="  - name: \"${node_name}\"\n    type: socks5\n    server: ${node_addr}\n    port: ${node_port}\n    udp: true\n"
-
-        # Find the line "proxy-groups:" and insert the proxy before it
-        sed -i "/^proxy-groups:/i\\${proxy_block}" "${MIHOMO_CONFIG}"
-
-        # Add node to AI-Proxy proxies list
-        sed -i "/name: \"AI-Proxy\"/,/url:/{
-            /proxies:/a\\      - \"${node_name}\"
-        }" "${MIHOMO_CONFIG}"
-
-        # Add node to Fallback proxies list
-        sed -i "/name: \"Fallback\"/,/url:/{
-            /proxies:/a\\      - \"${node_name}\"
-        }" "${MIHOMO_CONFIG}"
+    # Add to Fallback group
+    if ! yq -i '(.proxy-groups[] | select(.name == "Fallback") | .proxies) += ["'"${node_name}"'"]' \
+        "${MIHOMO_CONFIG}"; then
+        log_error "Failed to add node to Fallback group."
+        if [[ -n "${BACKUP_RESULT:-}" && -f "${BACKUP_RESULT}" ]]; then
+            cp -f "${BACKUP_RESULT}" "${MIHOMO_CONFIG}"
+            log_info "Backup restored."
+        fi
+        return 1
     fi
 
     # Validate configuration

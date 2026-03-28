@@ -42,10 +42,14 @@ curl http://127.0.0.1:8000/health
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `NEWAPI_ADMIN_TOKEN` | NewAPI 管理员 Token（必填） | - |
+| `BIFROST_NEWAPI_ADMIN_TOKEN` | NewAPI 管理员 Token（必填） | - |
 | `BIFROST_ADMIN_KEY` | Bifrost 管理密钥，用于 `X-Admin-Key` 头 | - |
-| `ALLOW_SELF_REGISTER` | 是否允许用户自助注册 | `true` |
-| `DEFAULT_QUOTA` | 新用户默认配额（USD） | `100` |
+| `BIFROST_PUBLIC_BASE_URL` | 返回给用户的 AI 网关外部地址（必填） | - |
+| `BIFROST_ALLOW_SELF_REGISTER` | 是否允许用户自助注册 | `true` |
+| `BIFROST_DEFAULT_QUOTA` | 新用户默认配额（USD） | `100` |
+| `BIFROST_MAX_REGISTER_PER_DAY` | 每日最大成功注册数 | `50` |
+| `BIFROST_RATE_LIMIT_PER_MINUTE` | 每分钟最大注册尝试数 | `30` |
+| `BIFROST_CORS_ALLOW_ORIGINS` | 允许的跨域来源列表（逗号分隔） | 空 |
 
 ### 获取 NewAPI Admin Token
 
@@ -64,7 +68,11 @@ docker exec new-api printenv ADMIN_TOKEN
 - **Swagger UI**: `http://your-server:8000/docs`
 - **ReDoc**: `http://your-server:8000/redoc`
 
-如果通过 Caddy 反向代理访问：`https://your-domain/manage/docs`
+如果通过 Caddy 反向代理访问：
+
+- **Swagger UI**: `https://your-domain/manage/docs`
+- **ReDoc**: `https://your-domain/manage/redoc`
+- **注册页面**: `https://your-domain/manage/register`
 
 ## API 端点一览
 
@@ -90,10 +98,17 @@ docker exec new-api printenv ADMIN_TOKEN
 | `POST` | `/api/v1/users/batch` | 批量创建用户 |
 | `PUT` | `/api/v1/users/{id}/quota` | 更新用户配额 |
 | `DELETE` | `/api/v1/users/{id}` | 删除用户 |
-| `GET` | `/api/v1/models` | 模型状态 |
+| `GET` | `/api/v1/models/test` | 主动测试模型可用性 |
 | `GET` | `/api/v1/channels` | 渠道列表 |
 | `POST` | `/api/v1/channels/{id}/test` | 测试渠道 |
-| `GET` | `/api/v1/stats` | 用量统计 |
+| `GET` | `/api/v1/stats/overview` | 系统总览统计 |
+
+### 公开只读端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/v1/models` | 模型状态聚合查询 |
+| `GET` | `/api/v1/register/status` | 注册可用性与名额查询 |
 
 ## 架构
 

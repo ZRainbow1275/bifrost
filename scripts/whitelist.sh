@@ -114,6 +114,143 @@ load_whitelist() {
 }
 
 ###############################################################################
+# _resolve_whitelist_target()
+#
+# Resolve the whitelist file path that should be modified.
+###############################################################################
+_resolve_whitelist_target() {
+    local target_file="${WHITELIST_FILE}"
+
+    if [[ ! -f "${target_file}" ]]; then
+        if [[ -f "${INSTALLED_WHITELIST}" ]]; then
+            target_file="${INSTALLED_WHITELIST}"
+        else
+            log_error "Whitelist file not found."
+            log_error "Expected at: ${WHITELIST_FILE} or ${INSTALLED_WHITELIST}"
+            return 1
+        fi
+    fi
+
+    printf '%s' "${target_file}"
+}
+
+###############################################################################
+# _stage_whitelist_add()
+#
+# Create a staged whitelist file containing the new domain entry.
+###############################################################################
+_stage_whitelist_add() {
+    local source_file="${1:?}"
+    local staged_file="${2:?}"
+    local domain="${3:?}"
+
+    cp "${source_file}" "${staged_file}" || return 1
+    {
+        echo ""
+        echo "# Added manually on $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "${domain}"
+    } >> "${staged_file}"
+}
+
+###############################################################################
+# _stage_whitelist_remove()
+#
+# Create a staged whitelist file with the domain removed. If the domain was
+# preceded by an auto-generated "Added manually" comment, remove that comment too.
+###############################################################################
+_stage_whitelist_remove() {
+    local source_file="${1:?}"
+    local staged_file="${2:?}"
+    local domain="${3:?}"
+
+    awk -v domain="${domain}" '
+        BEGIN { pending_comment = "" }
+        {
+            if (pending_comment != "") {
+                if ($0 == domain) {
+                    pending_comment = ""
+                    next
+                }
+                print pending_comment
+                pending_comment = ""
+            }
+
+            if ($0 ~ /^# Added manually on /) {
+                pending_comment = $0
+                next
+            }
+
+            if ($0 == domain) {
+                next
+            }
+
+            print
+        }
+        END {
+            if (pending_comment != "") {
+                print pending_comment
+            }
+        }
+    ' "${source_file}" > "${staged_file}"
+}
+
+###############################################################################
+# _apply_whitelist_change()
+#
+# Apply a staged whitelist update and roll it back if Xray routing sync fails.
+###############################################################################
+_apply_whitelist_change() {
+    local target_file="${1:?}"
+    local staged_file="${2:?}"
+    local domain="${3:?}"
+    local action="${4:?}"
+    local success_message="${5:?}"
+
+    local backup_file
+    backup_file="$(mktemp)"
+
+    if ! cp "${target_file}" "${backup_file}"; then
+        rm -f "${staged_file}" "${backup_file}"
+        log_error "Failed to create whitelist backup before applying '${action}' for '${domain}'."
+        return 1
+    fi
+
+    if ! cp "${staged_file}" "${target_file}"; then
+        rm -f "${staged_file}" "${backup_file}"
+        log_error "Failed to stage whitelist change for '${domain}'."
+        return 1
+    fi
+
+    if ! _update_xray_routing "${domain}" "${action}"; then
+        log_error "Xray routing update failed. Restoring whitelist state..."
+        if ! cp "${backup_file}" "${target_file}"; then
+            log_error "Failed to restore whitelist backup: ${backup_file}"
+        fi
+        rm -f "${staged_file}" "${backup_file}"
+        return 1
+    fi
+
+    rm -f "${staged_file}" "${backup_file}"
+    log_info "${success_message}"
+}
+
+###############################################################################
+# _derive_xray_domain_rule()
+#
+# Normalize a user-entered domain into the Xray rule form used in config.json.
+###############################################################################
+_derive_xray_domain_rule() {
+    local domain="${1:?}"
+    local base_domain="${domain}"
+
+    if [[ "$(echo "${domain}" | tr -cd '.' | wc -c)" -gt 1 ]]; then
+        base_domain="$(echo "${domain}" | sed 's/^[^.]*\.//' 2>/dev/null)"
+    fi
+
+    printf 'domain:%s' "${base_domain}"
+}
+
+###############################################################################
 # add_domain()
 #
 # Add a domain to the whitelist file and update Xray routing configuration.
@@ -137,16 +274,8 @@ add_domain() {
         return 1
     fi
 
-    # Determine which whitelist file to modify
-    local target_file="${WHITELIST_FILE}"
-    if [[ ! -f "${target_file}" ]]; then
-        if [[ -f "${INSTALLED_WHITELIST}" ]]; then
-            target_file="${INSTALLED_WHITELIST}"
-        else
-            log_error "Whitelist file not found."
-            return 1
-        fi
-    fi
+    local target_file
+    target_file="$(_resolve_whitelist_target)" || return 1
 
     # Check if domain already exists
     if load_whitelist "${target_file}" | grep -qFx "${domain}"; then
@@ -154,15 +283,17 @@ add_domain() {
         return 0
     fi
 
-    # Add domain to the whitelist file
-    echo "" >> "${target_file}"
-    echo "# Added manually on $(date '+%Y-%m-%d %H:%M:%S')" >> "${target_file}"
-    echo "${domain}" >> "${target_file}"
+    local staged_file
+    staged_file="$(mktemp)"
 
-    log_info "Domain '${domain}' added to whitelist: ${target_file}"
+    if ! _stage_whitelist_add "${target_file}" "${staged_file}" "${domain}"; then
+        rm -f "${staged_file}"
+        log_error "Failed to prepare whitelist update for '${domain}'."
+        return 1
+    fi
 
-    # Update Xray routing configuration
-    _update_xray_routing "${domain}" "add"
+    _apply_whitelist_change "${target_file}" "${staged_file}" "${domain}" "add" \
+        "Domain '${domain}' added to whitelist: ${target_file}"
 }
 
 ###############################################################################
@@ -182,16 +313,8 @@ remove_domain() {
         return 1
     fi
 
-    # Determine which whitelist file to modify
-    local target_file="${WHITELIST_FILE}"
-    if [[ ! -f "${target_file}" ]]; then
-        if [[ -f "${INSTALLED_WHITELIST}" ]]; then
-            target_file="${INSTALLED_WHITELIST}"
-        else
-            log_error "Whitelist file not found."
-            return 1
-        fi
-    fi
+    local target_file
+    target_file="$(_resolve_whitelist_target)" || return 1
 
     # Check if domain exists in whitelist
     if ! load_whitelist "${target_file}" | grep -qFx "${domain}"; then
@@ -205,19 +328,17 @@ remove_domain() {
         return 0
     fi
 
-    # Remove the domain line (and any "Added manually" comment immediately before it)
-    # Use a temporary file for safe in-place editing
-    local tmp_file
-    tmp_file="$(mktemp)"
+    local staged_file
+    staged_file="$(mktemp)"
 
-    # Remove exact domain match lines
-    grep -vFx "${domain}" "${target_file}" > "${tmp_file}"
-    mv "${tmp_file}" "${target_file}"
+    if ! _stage_whitelist_remove "${target_file}" "${staged_file}" "${domain}"; then
+        rm -f "${staged_file}"
+        log_error "Failed to prepare whitelist removal for '${domain}'."
+        return 1
+    fi
 
-    log_info "Domain '${domain}' removed from whitelist."
-
-    # Update Xray routing configuration
-    _update_xray_routing "${domain}" "remove"
+    _apply_whitelist_change "${target_file}" "${staged_file}" "${domain}" "remove" \
+        "Domain '${domain}' removed from whitelist."
 }
 
 ###############################################################################
@@ -391,6 +512,8 @@ test_domain() {
 _update_xray_routing() {
     local domain="${1}"
     local action="${2}"
+    local xray_domain_rule
+    xray_domain_rule="$(_derive_xray_domain_rule "${domain}")"
 
     log_info "Updating Xray routing configuration..."
 
@@ -403,33 +526,22 @@ _update_xray_routing() {
 
     # Check if jq is available for JSON manipulation
     if ! command_exists jq; then
-        log_warn "jq is not installed. Cannot auto-update Xray config."
-        log_warn "Please manually update ${XRAY_CLIENT_CONFIG} and restart Xray."
-        log_warn "  Add routing rule: \"domain:${domain}\" -> proxy outbound"
-        return 0
+        log_error "jq is not installed. Cannot auto-update Xray config."
+        log_error "Refusing to change whitelist state without route-engine synchronization."
+        return 1
     fi
 
     # Check if Xray config exists
     if [[ ! -f "${XRAY_CLIENT_CONFIG}" ]]; then
-        log_warn "Xray client config not found at ${XRAY_CLIENT_CONFIG}"
-        log_warn "Routing rules will take effect after Xray is deployed."
-        return 0
+        log_error "Xray client config not found at ${XRAY_CLIENT_CONFIG}"
+        log_error "Refusing to change whitelist state before Xray routing is available."
+        return 1
     fi
 
     # Backup current config
     cp "${XRAY_CLIENT_CONFIG}" "${XRAY_CLIENT_CONFIG}.bak.$(date +%Y%m%d%H%M%S)"
 
     if [[ "${action}" == "add" ]]; then
-        # Extract the base domain for Xray routing (domain:example.com format)
-        local base_domain
-        base_domain="$(echo "${domain}" | sed 's/^[^.]*\.//' 2>/dev/null)"
-        # If the domain has only one dot, use it as-is
-        if [[ "$(echo "${domain}" | tr -cd '.' | wc -c)" -le 1 ]]; then
-            base_domain="${domain}"
-        fi
-
-        local xray_domain_rule="domain:${base_domain}"
-
         # Check if a rule for this domain already exists
         if grep -q "\"${xray_domain_rule}\"" "${XRAY_CLIENT_CONFIG}" 2>/dev/null; then
             log_info "Xray routing rule for '${xray_domain_rule}' already exists."
@@ -447,8 +559,8 @@ _update_xray_routing() {
                 log_info "Xray routing rule added for '${xray_domain_rule}'."
             else
                 rm -f "${tmp_config}"
-                log_warn "Failed to update Xray config via jq. Please add manually."
-                return 0
+                log_error "Failed to update Xray config via jq for '${xray_domain_rule}'."
+                return 1
             fi
         fi
     elif [[ "${action}" == "remove" ]]; then
@@ -456,16 +568,16 @@ _update_xray_routing() {
         local tmp_config
         tmp_config="$(mktemp)"
 
-        if jq --arg domain "${domain}" \
-            '.routing.rules = [.routing.rules[] | select(.domain == null or ((.domain | map(test($domain)) | any) | not))]' \
+        if jq --arg rule "${xray_domain_rule}" \
+            '.routing.rules = [.routing.rules[] | select(.domain == null or (.domain | index($rule) == null))]' \
             "${XRAY_CLIENT_CONFIG}" > "${tmp_config}" 2>/dev/null \
            && [[ -s "${tmp_config}" ]]; then
             mv "${tmp_config}" "${XRAY_CLIENT_CONFIG}"
-            log_info "Xray routing rules for '${domain}' removed."
+            log_info "Xray routing rules for '${xray_domain_rule}' removed."
         else
             rm -f "${tmp_config}"
-            log_warn "Failed to update Xray config via jq. Please remove manually."
-            return 0
+            log_error "Failed to update Xray config via jq for '${xray_domain_rule}'."
+            return 1
         fi
     fi
 

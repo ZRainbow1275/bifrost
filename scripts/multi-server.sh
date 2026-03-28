@@ -167,6 +167,86 @@ _parse_server_field() {
 }
 
 ###############################################################################
+# _rewrite_registry_without_name()
+#
+# Rewrite the registry file without the specified server name.
+###############################################################################
+_rewrite_registry_without_name() {
+    local server_name="${1:?}"
+    local tmp_file
+    tmp_file="$(mktemp)"
+    grep -v "^${server_name}|" "${SERVER_REGISTRY_FILE}" > "${tmp_file}"
+    mv "${tmp_file}" "${SERVER_REGISTRY_FILE}"
+    chmod 600 "${SERVER_REGISTRY_FILE}"
+}
+
+###############################################################################
+# _strip_mihomo_managed_section()
+#
+# Remove the managed Mihomo proxy section from the config file.
+###############################################################################
+_strip_mihomo_managed_section() {
+    local config_file="${1:?}"
+    local marker_start="# >>> AI-GATEWAY-BRIDGE MANAGED PROXIES - DO NOT EDIT >>>"
+    local marker_end="# <<< AI-GATEWAY-BRIDGE MANAGED PROXIES <<<"
+
+    if ! grep -qF "${marker_start}" "${config_file}" 2>/dev/null; then
+        return 0
+    fi
+
+    local tmp_config
+    tmp_config="$(mktemp)"
+    local in_managed=false
+
+    while IFS= read -r line; do
+        if [[ "${line}" == *"${marker_start}"* ]]; then
+            in_managed=true
+            continue
+        fi
+        if [[ "${line}" == *"${marker_end}"* ]]; then
+            in_managed=false
+            continue
+        fi
+        if [[ "${in_managed}" == "false" ]]; then
+            echo "${line}" >> "${tmp_config}"
+        fi
+    done < "${config_file}"
+
+    mv "${tmp_config}" "${config_file}"
+}
+
+###############################################################################
+# _reload_mihomo_runtime()
+#
+# Reload Mihomo/Clash if the service is running.
+###############################################################################
+_reload_mihomo_runtime() {
+    if command_exists systemctl && systemctl is-active --quiet mihomo 2>/dev/null; then
+        log_info "Restarting Mihomo..."
+        if ! systemctl restart mihomo 2>/dev/null; then
+            log_error "Failed to restart Mihomo after config update."
+            return 1
+        fi
+        sleep 2
+        if systemctl is-active --quiet mihomo 2>/dev/null; then
+            log_success "Mihomo restarted with updated proxy pool."
+            return 0
+        fi
+        log_error "Mihomo failed to start. Check: journalctl -u mihomo --no-pager -n 20"
+        return 1
+    fi
+
+    if command_exists systemctl && systemctl is-active --quiet clash 2>/dev/null; then
+        if ! systemctl restart clash 2>/dev/null; then
+            log_error "Failed to restart Clash after config update."
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+###############################################################################
 # _validate_ip()
 #
 # Basic IPv4 address validation.
@@ -268,6 +348,8 @@ _test_server_connectivity() {
 _update_mihomo_config() {
     local action="${1:?}"
     local server_name="${2:?}"
+    local marker_start="# >>> AI-GATEWAY-BRIDGE MANAGED PROXIES - DO NOT EDIT >>>"
+    local marker_end="# <<< AI-GATEWAY-BRIDGE MANAGED PROXIES <<<"
 
     local config_file="${MIHOMO_CONFIG}"
     if [[ ! -f "${config_file}" ]]; then
@@ -275,13 +357,14 @@ _update_mihomo_config() {
     fi
 
     if [[ ! -f "${config_file}" ]]; then
-        log_warn "Mihomo config not found. Skipping Mihomo integration."
-        log_info "Servers are registered in: ${SERVER_REGISTRY_FILE}"
-        return 0
+        log_error "Mihomo config not found at ${MIHOMO_CONFIG} or ${MIHOMO_FALLBACK_CONFIG}. Refusing to report proxy-pool success without a live route engine."
+        return 1
     fi
 
     # Backup current config
-    cp "${config_file}" "${config_file}.bak.$(date +%Y%m%d%H%M%S)"
+    local backup
+    backup="${config_file}.bak.$(date +%Y%m%d%H%M%S)"
+    cp "${config_file}" "${backup}"
 
     # Read all active servers from registry
     local -a server_lines=()
@@ -291,7 +374,20 @@ _update_mihomo_config() {
     done < "${SERVER_REGISTRY_FILE}"
 
     if [[ ${#server_lines[@]} -eq 0 ]]; then
-        log_warn "No servers in registry. Mihomo config not modified."
+        if ! _strip_mihomo_managed_section "${config_file}"; then
+            log_error "Failed to remove managed Mihomo proxy section. Restoring previous config."
+            cp "${backup}" "${config_file}"
+            return 1
+        fi
+        chmod 600 "${config_file}"
+        if ! _reload_mihomo_runtime; then
+            log_error "Mihomo reload failed after removing the managed proxy pool. Restoring previous config."
+            cp "${backup}" "${config_file}"
+            chmod 600 "${config_file}"
+            _reload_mihomo_runtime || true
+            return 1
+        fi
+        log_info "No servers in registry. Removed managed Mihomo proxy pool section."
         return 0
     fi
 
@@ -329,10 +425,6 @@ _update_mihomo_config() {
         fi
         proxy_names+="\"${s_name}\""
     done
-
-    # Check if the config already has our managed section markers
-    local marker_start="# >>> AI-GATEWAY-BRIDGE MANAGED PROXIES - DO NOT EDIT >>>"
-    local marker_end="# <<< AI-GATEWAY-BRIDGE MANAGED PROXIES <<<"
 
     if grep -qF "${marker_start}" "${config_file}" 2>/dev/null; then
         # Replace the existing managed section
@@ -390,19 +482,15 @@ _update_mihomo_config() {
     chmod 600 "${config_file}"
     log_info "Mihomo config updated with ${#server_lines[@]} server(s)."
 
-    # Restart Mihomo if running
-    if command_exists systemctl && systemctl is-active --quiet mihomo 2>/dev/null; then
-        log_info "Restarting Mihomo..."
-        systemctl restart mihomo 2>/dev/null || log_warn "Failed to restart Mihomo."
-        sleep 2
-        if systemctl is-active --quiet mihomo 2>/dev/null; then
-            log_success "Mihomo restarted with updated proxy pool."
-        else
-            log_error "Mihomo failed to start. Check: journalctl -u mihomo --no-pager -n 20"
-        fi
-    elif command_exists systemctl && systemctl is-active --quiet clash 2>/dev/null; then
-        systemctl restart clash 2>/dev/null || log_warn "Failed to restart Clash."
+    if ! _reload_mihomo_runtime; then
+        log_error "Mihomo reload failed after updating the proxy pool. Restoring previous config."
+        cp "${backup}" "${config_file}"
+        chmod 600 "${config_file}"
+        _reload_mihomo_runtime || true
+        return 1
     fi
+
+    return 0
 }
 
 ###############################################################################
@@ -546,7 +634,11 @@ add_server_b() {
     log_success "Server '${server_name}' registered in ${SERVER_REGISTRY_FILE}"
 
     # Update Mihomo config
-    _update_mihomo_config "add" "${server_name}"
+    if ! _update_mihomo_config "add" "${server_name}"; then
+        log_error "Failed to sync Mihomo proxy pool. Rolling back server '${server_name}' from the registry."
+        _rewrite_registry_without_name "${server_name}"
+        return 1
+    fi
 
     log_success "Server '${server_name}' added to the proxy pool."
     log_info "Total servers: $(_get_server_count)"
@@ -633,16 +725,17 @@ remove_server_b() {
     fi
 
     # Remove from registry file
-    local tmp_file
-    tmp_file="$(mktemp)"
-    grep -v "^${target_name}|" "${SERVER_REGISTRY_FILE}" > "${tmp_file}"
-    mv "${tmp_file}" "${SERVER_REGISTRY_FILE}"
-    chmod 600 "${SERVER_REGISTRY_FILE}"
-
-    log_success "Server '${target_name}' removed from registry."
+    _rewrite_registry_without_name "${target_name}"
 
     # Update Mihomo config
-    _update_mihomo_config "remove" "${target_name}"
+    if ! _update_mihomo_config "remove" "${target_name}"; then
+        log_error "Failed to sync Mihomo proxy pool after removing '${target_name}'. Restoring registry entry."
+        printf '%s\n' "${server_line}" >> "${SERVER_REGISTRY_FILE}"
+        chmod 600 "${SERVER_REGISTRY_FILE}"
+        return 1
+    fi
+
+    log_success "Server '${target_name}' removed from registry."
 
     log_info "Remaining servers: $(_get_server_count)"
 }

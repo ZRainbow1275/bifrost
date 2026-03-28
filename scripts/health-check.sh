@@ -8,19 +8,23 @@
 #   1. Xray service status
 #   2. Tunnel connectivity (curl through proxy to api.anthropic.com)
 #   3. New API container status (Server A)
-#   4. 3x-ui service status (Server B)
-#   5. Disk space (alert if < 10% free)
-#   6. Memory usage (alert if > 90%)
-#   7. CPU load (alert if > 90%)
-#   8. Log file sizes
+#   4. Bifrost API container + auth semantics (Server A)
+#   5. Caddy service status
+#   6. Public /manage surface + TLS reachability
+#   7. 3x-ui service status (Server B)
+#   8. Disk space (alert if < 10% free)
+#   9. Memory usage (alert if > 90%)
+#  10. CPU load (alert if > 90%)
+#  11. Log file sizes
 #
 # Output:
 #   - JSON status report: /var/log/bifrost/health.json
 #   - Alerts on failure: /var/log/bifrost/alerts.log
 #
 # Usage:
-#   /opt/bifrost/health-check.sh
-#   (typically invoked by cron, not manually)
+#   /opt/bifrost/scripts/health-check.sh
+#   /opt/bifrost/scripts/health-check.sh --verbose
+#   (typically invoked by cron, but also supports manual verification)
 ###############################################################################
 
 set -euo pipefail
@@ -28,22 +32,22 @@ set -euo pipefail
 # =============================================================================
 # Configuration
 # =============================================================================
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 LOG_DIR="/var/log/bifrost"
 HEALTH_JSON="${LOG_DIR}/health.json"
 ALERTS_LOG="${LOG_DIR}/alerts.log"
 PROXY_SOCKS="socks5://127.0.0.1:10808"
 TEST_URL="https://api.anthropic.com"
+SERVER_A_DOMAIN_FILE="/root/server-a-domain.conf"
+BIFROST_API_CONTAINER="bifrost-api"
+BIFROST_LOCAL_HEALTH_URL="http://127.0.0.1:8000/health"
+BIFROST_LOCAL_AUTH_URL="http://127.0.0.1:8000/api/v1/models/test"
 DISK_THRESHOLD=10    # Alert if free disk space < 10%
 MEMORY_THRESHOLD=90  # Alert if memory usage > 90%
 CPU_THRESHOLD=90     # Alert if CPU load > 90% (1-min avg vs core count)
 LOG_SIZE_WARN_MB=500 # Warn if any log file exceeds 500MB
-
-# Ensure log directory exists
-mkdir -p "${LOG_DIR}"
-
-# Timestamp
-TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-LOCAL_TIME="$(date '+%Y-%m-%d %H:%M:%S %Z')"
+VERBOSE=0
 
 # =============================================================================
 # Helper functions
@@ -51,6 +55,7 @@ LOCAL_TIME="$(date '+%Y-%m-%d %H:%M:%S %Z')"
 # Overall status tracking
 OVERALL_STATUS="healthy"
 declare -a ALERT_MESSAGES=()
+declare -a LARGE_LOGS=()
 
 record_alert() {
     local level="${1}"  # CRITICAL, WARNING, INFO
@@ -67,6 +72,82 @@ record_alert() {
 
     # Append to alerts log
     echo "[${TIMESTAMP}] [${level}] [${component}] ${message}" >> "${ALERTS_LOG}"
+}
+
+print_help() {
+    cat <<'EOF'
+Bifrost - Standalone Health Check Script
+
+Usage:
+  bash scripts/health-check.sh
+  bash scripts/health-check.sh --verbose
+  bash scripts/health-check.sh --help
+
+Checks:
+  - Xray tunnel connectivity
+  - NewAPI container health
+  - Bifrost API container health + auth semantics
+  - Caddy service status
+  - Public /manage register/docs reachability + TLS validation
+  - 3x-ui / system resource / log drift
+EOF
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --verbose)
+                VERBOSE=1
+                ;;
+            --help|-h)
+                print_help
+                exit 0
+                ;;
+            *)
+                echo "Unknown option: $1" >&2
+                print_help >&2
+                exit 1
+                ;;
+        esac
+        shift
+    done
+}
+
+verbose_log() {
+    if [[ "${VERBOSE}" -eq 1 ]]; then
+        echo "$*"
+    fi
+}
+
+curl_http_code() {
+    local url="$1"
+    shift || true
+
+    local code
+    code="$(curl -sS -o /dev/null -w '%{http_code}' \
+        --connect-timeout 10 \
+        --max-time 20 \
+        "$@" \
+        "${url}" 2>/dev/null)" || code="000"
+    printf '%s' "${code}"
+}
+
+resolve_public_domain() {
+    local domain="${DEPLOY_DOMAIN:-}"
+
+    if [[ -n "${domain}" ]]; then
+        printf '%s' "${domain}"
+        return 0
+    fi
+
+    if [[ -f "${SERVER_A_DOMAIN_FILE}" ]]; then
+        # shellcheck source=/dev/null
+        source "${SERVER_A_DOMAIN_FILE}"
+        printf '%s' "${DOMAIN:-}"
+        return 0
+    fi
+
+    return 1
 }
 
 # Check if a systemd service is active
@@ -223,7 +304,166 @@ check_new_api() {
 }
 
 # =============================================================================
-# Check 4: 3x-ui Service (Server B)
+# Check 4: Bifrost API Container (Server A)
+# =============================================================================
+check_bifrost_api() {
+    BIFROST_STATUS="not_applicable"
+    BIFROST_CONTAINER_ID="null"
+    BIFROST_HEALTH_CODE="null"
+    BIFROST_AUTH_MISSING_CODE="null"
+    BIFROST_AUTH_WRONG_CODE="null"
+
+    if ! command -v docker >/dev/null 2>&1; then
+        return
+    fi
+
+    if ! docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qw "${BIFROST_API_CONTAINER}"; then
+        return
+    fi
+
+    BIFROST_CONTAINER_ID="$(docker ps -a --filter "name=${BIFROST_API_CONTAINER}" --format '{{.ID}}' 2>/dev/null | head -1)"
+
+    if docker ps --filter "name=${BIFROST_API_CONTAINER}" --filter "status=running" --format '{{.Names}}' 2>/dev/null | grep -qw "${BIFROST_API_CONTAINER}"; then
+        BIFROST_STATUS="running"
+        BIFROST_HEALTH_CODE="$(curl_http_code "${BIFROST_LOCAL_HEALTH_URL}")"
+        if [[ "${BIFROST_HEALTH_CODE}" != "200" ]]; then
+            BIFROST_STATUS="unhealthy"
+            record_alert "CRITICAL" "bifrost-api" "Bifrost API container is running but /health returned HTTP ${BIFROST_HEALTH_CODE}."
+        fi
+
+        BIFROST_AUTH_MISSING_CODE="$(curl_http_code "${BIFROST_LOCAL_AUTH_URL}")"
+        if [[ "${BIFROST_AUTH_MISSING_CODE}" != "401" ]]; then
+            record_alert "WARNING" "bifrost-api" "Missing X-Admin-Key should return 401, got ${BIFROST_AUTH_MISSING_CODE}."
+        fi
+
+        BIFROST_AUTH_WRONG_CODE="$(curl_http_code "${BIFROST_LOCAL_AUTH_URL}" -H 'X-Admin-Key: wrong-admin-key')"
+        if [[ "${BIFROST_AUTH_WRONG_CODE}" != "403" ]]; then
+            record_alert "WARNING" "bifrost-api" "Wrong X-Admin-Key should return 403, got ${BIFROST_AUTH_WRONG_CODE}."
+        fi
+    else
+        BIFROST_STATUS="stopped"
+        record_alert "CRITICAL" "bifrost-api" "Bifrost API container is not running."
+
+        if docker start "${BIFROST_API_CONTAINER}" 2>/dev/null; then
+            sleep 5
+            if docker ps --filter "name=${BIFROST_API_CONTAINER}" --filter "status=running" --format '{{.Names}}' 2>/dev/null | grep -qw "${BIFROST_API_CONTAINER}"; then
+                BIFROST_STATUS="recovered"
+                record_alert "INFO" "bifrost-api" "Bifrost API container auto-restarted successfully."
+                BIFROST_HEALTH_CODE="$(curl_http_code "${BIFROST_LOCAL_HEALTH_URL}")"
+                BIFROST_AUTH_MISSING_CODE="$(curl_http_code "${BIFROST_LOCAL_AUTH_URL}")"
+                BIFROST_AUTH_WRONG_CODE="$(curl_http_code "${BIFROST_LOCAL_AUTH_URL}" -H 'X-Admin-Key: wrong-admin-key')"
+            else
+                record_alert "CRITICAL" "bifrost-api" "Bifrost API container failed to restart."
+            fi
+        fi
+    fi
+}
+
+# =============================================================================
+# Check 5: Caddy Service
+# =============================================================================
+check_caddy() {
+    local status
+    status="$(check_service "caddy")"
+
+    case "${status}" in
+        running)
+            CADDY_STATUS="running"
+            ;;
+        stopped)
+            CADDY_STATUS="stopped"
+            record_alert "WARNING" "caddy" "Caddy service is stopped. Attempting restart..."
+            if systemctl restart caddy 2>/dev/null; then
+                sleep 3
+                if systemctl is-active --quiet caddy 2>/dev/null; then
+                    CADDY_STATUS="recovered"
+                    record_alert "INFO" "caddy" "Caddy service auto-restarted successfully."
+                else
+                    record_alert "CRITICAL" "caddy" "Caddy service failed to restart."
+                fi
+            fi
+            ;;
+        not_installed)
+            CADDY_STATUS="not_installed"
+            ;;
+        *)
+            CADDY_STATUS="unknown"
+            ;;
+    esac
+}
+
+# =============================================================================
+# Check 6: Public /manage Surface + TLS
+# =============================================================================
+check_public_manage_surface() {
+    PUBLIC_MANAGE_STATUS="not_applicable"
+    PUBLIC_MANAGE_DOMAIN="null"
+    PUBLIC_MANAGE_HEALTH_CODE="null"
+    PUBLIC_MANAGE_REGISTER_CODE="null"
+    PUBLIC_MANAGE_DOCS_CODE="null"
+    PUBLIC_MANAGE_AUTH_MISSING_CODE="null"
+    PUBLIC_MANAGE_AUTH_WRONG_CODE="null"
+    PUBLIC_MANAGE_REGISTER_PREFIX="unknown"
+    PUBLIC_MANAGE_DOCS_PREFIX="unknown"
+
+    local domain=""
+    domain="$(resolve_public_domain)" || domain=""
+    if [[ -z "${domain}" ]]; then
+        return
+    fi
+
+    PUBLIC_MANAGE_DOMAIN="${domain}"
+    PUBLIC_MANAGE_STATUS="healthy"
+
+    local register_tmp docs_tmp
+    register_tmp="$(mktemp)"
+    docs_tmp="$(mktemp)"
+
+    PUBLIC_MANAGE_HEALTH_CODE="$(curl_http_code "https://${domain}/manage/health")"
+    if [[ "${PUBLIC_MANAGE_HEALTH_CODE}" != "200" ]]; then
+        PUBLIC_MANAGE_STATUS="unhealthy"
+        record_alert "CRITICAL" "public-manage" "Public manage health endpoint returned HTTP ${PUBLIC_MANAGE_HEALTH_CODE} for https://${domain}/manage/health."
+    fi
+
+    PUBLIC_MANAGE_REGISTER_CODE="$(curl -sS -o "${register_tmp}" -w '%{http_code}' \
+        --connect-timeout 10 --max-time 20 "https://${domain}/manage/register" 2>/dev/null)" || PUBLIC_MANAGE_REGISTER_CODE="000"
+    if [[ "${PUBLIC_MANAGE_REGISTER_CODE}" != "200" ]]; then
+        PUBLIC_MANAGE_STATUS="unhealthy"
+        record_alert "CRITICAL" "public-manage" "Registration page returned HTTP ${PUBLIC_MANAGE_REGISTER_CODE} for https://${domain}/manage/register."
+    elif grep -q 'data-api-prefix="/manage"' "${register_tmp}"; then
+        PUBLIC_MANAGE_REGISTER_PREFIX="ok"
+    else
+        PUBLIC_MANAGE_REGISTER_PREFIX="mismatch"
+        record_alert "WARNING" "public-manage" "Registration page does not expose data-api-prefix=\"/manage\"."
+    fi
+
+    PUBLIC_MANAGE_DOCS_CODE="$(curl -sS -o "${docs_tmp}" -w '%{http_code}' \
+        --connect-timeout 10 --max-time 20 "https://${domain}/manage/docs" 2>/dev/null)" || PUBLIC_MANAGE_DOCS_CODE="000"
+    if [[ "${PUBLIC_MANAGE_DOCS_CODE}" != "200" ]]; then
+        PUBLIC_MANAGE_STATUS="unhealthy"
+        record_alert "CRITICAL" "public-manage" "Docs page returned HTTP ${PUBLIC_MANAGE_DOCS_CODE} for https://${domain}/manage/docs."
+    elif grep -q '/manage/openapi.json' "${docs_tmp}"; then
+        PUBLIC_MANAGE_DOCS_PREFIX="ok"
+    else
+        PUBLIC_MANAGE_DOCS_PREFIX="mismatch"
+        record_alert "WARNING" "public-manage" "Docs page does not reference /manage/openapi.json."
+    fi
+
+    PUBLIC_MANAGE_AUTH_MISSING_CODE="$(curl_http_code "https://${domain}/manage/api/v1/models/test")"
+    if [[ "${PUBLIC_MANAGE_AUTH_MISSING_CODE}" != "401" ]]; then
+        record_alert "WARNING" "public-manage" "Public manage endpoint should return 401 without X-Admin-Key, got ${PUBLIC_MANAGE_AUTH_MISSING_CODE}."
+    fi
+
+    PUBLIC_MANAGE_AUTH_WRONG_CODE="$(curl_http_code "https://${domain}/manage/api/v1/models/test" -H 'X-Admin-Key: wrong-admin-key')"
+    if [[ "${PUBLIC_MANAGE_AUTH_WRONG_CODE}" != "403" ]]; then
+        record_alert "WARNING" "public-manage" "Public manage endpoint should return 403 for wrong X-Admin-Key, got ${PUBLIC_MANAGE_AUTH_WRONG_CODE}."
+    fi
+
+    rm -f "${register_tmp}" "${docs_tmp}"
+}
+
+# =============================================================================
+# Check 7: 3x-ui Service (Server B)
 # =============================================================================
 check_3xui() {
     XPANEL_STATUS="not_applicable"
@@ -256,7 +496,7 @@ check_3xui() {
 }
 
 # =============================================================================
-# Check 5: Disk Space
+# Check 8: Disk Space
 # =============================================================================
 check_disk() {
     DISK_STATUS="healthy"
@@ -283,7 +523,7 @@ check_disk() {
 }
 
 # =============================================================================
-# Check 6: Memory Usage
+# Check 9: Memory Usage
 # =============================================================================
 check_memory() {
     MEMORY_STATUS="healthy"
@@ -319,7 +559,7 @@ check_memory() {
 }
 
 # =============================================================================
-# Check 7: CPU Load
+# Check 10: CPU Load
 # =============================================================================
 check_cpu() {
     CPU_STATUS="healthy"
@@ -359,11 +599,11 @@ check_cpu() {
 }
 
 # =============================================================================
-# Check 8: Log File Sizes
+# Check 11: Log File Sizes
 # =============================================================================
 check_logs() {
     LOGS_STATUS="healthy"
-    declare -a LARGE_LOGS=()
+    LARGE_LOGS=()
 
     local log_dirs=("/var/log/xray" "/var/log/caddy" "${LOG_DIR}")
 
@@ -443,6 +683,27 @@ generate_report() {
       "status": "${NEW_API_STATUS:-not_applicable}",
       "container_id": "${NEW_API_CONTAINER_ID:-null}"
     },
+    "bifrost_api": {
+      "status": "${BIFROST_STATUS:-not_applicable}",
+      "container_id": "${BIFROST_CONTAINER_ID:-null}",
+      "health_http_code": "${BIFROST_HEALTH_CODE:-null}",
+      "auth_missing_http_code": "${BIFROST_AUTH_MISSING_CODE:-null}",
+      "auth_wrong_http_code": "${BIFROST_AUTH_WRONG_CODE:-null}"
+    },
+    "caddy": {
+      "status": "${CADDY_STATUS:-unknown}"
+    },
+    "public_manage": {
+      "status": "${PUBLIC_MANAGE_STATUS:-not_applicable}",
+      "domain": "${PUBLIC_MANAGE_DOMAIN:-null}",
+      "health_http_code": "${PUBLIC_MANAGE_HEALTH_CODE:-null}",
+      "register_http_code": "${PUBLIC_MANAGE_REGISTER_CODE:-null}",
+      "docs_http_code": "${PUBLIC_MANAGE_DOCS_CODE:-null}",
+      "auth_missing_http_code": "${PUBLIC_MANAGE_AUTH_MISSING_CODE:-null}",
+      "auth_wrong_http_code": "${PUBLIC_MANAGE_AUTH_WRONG_CODE:-null}",
+      "register_prefix": "${PUBLIC_MANAGE_REGISTER_PREFIX:-unknown}",
+      "docs_prefix": "${PUBLIC_MANAGE_DOCS_PREFIX:-unknown}"
+    },
     "3x_ui": {
       "status": "${XPANEL_STATUS:-not_applicable}"
     },
@@ -482,10 +743,19 @@ REPORT_EOF
 # Main execution
 # =============================================================================
 main() {
+    parse_args "$@"
+
+    mkdir -p "${LOG_DIR}"
+    TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    LOCAL_TIME="$(date '+%Y-%m-%d %H:%M:%S %Z')"
+
     # Run all checks
     check_xray
     check_tunnel
     check_new_api
+    check_bifrost_api
+    check_caddy
+    check_public_manage_surface
     check_3xui
     check_disk
     check_memory
@@ -494,6 +764,11 @@ main() {
 
     # Generate JSON report
     generate_report
+
+    verbose_log "bifrost_api: status=${BIFROST_STATUS:-not_applicable} health=${BIFROST_HEALTH_CODE:-null} missing=${BIFROST_AUTH_MISSING_CODE:-null} wrong=${BIFROST_AUTH_WRONG_CODE:-null}"
+    verbose_log "public_manage: domain=${PUBLIC_MANAGE_DOMAIN:-null} status=${PUBLIC_MANAGE_STATUS:-not_applicable} health=${PUBLIC_MANAGE_HEALTH_CODE:-null} register=${PUBLIC_MANAGE_REGISTER_CODE:-null}/${PUBLIC_MANAGE_REGISTER_PREFIX:-unknown} docs=${PUBLIC_MANAGE_DOCS_CODE:-null}/${PUBLIC_MANAGE_DOCS_PREFIX:-unknown}"
+    verbose_log "caddy: status=${CADDY_STATUS:-unknown}"
+    verbose_log "report=${HEALTH_JSON}"
 
     # Output summary to stdout (for cron log)
     echo "[${TIMESTAMP}] Health check complete: status=${OVERALL_STATUS}, alerts=${#ALERT_MESSAGES[@]}"

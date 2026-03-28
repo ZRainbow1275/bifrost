@@ -33,8 +33,25 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 # ==============================================================================
 
 # Persistent state file for cross-function data sharing (e.g., custom SSH port)
-SECURITY_STATE_FILE="/etc/bifrost/.security-state"
-SECURITY_STATE_DIR="/etc/bifrost"
+: "${SECURITY_STATE_DIR:=/etc/bifrost}"
+: "${SECURITY_STATE_FILE:=${SECURITY_STATE_DIR}/.security-state}"
+: "${LYNIS_LOG_DIR:=/var/log}"
+: "${LYNIS_REPORT_FILE:=${LYNIS_LOG_DIR}/lynis-report.txt}"
+: "${LYNIS_DATA_FILE:=${LYNIS_LOG_DIR}/lynis-report.dat}"
+: "${LYNIS_CRON_FILE:=/etc/cron.monthly/lynis-audit}"
+: "${SSHD_CONFIG_PATH:=/etc/ssh/sshd_config}"
+: "${SSH_ADMIN_DIR:=/root/.ssh}"
+: "${SSH_AUTHORIZED_KEYS_FILE:=${SSH_ADMIN_DIR}/authorized_keys}"
+: "${SSHD_BACKUP_DIR:=$(dirname "${SSHD_CONFIG_PATH}")}"
+: "${FAIL2BAN_FILTER_DIR:=/etc/fail2ban/filter.d}"
+: "${FAIL2BAN_JAIL_FILE:=/etc/fail2ban/jail.local}"
+: "${FAIL2BAN_SERVICE_NAME:=fail2ban}"
+: "${AUTO_UPGRADES_CONFIG_FILE:=/etc/apt/apt.conf.d/50unattended-upgrades}"
+: "${AUTO_UPGRADES_PERIODIC_FILE:=/etc/apt/apt.conf.d/20auto-upgrades}"
+: "${DNF_AUTOMATIC_CONFIG_FILE:=/etc/dnf/automatic.conf}"
+: "${DNF_AUTOMATIC_TIMER_NAME:=dnf-automatic.timer}"
+: "${RKHUNTER_CONF_FILE:=/etc/rkhunter.conf}"
+: "${RKHUNTER_CRON_FILE:=/etc/cron.weekly/rkhunter-scan}"
 
 # ------------------------------------------------------------------------------
 # _ensure_state_dir: Create the state directory if it does not exist
@@ -87,7 +104,7 @@ _get_ssh_port() {
     port="$(_load_state "SSH_PORT")"
     if [[ -z "${port}" ]]; then
         # Try to read from current sshd_config
-        port=$(grep -E "^Port\s+" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -1)
+        port=$(grep -E "^Port\s+" "${SSHD_CONFIG_PATH}" 2>/dev/null | awk '{print $2}' | head -1)
     fi
     echo "${port:-22}"
 }
@@ -133,7 +150,7 @@ _generate_random_port() {
 _set_sshd_option() {
     local option="$1"
     local value="$2"
-    local config="${3:-/etc/ssh/sshd_config}"
+    local config="${3:-${SSHD_CONFIG_PATH}}"
 
     if grep -qE "^\s*#?\s*${option}\s+" "${config}"; then
         # Option exists (possibly commented) — replace it
@@ -142,6 +159,177 @@ _set_sshd_option() {
         # Option does not exist — append it
         echo "${option} ${value}" >> "${config}"
     fi
+}
+
+# ==============================================================================
+# 1. harden_ssh
+# ==============================================================================
+# ------------------------------------------------------------------------------
+# _open_ssh_port_in_firewall: Open the new SSH port and keep the old one alive
+# until the operator confirms the new port works.
+# Arguments:
+#   $1 - firewall type
+#   $2 - new SSH port
+#   $3 - current SSH port
+# ------------------------------------------------------------------------------
+_open_ssh_port_in_firewall() {
+    local fw_type="$1"
+    local ssh_port="$2"
+    local current_port="$3"
+
+    case "${fw_type}" in
+        ufw)
+            ufw allow "${ssh_port}/tcp" comment "SSH (hardened)" || {
+                log_error "Failed to open new SSH port ${ssh_port}/tcp in ufw."
+                return 1
+            }
+            if [[ "${current_port}" != "${ssh_port}" ]]; then
+                ufw allow "${current_port}/tcp" comment "SSH (old - remove after verification)" || {
+                    log_error "Failed to keep old SSH port ${current_port}/tcp open in ufw during cutover."
+                    return 1
+                }
+            fi
+            ;;
+        firewalld)
+            firewall-cmd --permanent --add-port="${ssh_port}/tcp" || {
+                log_error "Failed to open new SSH port ${ssh_port}/tcp in firewalld."
+                return 1
+            }
+            if [[ "${current_port}" != "${ssh_port}" ]]; then
+                firewall-cmd --permanent --add-port="${current_port}/tcp" || {
+                    log_error "Failed to keep old SSH port ${current_port}/tcp open in firewalld during cutover."
+                    return 1
+                }
+            fi
+            firewall-cmd --reload || {
+                log_error "Failed to reload firewalld after opening SSH ports."
+                return 1
+            }
+            ;;
+        none)
+            log_warn "No firewall detected. Ensure port ${ssh_port} is accessible via your cloud provider's security group."
+            ;;
+        *)
+            log_error "Unsupported firewall type: ${fw_type}"
+            return 1
+            ;;
+    esac
+
+    return 0
+}
+
+# ------------------------------------------------------------------------------
+# _restart_ssh_service: Restart the active SSH daemon and require the restart to
+# succeed for the same service that will be checked afterward.
+# ------------------------------------------------------------------------------
+_restart_ssh_service() {
+    local ssh_service=""
+
+    if systemctl is-active --quiet sshd 2>/dev/null; then
+        ssh_service="sshd"
+        systemctl restart sshd || {
+            log_error "Failed to restart sshd service."
+            return 1
+        }
+    elif systemctl is-active --quiet ssh 2>/dev/null; then
+        ssh_service="ssh"
+        systemctl restart ssh || {
+            log_error "Failed to restart ssh service."
+            return 1
+        }
+    else
+        log_warn "Could not detect sshd service name. Attempting both 'sshd' and 'ssh'..."
+        if systemctl restart sshd 2>/dev/null; then
+            ssh_service="sshd"
+        elif systemctl restart ssh 2>/dev/null; then
+            ssh_service="ssh"
+        else
+            log_error "Failed to restart SSH daemon. Please restart manually."
+            return 1
+        fi
+    fi
+
+    if ! systemctl is-active --quiet "${ssh_service}" 2>/dev/null; then
+        log_error "SSH daemon ${ssh_service} is not active after restart."
+        return 1
+    fi
+
+    return 0
+}
+
+# ------------------------------------------------------------------------------
+# _block_port_in_firewall: Block a TCP port and require the firewall action to
+# succeed. Used by audit_ports() when the operator explicitly asks to close
+# non-whitelisted listeners.
+# Arguments:
+#   $1 - firewall type
+#   $2 - TCP port to block
+# ------------------------------------------------------------------------------
+_block_port_in_firewall() {
+    local fw_type="$1"
+    local port="$2"
+
+    case "${fw_type}" in
+        ufw)
+            ufw deny "${port}/tcp" comment "Blocked by security audit" || {
+                log_error "Failed to block port ${port}/tcp via ufw."
+                return 1
+            }
+            ;;
+        firewalld)
+            firewall-cmd --permanent --zone=public \
+                --add-rich-rule="rule family=\"ipv4\" port port=\"${port}\" protocol=\"tcp\" reject" || {
+                log_error "Failed to block port ${port}/tcp via firewalld."
+                return 1
+            }
+            ;;
+        none)
+            log_error "No firewall available to block port ${port}."
+            return 1
+            ;;
+        *)
+            log_error "Unsupported firewall type for port blocking: ${fw_type}"
+            return 1
+            ;;
+    esac
+
+    return 0
+}
+
+# ------------------------------------------------------------------------------
+# _run_firewall_step: Execute a firewall-related command and require success.
+# Arguments:
+#   $1 - error message to log on failure
+#   $@ - command to execute
+# ------------------------------------------------------------------------------
+_run_firewall_step() {
+    local error_message="$1"
+    shift
+
+    "$@" || {
+        log_error "${error_message}"
+        return 1
+    }
+
+    return 0
+}
+
+# ------------------------------------------------------------------------------
+# _run_checked_step: Execute a command and require success.
+# Arguments:
+#   $1 - error message to log on failure
+#   $@ - command to execute
+# ------------------------------------------------------------------------------
+_run_checked_step() {
+    local error_message="$1"
+    shift
+
+    "$@" || {
+        log_error "${error_message}"
+        return 1
+    }
+
+    return 0
 }
 
 # ==============================================================================
@@ -161,8 +349,8 @@ harden_ssh() {
     log_info "SSH Hardening"
     log_info "=========================================="
 
-    local sshd_config="/etc/ssh/sshd_config"
-    local backup_file="/etc/ssh/sshd_config.bak.$(date +%Y%m%d%H%M%S)"
+    local sshd_config="${SSHD_CONFIG_PATH}"
+    local backup_file="${SSHD_BACKUP_DIR}/sshd_config.bak.$(date +%Y%m%d%H%M%S)"
 
     # ---- Prerequisite checks ----
     if [[ ! -f "${sshd_config}" ]]; then
@@ -194,8 +382,8 @@ harden_ssh() {
     _save_state "SSH_PORT" "${ssh_port}"
 
     # ---- Ask for SSH public key ----
-    local authorized_keys_file="/root/.ssh/authorized_keys"
-    local ssh_dir="/root/.ssh"
+    local authorized_keys_file="${SSH_AUTHORIZED_KEYS_FILE}"
+    local ssh_dir="${SSH_ADMIN_DIR}"
 
     if [[ -f "${authorized_keys_file}" ]] && [[ -s "${authorized_keys_file}" ]]; then
         log_info "Existing authorized_keys found with the following keys:"
@@ -284,26 +472,11 @@ harden_ssh() {
     log_info "Opening SSH port ${ssh_port} in firewall before restarting sshd..."
     local fw_type
     fw_type="$(_detect_firewall)"
-
-    case "${fw_type}" in
-        ufw)
-            ufw allow "${ssh_port}/tcp" comment "SSH (hardened)" || true
-            # Also keep old port open temporarily for safety
-            if [[ "${current_port}" != "${ssh_port}" ]]; then
-                ufw allow "${current_port}/tcp" comment "SSH (old - remove after verification)" || true
-            fi
-            ;;
-        firewalld)
-            firewall-cmd --permanent --add-port="${ssh_port}/tcp" || true
-            if [[ "${current_port}" != "${ssh_port}" ]]; then
-                firewall-cmd --permanent --add-port="${current_port}/tcp" || true
-            fi
-            firewall-cmd --reload || true
-            ;;
-        none)
-            log_warn "No firewall detected. Ensure port ${ssh_port} is accessible via your cloud provider's security group."
-            ;;
-    esac
+    if ! _open_ssh_port_in_firewall "${fw_type}" "${ssh_port}" "${current_port}"; then
+        log_error "Firewall update failed before SSH restart. Restoring backup to avoid lockout."
+        cp -p "${backup_file}" "${sshd_config}"
+        return 1
+    fi
 
     # ---- Create safety revert cron (auto-reverts SSH config if no new connection in 5 minutes) ----
     if [[ "${current_port}" != "${ssh_port}" ]]; then
@@ -332,8 +505,19 @@ fi
 
 # No confirmation received - revert!
 echo "[SSH SAFETY] No confirmation received after 5 minutes. Reverting SSH config..."
-cp -p "\${BACKUP_FILE}" "\${SSHD_CONFIG}"
-systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
+if ! cp -p "\${BACKUP_FILE}" "\${SSHD_CONFIG}"; then
+    echo "[SSH SAFETY] Failed to restore SSH config backup." >&2
+    exit 1
+fi
+
+if systemctl restart sshd 2>/dev/null; then
+    :
+elif systemctl restart ssh 2>/dev/null; then
+    :
+else
+    echo "[SSH SAFETY] Failed to restart SSH daemon after revert. Manual recovery required." >&2
+    exit 1
+fi
 echo "[SSH SAFETY] SSH config reverted to backup. Old port ${current_port} should be active again."
 rm -f "\$0"
 REVERT_EOF
@@ -347,16 +531,13 @@ REVERT_EOF
 
     # ---- Restart sshd ----
     log_info "Restarting sshd..."
-    if systemctl is-active --quiet sshd 2>/dev/null; then
-        systemctl restart sshd
-    elif systemctl is-active --quiet ssh 2>/dev/null; then
-        systemctl restart ssh
-    else
-        log_warn "Could not detect sshd service name. Attempting both 'sshd' and 'ssh'..."
-        systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || {
-            log_error "Failed to restart SSH daemon. Please restart manually."
-            return 1
-        }
+    if ! _restart_ssh_service; then
+        log_error "Failed to restart SSH daemon after applying hardened config. Restoring backup."
+        cp -p "${backup_file}" "${sshd_config}"
+        if ! _restart_ssh_service; then
+            log_error "Failed to restart SSH daemon even after restoring backup. Please recover manually."
+        fi
+        return 1
     fi
     log_info "sshd restarted successfully on port ${ssh_port}."
 
@@ -407,34 +588,36 @@ setup_firewall() {
 
     case "${fw_type}" in
         ufw)
-            _setup_firewall_ufw "${ssh_port}"
+            _setup_firewall_ufw "${ssh_port}" || return 1
             ;;
         firewalld)
-            _setup_firewall_firewalld "${ssh_port}"
+            _setup_firewall_firewalld "${ssh_port}" || return 1
             ;;
         none)
             log_warn "No firewall package detected. Installing ufw..."
             if command -v apt-get &>/dev/null; then
-                apt-get update -qq && apt-get install -y -qq ufw
+                _run_firewall_step "Failed to update apt package index while installing ufw." apt-get update -qq || return 1
+                _run_firewall_step "Failed to install ufw." apt-get install -y -qq ufw || return 1
             elif command -v dnf &>/dev/null; then
-                dnf install -y -q firewalld
-                systemctl enable --now firewalld
-                _setup_firewall_firewalld "${ssh_port}"
-                return $?
+                _run_firewall_step "Failed to install firewalld via dnf." dnf install -y -q firewalld || return 1
+                _run_firewall_step "Failed to start firewalld after installation." systemctl enable --now firewalld || return 1
+                _setup_firewall_firewalld "${ssh_port}" || return 1
+                return 0
             elif command -v yum &>/dev/null; then
-                yum install -y -q firewalld
-                systemctl enable --now firewalld
-                _setup_firewall_firewalld "${ssh_port}"
-                return $?
+                _run_firewall_step "Failed to install firewalld via yum." yum install -y -q firewalld || return 1
+                _run_firewall_step "Failed to start firewalld after installation." systemctl enable --now firewalld || return 1
+                _setup_firewall_firewalld "${ssh_port}" || return 1
+                return 0
             else
                 log_error "Cannot install firewall. Unsupported package manager."
                 return 1
             fi
-            _setup_firewall_ufw "${ssh_port}"
+            _setup_firewall_ufw "${ssh_port}" || return 1
             ;;
     esac
 
     log_info "Firewall setup complete."
+    return 0
 }
 
 # ------------------------------------------------------------------------------
@@ -447,30 +630,32 @@ _setup_firewall_ufw() {
 
     log_info "[ufw] Resetting to defaults..."
     # Ensure ufw is not active during reset to avoid dropping our session
-    ufw --force reset
+    _run_firewall_step "Failed to reset ufw to defaults." ufw --force reset || return 1
 
     log_info "[ufw] Setting default policies: deny incoming, allow outgoing"
-    ufw default deny incoming
-    ufw default allow outgoing
+    _run_firewall_step "Failed to set ufw default incoming policy to deny." ufw default deny incoming || return 1
+    _run_firewall_step "Failed to set ufw default outgoing policy to allow." ufw default allow outgoing || return 1
 
     log_info "[ufw] Allowing SSH on port ${ssh_port}/tcp"
-    ufw allow "${ssh_port}/tcp" comment "SSH"
+    _run_firewall_step "Failed to allow SSH port ${ssh_port}/tcp in ufw." ufw allow "${ssh_port}/tcp" comment "SSH" || return 1
 
     log_info "[ufw] Allowing HTTPS (443/tcp)"
-    ufw allow 443/tcp comment "HTTPS"
+    _run_firewall_step "Failed to allow HTTPS in ufw." ufw allow 443/tcp comment "HTTPS" || return 1
 
     log_info "[ufw] Allowing HTTP (80/tcp) for certificate issuance"
-    ufw allow 80/tcp comment "HTTP (cert renewal)"
+    _run_firewall_step "Failed to allow HTTP in ufw." ufw allow 80/tcp comment "HTTP (cert renewal)" || return 1
 
     # Netdata — restrict to localhost by default; admin can add specific IPs later
     log_info "[ufw] Allowing Netdata (19999/tcp) on localhost only"
-    ufw allow from 127.0.0.1 to any port 19999 proto tcp comment "Netdata (localhost)"
-    ufw allow from ::1 to any port 19999 proto tcp comment "Netdata (localhost IPv6)"
+    _run_firewall_step "Failed to restrict Netdata to localhost in ufw (IPv4)." \
+        ufw allow from 127.0.0.1 to any port 19999 proto tcp comment "Netdata (localhost)" || return 1
+    _run_firewall_step "Failed to restrict Netdata to localhost in ufw (IPv6)." \
+        ufw allow from ::1 to any port 19999 proto tcp comment "Netdata (localhost IPv6)" || return 1
 
     # WireGuard VPN port — required for enterprise VPN (deployed in later step).
     # Must be opened here so VPN deployment does not need to disable ufw.
     log_info "[ufw] Allowing WireGuard (51820/udp)"
-    ufw allow 51820/udp comment "WireGuard VPN"
+    _run_firewall_step "Failed to allow WireGuard port 51820/udp in ufw." ufw allow 51820/udp comment "WireGuard VPN" || return 1
 
     # NOTE: Xray proxy ports (10808 SOCKS5, 10809 HTTP) are NOT opened here.
     # They are protected by the default deny incoming policy.
@@ -481,11 +666,16 @@ _setup_firewall_ufw() {
 
     # Enable ufw non-interactively
     log_info "[ufw] Enabling firewall..."
-    ufw --force enable
+    _run_firewall_step "Failed to enable ufw." ufw --force enable || return 1
 
     log_info "[ufw] Current rules:"
-    ufw status verbose
-    _save_state "FIREWALL_TYPE" "ufw"
+    _run_firewall_step "Failed to inspect current ufw rules." ufw status verbose || return 1
+    _save_state "FIREWALL_TYPE" "ufw" || {
+        log_error "Failed to persist firewall type state for ufw."
+        return 1
+    }
+
+    return 0
 }
 
 # ------------------------------------------------------------------------------
@@ -497,45 +687,61 @@ _setup_firewall_firewalld() {
     local ssh_port="$1"
 
     log_info "[firewalld] Ensuring service is running..."
-    systemctl enable --now firewalld
+    _run_firewall_step "Failed to start or enable firewalld." systemctl enable --now firewalld || return 1
 
     local zone="public"
 
     log_info "[firewalld] Setting default zone to ${zone}"
-    firewall-cmd --set-default-zone="${zone}"
+    _run_firewall_step "Failed to set firewalld default zone to ${zone}." firewall-cmd --set-default-zone="${zone}" || return 1
 
     # Remove default SSH service (port 22) — we use a custom port
     log_info "[firewalld] Removing default SSH service..."
-    firewall-cmd --permanent --zone="${zone}" --remove-service=ssh 2>/dev/null || true
+    if firewall-cmd --permanent --zone="${zone}" --query-service=ssh >/dev/null 2>&1; then
+        _run_firewall_step "Failed to remove default SSH service from firewalld." \
+            firewall-cmd --permanent --zone="${zone}" --remove-service=ssh || return 1
+    else
+        log_info "[firewalld] Default SSH service already absent in zone ${zone}"
+    fi
 
     log_info "[firewalld] Allowing SSH on port ${ssh_port}/tcp"
-    firewall-cmd --permanent --zone="${zone}" --add-port="${ssh_port}/tcp"
+    _run_firewall_step "Failed to allow SSH port ${ssh_port}/tcp in firewalld." \
+        firewall-cmd --permanent --zone="${zone}" --add-port="${ssh_port}/tcp" || return 1
 
     log_info "[firewalld] Allowing HTTPS (443/tcp)"
-    firewall-cmd --permanent --zone="${zone}" --add-service=https
+    _run_firewall_step "Failed to allow HTTPS in firewalld." \
+        firewall-cmd --permanent --zone="${zone}" --add-service=https || return 1
 
     log_info "[firewalld] Allowing HTTP (80/tcp) for certificate issuance"
-    firewall-cmd --permanent --zone="${zone}" --add-service=http
+    _run_firewall_step "Failed to allow HTTP in firewalld." \
+        firewall-cmd --permanent --zone="${zone}" --add-service=http || return 1
 
     # Netdata — use rich rule to restrict to localhost
     log_info "[firewalld] Allowing Netdata (19999/tcp) on localhost only"
-    firewall-cmd --permanent --zone="${zone}" \
-        --add-rich-rule='rule family="ipv4" source address="127.0.0.1" port port="19999" protocol="tcp" accept' 2>/dev/null || true
+    _run_firewall_step "Failed to restrict Netdata to localhost in firewalld." \
+        firewall-cmd --permanent --zone="${zone}" \
+        --add-rich-rule='rule family="ipv4" source address="127.0.0.1" port port="19999" protocol="tcp" accept' || return 1
 
     # WireGuard VPN port — required for enterprise VPN (deployed in later step)
     log_info "[firewalld] Allowing WireGuard (51820/udp)"
-    firewall-cmd --permanent --zone="${zone}" --add-port=51820/udp 2>/dev/null || true
+    _run_firewall_step "Failed to allow WireGuard port 51820/udp in firewalld." \
+        firewall-cmd --permanent --zone="${zone}" --add-port=51820/udp || return 1
 
     # Set default target to DROP for incoming connections not matching any rule
     log_info "[firewalld] Setting default target to DROP"
-    firewall-cmd --permanent --zone="${zone}" --set-target=DROP 2>/dev/null || true
+    _run_firewall_step "Failed to set firewalld default target to DROP." \
+        firewall-cmd --permanent --zone="${zone}" --set-target=DROP || return 1
 
     log_info "[firewalld] Reloading rules..."
-    firewall-cmd --reload
+    _run_firewall_step "Failed to reload firewalld rules." firewall-cmd --reload || return 1
 
     log_info "[firewalld] Current rules:"
-    firewall-cmd --zone="${zone}" --list-all
-    _save_state "FIREWALL_TYPE" "firewalld"
+    _run_firewall_step "Failed to inspect current firewalld rules." firewall-cmd --zone="${zone}" --list-all || return 1
+    _save_state "FIREWALL_TYPE" "firewalld" || {
+        log_error "Failed to persist firewall type state for firewalld."
+        return 1
+    }
+
+    return 0
 }
 
 # ==============================================================================
@@ -557,11 +763,12 @@ setup_fail2ban() {
     if ! command -v fail2ban-client &>/dev/null; then
         log_info "Installing fail2ban..."
         if command -v apt-get &>/dev/null; then
-            apt-get update -qq && apt-get install -y -qq fail2ban
+            _run_checked_step "Failed to update apt package index while installing fail2ban." apt-get update -qq || return 1
+            _run_checked_step "Failed to install fail2ban via apt-get." apt-get install -y -qq fail2ban || return 1
         elif command -v dnf &>/dev/null; then
-            dnf install -y -q fail2ban
+            _run_checked_step "Failed to install fail2ban via dnf." dnf install -y -q fail2ban || return 1
         elif command -v yum &>/dev/null; then
-            yum install -y -q fail2ban
+            _run_checked_step "Failed to install fail2ban via yum." yum install -y -q fail2ban || return 1
         else
             log_error "Cannot install fail2ban. Unsupported package manager."
             return 1
@@ -574,12 +781,15 @@ setup_fail2ban() {
     ssh_port="$(_get_ssh_port)"
 
     # ---- Create Caddy auth failure filter ----
-    local caddy_filter_dir="/etc/fail2ban/filter.d"
+    local caddy_filter_dir="${FAIL2BAN_FILTER_DIR}"
     local caddy_filter_file="${caddy_filter_dir}/caddy-auth.conf"
 
     log_info "Creating Caddy auth failure filter: ${caddy_filter_file}"
-    mkdir -p "${caddy_filter_dir}"
-    cat > "${caddy_filter_file}" << 'FILTER_EOF'
+    mkdir -p "${caddy_filter_dir}" || {
+        log_error "Failed to create fail2ban filter directory: ${caddy_filter_dir}"
+        return 1
+    }
+    if ! cat > "${caddy_filter_file}" << 'FILTER_EOF'
 # fail2ban filter for Caddy authentication failures
 # Matches HTTP 401/403 responses in Caddy's JSON access log format
 [Definition]
@@ -593,12 +803,16 @@ failregex = ^.*"remote_ip"\s*:\s*"<HOST>".*"status"\s*:\s*(?:401|403).*$
 
 ignoreregex =
 FILTER_EOF
+    then
+        log_error "Failed to write fail2ban filter: ${caddy_filter_file}"
+        return 1
+    fi
 
     # ---- Create Caddy bot search filter ----
     local botsearch_filter_file="${caddy_filter_dir}/caddy-botsearch.conf"
 
     log_info "Creating Caddy bot search filter: ${botsearch_filter_file}"
-    cat > "${botsearch_filter_file}" << 'BOTSEARCH_EOF'
+    if ! cat > "${botsearch_filter_file}" << 'BOTSEARCH_EOF'
 # fail2ban filter for Caddy vulnerability scanners and bots
 # Matches requests probing for common exploit paths
 [Definition]
@@ -611,12 +825,20 @@ failregex = ^.*"remote_ip"\s*:\s*"<HOST>".*"uri"\s*:\s*"(?:/wp-login|/wp-admin|/
 
 ignoreregex =
 BOTSEARCH_EOF
+    then
+        log_error "Failed to write fail2ban filter: ${botsearch_filter_file}"
+        return 1
+    fi
 
     # ---- Create jail.local ----
-    local jail_file="/etc/fail2ban/jail.local"
+    local jail_file="${FAIL2BAN_JAIL_FILE}"
 
     log_info "Creating fail2ban jail configuration: ${jail_file}"
-    cat > "${jail_file}" << JAIL_EOF
+    mkdir -p "$(dirname "${jail_file}")" || {
+        log_error "Failed to create fail2ban jail directory for ${jail_file}"
+        return 1
+    }
+    if ! cat > "${jail_file}" << JAIL_EOF
 # Bifrost - fail2ban jail configuration
 # Generated by security.sh — safe to regenerate (idempotent)
 
@@ -675,11 +897,19 @@ findtime = 86400
 # 5 bans within findtime triggers recidive
 maxretry = 5
 JAIL_EOF
+    then
+        log_error "Failed to write fail2ban jail configuration: ${jail_file}"
+        return 1
+    fi
 
     # ---- Enable and start fail2ban ----
     log_info "Enabling and starting fail2ban..."
-    systemctl enable fail2ban
-    systemctl restart fail2ban
+    _run_checked_step "Failed to enable ${FAIL2BAN_SERVICE_NAME} service." systemctl enable "${FAIL2BAN_SERVICE_NAME}" || return 1
+    _run_checked_step "Failed to restart ${FAIL2BAN_SERVICE_NAME} service." systemctl restart "${FAIL2BAN_SERVICE_NAME}" || return 1
+    if ! systemctl is-active --quiet "${FAIL2BAN_SERVICE_NAME}"; then
+        log_error "${FAIL2BAN_SERVICE_NAME} service is not active after restart."
+        return 1
+    fi
 
     # Brief pause for jails to initialize
     sleep 2
@@ -741,8 +971,10 @@ audit_ports() {
 
     while IFS= read -r line; do
         # Extract port from Local Address column (format: *:PORT or 0.0.0.0:PORT or [::]:PORT)
+        local local_addr
         local port
-        port=$(echo "${line}" | awk '{print $4}' | rev | cut -d':' -f1 | rev)
+        local_addr=$(echo "${line}" | awk '{print $4}')
+        port="${local_addr##*:}"
 
         # Skip non-numeric
         if ! [[ "${port}" =~ ^[0-9]+$ ]]; then
@@ -803,26 +1035,26 @@ audit_ports() {
     if [[ "${block_choice,,}" == "y" || "${block_choice,,}" == "yes" ]]; then
         local fw_type
         fw_type="$(_detect_firewall)"
+        local block_failures=0
 
         for entry in ${unknown_ports[@]+"${unknown_ports[@]}"}; do
             local port="${entry%%|*}"
             log_info "Blocking port ${port}..."
-            case "${fw_type}" in
-                ufw)
-                    ufw deny "${port}/tcp" comment "Blocked by security audit" || true
-                    ;;
-                firewalld)
-                    firewall-cmd --permanent --zone=public \
-                        --add-rich-rule="rule family=\"ipv4\" port port=\"${port}\" protocol=\"tcp\" reject" || true
-                    ;;
-                none)
-                    log_warn "No firewall available to block port ${port}."
-                    ;;
-            esac
+            if ! _block_port_in_firewall "${fw_type}" "${port}"; then
+                block_failures=$((block_failures + 1))
+            fi
         done
 
         if [[ "${fw_type}" == "firewalld" ]]; then
-            firewall-cmd --reload || true
+            if ! firewall-cmd --reload; then
+                log_error "Failed to reload firewalld after blocking audited ports."
+                block_failures=$((block_failures + 1))
+            fi
+        fi
+
+        if (( block_failures > 0 )); then
+            log_error "Failed to block ${block_failures} non-whitelisted port action(s). Review firewall state manually."
+            return 1
         fi
 
         log_info "Non-whitelisted ports have been blocked."
@@ -981,18 +1213,19 @@ setup_auto_updates() {
     log_info "=========================================="
 
     if command -v apt-get &>/dev/null; then
-        _setup_auto_updates_debian
+        _setup_auto_updates_debian || return 1
     elif command -v dnf &>/dev/null; then
-        _setup_auto_updates_rhel_dnf
+        _setup_auto_updates_rhel_dnf || return 1
     elif command -v yum &>/dev/null; then
         log_warn "yum detected without dnf. Installing dnf-automatic may require EPEL."
-        _setup_auto_updates_rhel_dnf
+        _setup_auto_updates_rhel_dnf || return 1
     else
         log_error "Unsupported package manager. Cannot configure automatic updates."
         return 1
     fi
 
     log_info "Automatic security updates configured."
+    return 0
 }
 
 # ------------------------------------------------------------------------------
@@ -1002,8 +1235,14 @@ _setup_auto_updates_debian() {
     log_info "Configuring unattended-upgrades for Debian/Ubuntu..."
 
     # Install packages
-    DEBIAN_FRONTEND=noninteractive apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unattended-upgrades apt-listchanges
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq || {
+        log_error "Failed to update apt package index for unattended-upgrades."
+        return 1
+    }
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unattended-upgrades apt-listchanges || {
+        log_error "Failed to install unattended-upgrades packages."
+        return 1
+    }
 
     # Determine distro codename for proper origin matching
     local distro_id distro_codename
@@ -1011,8 +1250,12 @@ _setup_auto_updates_debian() {
     distro_codename=$(lsb_release -cs 2>/dev/null || grep "^VERSION_CODENAME=" /etc/os-release | cut -d= -f2 | tr -d '"')
 
     # Configure: security updates only
-    local config_file="/etc/apt/apt.conf.d/50unattended-upgrades"
-    cat > "${config_file}" << UNATTENDED_EOF
+    local config_file="${AUTO_UPGRADES_CONFIG_FILE}"
+    mkdir -p "$(dirname "${config_file}")" || {
+        log_error "Failed to create unattended-upgrades config directory for ${config_file}"
+        return 1
+    }
+    if ! cat > "${config_file}" << UNATTENDED_EOF
 // Bifrost - Unattended Upgrades Configuration
 // Generated by security.sh — safe to regenerate (idempotent)
 // Only security updates are enabled.
@@ -1036,23 +1279,47 @@ Unattended-Upgrade::Automatic-Reboot "false";
 // Log to syslog
 Unattended-Upgrade::SyslogEnable "true";
 UNATTENDED_EOF
+    then
+        log_error "Failed to write unattended-upgrades config: ${config_file}"
+        return 1
+    fi
 
     # Enable the periodic apt job
-    local periodic_file="/etc/apt/apt.conf.d/20auto-upgrades"
-    cat > "${periodic_file}" << 'PERIODIC_EOF'
+    local periodic_file="${AUTO_UPGRADES_PERIODIC_FILE}"
+    mkdir -p "$(dirname "${periodic_file}")" || {
+        log_error "Failed to create unattended-upgrades periodic config directory for ${periodic_file}"
+        return 1
+    }
+    if ! cat > "${periodic_file}" << 'PERIODIC_EOF'
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 APT::Periodic::Download-Upgradeable-Packages "1";
 APT::Periodic::AutocleanInterval "7";
 PERIODIC_EOF
+    then
+        log_error "Failed to write unattended-upgrades periodic config: ${periodic_file}"
+        return 1
+    fi
 
     # Verify configuration
     log_info "Validating unattended-upgrades configuration..."
-    if unattended-upgrades --dry-run --debug 2>&1 | head -5; then
+    local dry_run_log
+    dry_run_log="$(mktemp)" || {
+        log_error "Failed to allocate temporary file for unattended-upgrades validation."
+        return 1
+    }
+    if unattended-upgrades --dry-run --debug > "${dry_run_log}" 2>&1; then
+        head -5 "${dry_run_log}" || true
         log_info "unattended-upgrades configured successfully."
     else
-        log_warn "unattended-upgrades dry run produced warnings. Check /var/log/unattended-upgrades/."
+        head -20 "${dry_run_log}" || true
+        rm -f "${dry_run_log}"
+        log_error "unattended-upgrades dry run failed. Check /var/log/unattended-upgrades/."
+        return 1
     fi
+    rm -f "${dry_run_log}"
+
+    return 0
 }
 
 # ------------------------------------------------------------------------------
@@ -1062,23 +1329,36 @@ _setup_auto_updates_rhel_dnf() {
     log_info "Configuring dnf-automatic for RHEL/CentOS/Fedora..."
 
     # Install dnf-automatic
-    dnf install -y -q dnf-automatic
+    _run_checked_step "Failed to install dnf-automatic." dnf install -y -q dnf-automatic || return 1
 
     # Configure for security updates only
-    local config_file="/etc/dnf/automatic.conf"
+    local config_file="${DNF_AUTOMATIC_CONFIG_FILE}"
+    mkdir -p "$(dirname "${config_file}")" || {
+        log_error "Failed to create dnf-automatic config directory for ${config_file}"
+        return 1
+    }
 
     if [[ -f "${config_file}" ]]; then
         log_info "Configuring ${config_file} for security-only updates..."
 
         # Set upgrade_type to security
-        sed -i 's/^upgrade_type\s*=.*/upgrade_type = security/' "${config_file}"
+        sed -i 's/^upgrade_type\s*=.*/upgrade_type = security/' "${config_file}" || {
+            log_error "Failed to set dnf-automatic upgrade_type in ${config_file}."
+            return 1
+        }
         # Set apply_updates to yes
-        sed -i 's/^apply_updates\s*=.*/apply_updates = yes/' "${config_file}"
+        sed -i 's/^apply_updates\s*=.*/apply_updates = yes/' "${config_file}" || {
+            log_error "Failed to set dnf-automatic apply_updates in ${config_file}."
+            return 1
+        }
         # Ensure download_updates is yes
-        sed -i 's/^download_updates\s*=.*/download_updates = yes/' "${config_file}"
+        sed -i 's/^download_updates\s*=.*/download_updates = yes/' "${config_file}" || {
+            log_error "Failed to set dnf-automatic download_updates in ${config_file}."
+            return 1
+        }
     else
         # Create minimal config
-        cat > "${config_file}" << 'DNF_AUTO_EOF'
+        if ! cat > "${config_file}" << 'DNF_AUTO_EOF'
 [commands]
 upgrade_type = security
 apply_updates = yes
@@ -1094,19 +1374,26 @@ email_to = root
 [base]
 debuglevel = 1
 DNF_AUTO_EOF
+        then
+            log_error "Failed to write dnf-automatic config: ${config_file}"
+            return 1
+        fi
     fi
 
     # Enable the timer
     log_info "Enabling dnf-automatic timer..."
-    systemctl enable --now dnf-automatic.timer
+    _run_checked_step "Failed to enable ${DNF_AUTOMATIC_TIMER_NAME}." \
+        systemctl enable --now "${DNF_AUTOMATIC_TIMER_NAME}" || return 1
 
     # Verify timer is active
-    if systemctl is-active --quiet dnf-automatic.timer; then
-        log_info "dnf-automatic timer is active."
-        systemctl status dnf-automatic.timer --no-pager || true
-    else
-        log_warn "dnf-automatic timer failed to start. Check: systemctl status dnf-automatic.timer"
+    if ! systemctl is-active --quiet "${DNF_AUTOMATIC_TIMER_NAME}"; then
+        log_error "${DNF_AUTOMATIC_TIMER_NAME} failed to start."
+        return 1
     fi
+    log_info "dnf-automatic timer is active."
+    systemctl status "${DNF_AUTOMATIC_TIMER_NAME}" --no-pager || true
+
+    return 0
 }
 
 # ==============================================================================
@@ -1121,10 +1408,11 @@ install_security_tools() {
     log_info "Security Tools Installation"
     log_info "=========================================="
 
-    _install_rkhunter
-    _install_lynis
+    _install_rkhunter || return 1
+    _install_lynis || return 1
 
     log_info "Security tools installation complete."
+    return 0
 }
 
 # ------------------------------------------------------------------------------
@@ -1136,17 +1424,35 @@ _install_rkhunter() {
     if ! command -v rkhunter &>/dev/null; then
         log_info "Installing rkhunter..."
         if command -v apt-get &>/dev/null; then
-            DEBIAN_FRONTEND=noninteractive apt-get update -qq
-            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rkhunter
+            DEBIAN_FRONTEND=noninteractive apt-get update -qq || {
+                log_error "Failed to update apt package index while installing rkhunter."
+                return 1
+            }
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rkhunter || {
+                log_error "Failed to install rkhunter via apt-get."
+                return 1
+            }
         elif command -v dnf &>/dev/null; then
             dnf install -y -q rkhunter || {
                 # rkhunter may require EPEL on RHEL
-                dnf install -y -q epel-release 2>/dev/null || true
-                dnf install -y -q rkhunter
+                dnf install -y -q epel-release 2>/dev/null || {
+                    log_error "Failed to install epel-release while bootstrapping rkhunter."
+                    return 1
+                }
+                dnf install -y -q rkhunter || {
+                    log_error "Failed to install rkhunter via dnf."
+                    return 1
+                }
             }
         elif command -v yum &>/dev/null; then
-            yum install -y -q epel-release 2>/dev/null || true
-            yum install -y -q rkhunter
+            yum install -y -q epel-release 2>/dev/null || {
+                log_error "Failed to install epel-release while bootstrapping rkhunter."
+                return 1
+            }
+            yum install -y -q rkhunter || {
+                log_error "Failed to install rkhunter via yum."
+                return 1
+            }
         else
             log_error "Cannot install rkhunter. Unsupported package manager."
             return 1
@@ -1156,19 +1462,28 @@ _install_rkhunter() {
     fi
 
     # Configure rkhunter
-    local rkhunter_conf="/etc/rkhunter.conf"
+    local rkhunter_conf="${RKHUNTER_CONF_FILE}"
     if [[ -f "${rkhunter_conf}" ]]; then
         log_info "Configuring rkhunter..."
 
         # Allow SSH root login check to match our configuration
-        sed -i 's/^ALLOW_SSH_ROOT_USER=.*/ALLOW_SSH_ROOT_USER=prohibit-password/' "${rkhunter_conf}" 2>/dev/null || true
+        sed -i 's/^ALLOW_SSH_ROOT_USER=.*/ALLOW_SSH_ROOT_USER=prohibit-password/' "${rkhunter_conf}" 2>/dev/null || {
+            log_error "Failed to configure ALLOW_SSH_ROOT_USER in ${rkhunter_conf}."
+            return 1
+        }
 
         # Allow script replacements during package updates (Debian/Ubuntu)
-        sed -i 's/^#*\s*SCRIPTWHITELIST=\/usr\/bin\/lwp-request/SCRIPTWHITELIST=\/usr\/bin\/lwp-request/' "${rkhunter_conf}" 2>/dev/null || true
+        sed -i 's/^#*\s*SCRIPTWHITELIST=\/usr\/bin\/lwp-request/SCRIPTWHITELIST=\/usr\/bin\/lwp-request/' "${rkhunter_conf}" 2>/dev/null || {
+            log_error "Failed to configure SCRIPTWHITELIST in ${rkhunter_conf}."
+            return 1
+        }
 
         # Reduce false positives: allow /dev/.udev and similar
         if ! grep -q "ALLOWDEVFILE=/dev/.udev" "${rkhunter_conf}" 2>/dev/null; then
-            echo "ALLOWDEVFILE=/dev/.udev/rules.d/root.rules" >> "${rkhunter_conf}"
+            echo "ALLOWDEVFILE=/dev/.udev/rules.d/root.rules" >> "${rkhunter_conf}" || {
+                log_error "Failed to append ALLOWDEVFILE to ${rkhunter_conf}."
+                return 1
+            }
         fi
     fi
 
@@ -1179,32 +1494,73 @@ _install_rkhunter() {
 
     # Run initial scan (non-interactive, skip keypress)
     log_info "Running initial rkhunter scan (this may take a minute)..."
-    rkhunter --check --skip-keypress --report-warnings-only 2>&1 | tail -20 || true
+    local rkhunter_scan_log
+    rkhunter_scan_log="$(mktemp)" || {
+        log_error "Failed to allocate temporary file for rkhunter scan output."
+        return 1
+    }
+    if rkhunter --check --skip-keypress --report-warnings-only > "${rkhunter_scan_log}" 2>&1; then
+        tail -20 "${rkhunter_scan_log}" || true
+    else
+        tail -20 "${rkhunter_scan_log}" || true
+        rm -f "${rkhunter_scan_log}"
+        log_error "Initial rkhunter scan failed."
+        return 1
+    fi
+    rm -f "${rkhunter_scan_log}"
 
     # ---- Setup weekly cron job ----
-    local rkhunter_cron="/etc/cron.weekly/rkhunter-scan"
+    local rkhunter_cron="${RKHUNTER_CRON_FILE}"
     log_info "Creating weekly rkhunter cron job: ${rkhunter_cron}"
-    cat > "${rkhunter_cron}" << 'RKHUNTER_CRON_EOF'
+    mkdir -p "$(dirname "${rkhunter_cron}")" || {
+        log_error "Failed to create weekly rkhunter cron directory for ${rkhunter_cron}."
+        return 1
+    }
+    if ! cat > "${rkhunter_cron}" << 'RKHUNTER_CRON_EOF'
 #!/usr/bin/env bash
 # Bifrost - Weekly rkhunter scan
 # Generated by security.sh
 
 set -euo pipefail
 
-LOG_FILE="/var/log/rkhunter-weekly-$(date +%Y%m%d).log"
+RKHUNTER_BIN="${RKHUNTER_BIN:-/usr/bin/rkhunter}"
+RKHUNTER_LOG_DIR="${RKHUNTER_LOG_DIR:-/var/log}"
+LOG_FILE="${RKHUNTER_LOG_DIR}/rkhunter-weekly-$(date +%Y%m%d).log"
+
+mkdir -p "${RKHUNTER_LOG_DIR}"
+
+update_failed=0
 
 # Update database
-/usr/bin/rkhunter --update --nocolors 2>/dev/null || true
+if ! "${RKHUNTER_BIN}" --update --nocolors > "${LOG_FILE}" 2>&1; then
+    echo "[rkhunter-cron] database update failed; continuing with existing signatures." >> "${LOG_FILE}"
+    update_failed=1
+fi
 
 # Run scan
-/usr/bin/rkhunter --check --skip-keypress --nocolors --report-warnings-only > "${LOG_FILE}" 2>&1 || true
+if ! "${RKHUNTER_BIN}" --check --skip-keypress --nocolors --report-warnings-only >> "${LOG_FILE}" 2>&1; then
+    echo "[rkhunter-cron] scan failed." >> "${LOG_FILE}"
+    exit 1
+fi
+
+if [[ "${update_failed}" -ne 0 ]]; then
+    exit 1
+fi
 
 # Rotate: keep last 12 weekly logs
-find /var/log -name "rkhunter-weekly-*.log" -mtime +90 -delete 2>/dev/null || true
+find "${RKHUNTER_LOG_DIR}" -name "rkhunter-weekly-*.log" -mtime +90 -delete 2>/dev/null || true
 RKHUNTER_CRON_EOF
-    chmod 755 "${rkhunter_cron}"
+    then
+        log_error "Failed to write weekly rkhunter cron job: ${rkhunter_cron}."
+        return 1
+    fi
+    chmod 755 "${rkhunter_cron}" || {
+        log_error "Failed to chmod weekly rkhunter cron job: ${rkhunter_cron}."
+        return 1
+    }
 
     log_info "rkhunter installation and configuration complete."
+    return 0
 }
 
 # ------------------------------------------------------------------------------
@@ -1219,57 +1575,88 @@ _install_lynis() {
             # Try official repository first
             if ! apt-cache show lynis &>/dev/null 2>&1; then
                 log_info "Adding Lynis official repository..."
-                apt-get install -y -qq apt-transport-https ca-certificates curl gnupg
-                curl -fsSL https://packages.cisofy.com/keys/cisofy-software-public.key | \
-                    gpg --dearmor -o /usr/share/keyrings/cisofy-archive-keyring.gpg 2>/dev/null || true
+                apt-get install -y -qq apt-transport-https ca-certificates curl gnupg || {
+                    log_error "Failed to install Lynis repository bootstrap dependencies."
+                    return 1
+                }
+                if ! curl -fsSL https://packages.cisofy.com/keys/cisofy-software-public.key | \
+                    gpg --dearmor -o /usr/share/keyrings/cisofy-archive-keyring.gpg 2>/dev/null; then
+                    log_error "Failed to import the Lynis repository key. Refusing to use an unverified repository."
+                    return 1
+                fi
                 local codename
                 codename=$(lsb_release -cs 2>/dev/null || grep VERSION_CODENAME /etc/os-release | cut -d= -f2)
                 echo "deb [signed-by=/usr/share/keyrings/cisofy-archive-keyring.gpg] https://packages.cisofy.com/community/lynis/deb/ stable main" \
-                    > /etc/apt/sources.list.d/cisofy-lynis.list
-                apt-get update -qq
+                    > /etc/apt/sources.list.d/cisofy-lynis.list || {
+                    log_error "Failed to write the Lynis apt repository list."
+                    return 1
+                }
+                apt-get update -qq || {
+                    log_error "Failed to refresh apt package index after adding the Lynis repository."
+                    return 1
+                }
             fi
-            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq lynis
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq lynis || {
+                log_error "Failed to install Lynis via apt-get."
+                return 1
+            }
         elif command -v dnf &>/dev/null; then
             dnf install -y -q lynis || {
-                dnf install -y -q epel-release 2>/dev/null || true
-                dnf install -y -q lynis
+                dnf install -y -q epel-release 2>/dev/null || {
+                    log_error "Failed to install epel-release while bootstrapping Lynis."
+                    return 1
+                }
+                dnf install -y -q lynis || {
+                    log_error "Failed to install Lynis via dnf."
+                    return 1
+                }
             }
         elif command -v yum &>/dev/null; then
-            yum install -y -q epel-release 2>/dev/null || true
-            yum install -y -q lynis
+            yum install -y -q epel-release 2>/dev/null || {
+                log_error "Failed to install epel-release while bootstrapping Lynis."
+                return 1
+            }
+            yum install -y -q lynis || {
+                log_error "Failed to install Lynis via yum."
+                return 1
+            }
         else
             # Fallback: install from git (with China mirror support)
             log_info "Installing Lynis from GitHub..."
             local lynis_dir="/opt/lynis"
             if [[ -d "${lynis_dir}" ]]; then
-                cd "${lynis_dir}" && git pull --quiet
+                cd "${lynis_dir}" && git pull --quiet || {
+                    log_error "Failed to update Lynis from Git."
+                    return 1
+                }
             else
-                if ! git clone --quiet https://github.com/CISOfy/lynis.git "${lynis_dir}" 2>/dev/null; then
-                    log_warn "GitHub clone failed. Trying mirror..."
-                    git clone --quiet "https://ghproxy.net/https://github.com/CISOfy/lynis.git" "${lynis_dir}" || {
-                        log_error "Failed to clone Lynis from all sources."
-                        return 1
-                    }
-                fi
+                github_clone_repo "https://github.com/CISOfy/lynis.git" "${lynis_dir}" || return 1
             fi
-            ln -sf "${lynis_dir}/lynis" /usr/local/bin/lynis
+            ln -sf "${lynis_dir}/lynis" /usr/local/bin/lynis || {
+                log_error "Failed to expose Lynis binary at /usr/local/bin/lynis."
+                return 1
+            }
         fi
     else
         log_info "Lynis already installed."
     fi
 
     # Run initial audit
-    local lynis_report="/var/log/lynis-report.txt"
+    local lynis_report="${LYNIS_REPORT_FILE}"
     log_info "Running initial Lynis audit (this may take several minutes)..."
-    lynis audit system --quick --no-colors --quiet > "${lynis_report}" 2>&1 || true
+    _run_lynis_audit_report "${lynis_report}" "Initial Lynis audit" || return 1
 
     # Display hardening index
     _display_lynis_summary "${lynis_report}"
 
     # ---- Setup monthly cron job ----
-    local lynis_cron="/etc/cron.monthly/lynis-audit"
+    local lynis_cron="${LYNIS_CRON_FILE}"
     log_info "Creating monthly Lynis cron job: ${lynis_cron}"
-    cat > "${lynis_cron}" << 'LYNIS_CRON_EOF'
+    mkdir -p "$(dirname "${lynis_cron}")" || {
+        log_error "Failed to create monthly Lynis cron directory for ${lynis_cron}."
+        return 1
+    }
+    if ! cat > "${lynis_cron}" << 'LYNIS_CRON_EOF'
 #!/usr/bin/env bash
 # Bifrost - Monthly Lynis security audit
 # Generated by security.sh
@@ -1279,7 +1666,7 @@ set -euo pipefail
 REPORT_FILE="/var/log/lynis-report-$(date +%Y%m%d).txt"
 
 # Run full audit
-/usr/bin/lynis audit system --quick --no-colors --quiet > "${REPORT_FILE}" 2>&1 || true
+/usr/bin/lynis audit system --quick --no-colors --quiet > "${REPORT_FILE}" 2>&1
 
 # Copy as latest report
 cp "${REPORT_FILE}" /var/log/lynis-report.txt
@@ -1287,9 +1674,17 @@ cp "${REPORT_FILE}" /var/log/lynis-report.txt
 # Rotate: keep last 6 monthly reports
 find /var/log -name "lynis-report-*.txt" -mtime +180 -delete 2>/dev/null || true
 LYNIS_CRON_EOF
-    chmod 755 "${lynis_cron}"
+    then
+        log_error "Failed to write monthly Lynis cron job: ${lynis_cron}."
+        return 1
+    fi
+    chmod 755 "${lynis_cron}" || {
+        log_error "Failed to chmod monthly Lynis cron job: ${lynis_cron}."
+        return 1
+    }
 
     log_info "Lynis installation and configuration complete."
+    return 0
 }
 
 # ------------------------------------------------------------------------------
@@ -1298,8 +1693,8 @@ LYNIS_CRON_EOF
 #   $1 - path to Lynis report file
 # ------------------------------------------------------------------------------
 _display_lynis_summary() {
-    local report_file="${1:-/var/log/lynis-report.txt}"
-    local lynis_data="/var/log/lynis-report.dat"
+    local report_file="${1:-${LYNIS_REPORT_FILE}}"
+    local lynis_data="${LYNIS_DATA_FILE}"
 
     if [[ ! -f "${lynis_data}" ]] && [[ ! -f "${report_file}" ]]; then
         log_warn "No Lynis report found."
@@ -1341,6 +1736,35 @@ _display_lynis_summary() {
     echo ""
 }
 
+# ------------------------------------------------------------------------------
+# _run_lynis_audit_report: Execute Lynis audit and require a non-empty report
+# Arguments:
+#   $1 - destination report file
+#   $2 - human-readable label for logging
+# ------------------------------------------------------------------------------
+_run_lynis_audit_report() {
+    local report_path="$1"
+    local audit_label="${2:-Lynis audit}"
+    local audit_status=0
+
+    mkdir -p "$(dirname "${report_path}")"
+
+    if lynis audit system --quick --no-colors --quiet > "${report_path}" 2>&1; then
+        :
+    else
+        audit_status=$?
+        log_error "${audit_label} failed with exit code ${audit_status}. Review: ${report_path}"
+        return 1
+    fi
+
+    if [[ ! -s "${report_path}" ]]; then
+        log_error "${audit_label} produced no report at ${report_path}."
+        return 1
+    fi
+
+    return 0
+}
+
 # ==============================================================================
 # 8. run_security_audit
 # ==============================================================================
@@ -1361,17 +1785,20 @@ run_security_audit() {
         return $?
     fi
 
-    local report_file="/var/log/lynis-report.txt"
+    local report_file="${LYNIS_REPORT_FILE}"
     local timestamp
     timestamp=$(date +%Y%m%d%H%M%S)
-    local timestamped_report="/var/log/lynis-report-${timestamp}.txt"
+    local timestamped_report="${LYNIS_LOG_DIR}/lynis-report-${timestamp}.txt"
 
     # Run audit
     log_info "Running Lynis security audit (this may take several minutes)..."
-    lynis audit system --quick --no-colors --quiet > "${timestamped_report}" 2>&1 || true
+    _run_lynis_audit_report "${timestamped_report}" "Lynis security audit" || return 1
 
     # Copy as latest
-    cp "${timestamped_report}" "${report_file}"
+    cp "${timestamped_report}" "${report_file}" || {
+        log_error "Failed to copy Lynis report to ${report_file}."
+        return 1
+    }
 
     # Display summary
     _display_lynis_summary "${report_file}"
@@ -1522,7 +1949,7 @@ full_security_hardening() {
     echo ""
 
     # ---- Display Lynis hardening index as overall score ----
-    local lynis_data="/var/log/lynis-report.dat"
+    local lynis_data="${LYNIS_DATA_FILE}"
     local hardening_index="N/A"
     if [[ -f "${lynis_data}" ]]; then
         hardening_index=$(grep "^hardening_index=" "${lynis_data}" 2>/dev/null | cut -d= -f2 | head -1)
@@ -1543,7 +1970,7 @@ full_security_hardening() {
     fi
 
     echo ""
-    log_info "Full report saved to: /var/log/lynis-report.txt"
+    log_info "Full report saved to: ${LYNIS_REPORT_FILE}"
     log_info "State file: ${SECURITY_STATE_FILE}"
 
     # ---- Critical SSH reminder ----

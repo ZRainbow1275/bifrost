@@ -21,14 +21,21 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     environment:
-      - BIFROST_NEWAPI_BASE_URL=http://host.docker.internal:3000
-      - BIFROST_NEWAPI_ADMIN_TOKEN=${NEWAPI_ADMIN_TOKEN:-}
+      - BIFROST_NEWAPI_BASE_URL=${BIFROST_NEWAPI_BASE_URL:-http://host.docker.internal:3000}
+      - BIFROST_NEWAPI_ADMIN_TOKEN=${BIFROST_NEWAPI_ADMIN_TOKEN:-}
       - BIFROST_ADMIN_KEY=${BIFROST_ADMIN_KEY:-}
-      - BIFROST_ALLOW_SELF_REGISTER=${ALLOW_SELF_REGISTER:-true}
-      - BIFROST_DEFAULT_QUOTA=${DEFAULT_QUOTA:-100}
-      - BIFROST_PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
+      - BIFROST_PUBLIC_BASE_URL=${BIFROST_PUBLIC_BASE_URL:-}
+      - BIFROST_ALLOW_SELF_REGISTER=${BIFROST_ALLOW_SELF_REGISTER:-true}
+      - BIFROST_DEFAULT_QUOTA=${BIFROST_DEFAULT_QUOTA:-100}
+      - BIFROST_MAX_REGISTER_PER_DAY=${BIFROST_MAX_REGISTER_PER_DAY:-50}
+      - BIFROST_RATE_LIMIT_PER_MINUTE=${BIFROST_RATE_LIMIT_PER_MINUTE:-30}
+      - BIFROST_REGISTRATION_STATE_FILE=${BIFROST_REGISTRATION_STATE_FILE:-/data/registration-state.json}
+      - BIFROST_CORS_ALLOW_ORIGINS=${BIFROST_CORS_ALLOW_ORIGINS:-}
+      - BIFROST_CORS_ALLOW_CREDENTIALS=${BIFROST_CORS_ALLOW_CREDENTIALS:-false}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - bifrost-api-data:/data
     security_opt:
       - no-new-privileges:true
     logging:
@@ -36,3 +43,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  bifrost-api-data:

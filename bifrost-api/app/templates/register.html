@@ -262,7 +262,7 @@
         }
     </style>
 </head>
-<body>
+<body data-api-prefix="{{ api_prefix }}">
     <div class="header-bar"></div>
 
     <div class="card">
@@ -352,13 +352,18 @@
         const resultSec  = document.getElementById('resultPanel');
         const slotsBadge = document.getElementById('slotsBadge');
         const slotsText  = document.getElementById('slotsText');
+        const apiPrefix  = document.body.dataset.apiPrefix || '';
+
+        function apiUrl(path) {
+            return `${apiPrefix}${path}`;
+        }
 
         // ------------------------------------------------------------------
         // Load registration status on page load
         // ------------------------------------------------------------------
         async function loadStatus() {
             try {
-                const res = await fetch('/api/v1/register/status');
+                const res = await fetch(apiUrl('/api/v1/register/status'));
                 const json = await res.json();
                 if (json.success && json.data) {
                     const d = json.data;
@@ -400,7 +405,7 @@
             submitBtn.textContent = '注册中...';
 
             try {
-                const res = await fetch('/api/v1/register', {
+                const res = await fetch(apiUrl('/api/v1/register'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ username, email }),

@@ -1,10 +1,11 @@
 # =============================================================================
 # Bifrost - Headscale Configuration
 # =============================================================================
-# Headscale: Self-hosted Tailscale control server (v0.23.x).
+# Headscale: Self-hosted Tailscale control server (current schema family).
 # Provides: Mesh VPN, ACL, DERP relay, user namespaces.
 #
-# This config targets Headscale v0.23.0+. Key format changes from v0.22.x:
+# This config follows the modern Headscale schema used by current releases.
+# Key format changes introduced after v0.22.x include:
 #   - grpc_listen_addr removed (gRPC replaced by noise protocol)
 #   - acl_policy_path removed (use policy.path instead)
 #   - ip_prefixes renamed to prefixes with v4/v6/allocation sub-keys

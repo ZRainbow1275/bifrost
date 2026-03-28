@@ -256,10 +256,17 @@ install_xray_server() {
     fi
 
     local _xray_script
+    local _xray_script_file=""
     _xray_script="$(github_download_script "${XRAY_INSTALL_SCRIPT_URL}" 2>/dev/null)" || true
 
     if [[ -n "${_xray_script}" ]]; then
-        echo "${_xray_script}" | bash -s -- install
+        _xray_script_file="$(mktemp /tmp/xray-install.XXXXXX.sh)"
+        printf '%s\n' "${_xray_script}" > "${_xray_script_file}"
+        if ! bash "${_xray_script_file}" install; then
+            rm -f "${_xray_script_file}"
+            log_warn "Xray install script execution failed. Trying manual install..."
+        fi
+        rm -f "${_xray_script_file}"
     else
         log_warn "Could not download Xray install script. Trying manual install..."
     fi
@@ -312,12 +319,16 @@ install_xray_server() {
     default_sni=$(echo "${reality_dest}" | sed 's/:[0-9]*$//')
     read_input "Reality SNI (Server Name)" "${default_sni}" "^[a-zA-Z0-9][a-zA-Z0-9.-]*$"
     reality_sni="${INPUT_RESULT}"
-    read_input "Xray listen port" "443" "^[0-9]+$"
+    read_input "Xray listen port" "8443" "^[0-9]+$"
     listen_port="${INPUT_RESULT}"
 
     # Validate port range
     if [[ "${listen_port}" -lt 1 || "${listen_port}" -gt 65535 ]]; then
         log_error "Invalid port number: ${listen_port}. Must be 1-65535."
+        return 1
+    fi
+    if [[ "${listen_port}" -eq 80 || "${listen_port}" -eq 443 ]]; then
+        log_error "Port ${listen_port} conflicts with Caddy web entrypoints. Choose a non-web port such as 8443."
         return 1
     fi
 
@@ -442,6 +453,9 @@ SERVICE_EOF
         return 1
     fi
 
+    # ---- Open firewall port for external Xray clients ----
+    _open_firewall_port "${listen_port}" "tcp" "Xray Server"
+
     # ---- Get server IP ----
     local server_ip
     server_ip=$(_get_public_ip)
@@ -538,32 +552,23 @@ _install_xray_manual() {
     tmp_dir=$(mktemp -d)
     trap "rm -rf '${tmp_dir}'" RETURN
 
-    # Get latest release version from GitHub API (try direct, then via mirror)
+    # Get latest release version from GitHub API (direct, then configured mirrors)
     local latest_version=""
     local api_url="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
-    local api_response
-    api_response="$(curl -fsSL --connect-timeout 10 --max-time 20 "${api_url}" 2>/dev/null)" || true
-
+    local api_response=""
+    api_response="$(github_fetch_text "${api_url}" 20 10)" || api_response=""
     if [[ -n "${api_response}" ]]; then
-        latest_version=$(echo "${api_response}" | grep '"tag_name"' | head -1 | sed -E 's/.*"tag_name":\s*"([^"]+)".*/\1/')
+        latest_version="$(printf '%s' "${api_response}" | grep '"tag_name"' | head -1 | sed -E 's/.*"tag_name":\s*"([^"]+)".*/\1/')"
     fi
 
     if [[ -z "${latest_version}" ]]; then
-        # Fallback: try ghproxy mirror for API
-        api_response="$(curl -fsSL --connect-timeout 10 --max-time 20 "https://ghproxy.net/${api_url}" 2>/dev/null)" || true
-        if [[ -n "${api_response}" ]]; then
-            latest_version=$(echo "${api_response}" | grep '"tag_name"' | head -1 | sed -E 's/.*"tag_name":\s*"([^"]+)".*/\1/')
-        fi
-    fi
-
-    if [[ -z "${latest_version}" ]]; then
-        log_error "Cannot determine latest Xray version from GitHub API (direct + mirrors)."
+        log_error "Cannot determine latest Xray version from GitHub API (direct + configured mirrors)."
         return 1
     fi
     log_info "Latest Xray version: ${latest_version}"
 
     local download_url="https://github.com/XTLS/Xray-core/releases/download/${latest_version}/Xray-linux-${xray_arch}.zip"
-    log_info "Downloading from: ${download_url} (with China mirror fallback)"
+    log_info "Downloading from: ${download_url} (with configured GitHub mirror fallback)"
 
     if ! github_download "${download_url}" "${tmp_dir}/xray.zip" 120; then
         log_error "Failed to download Xray binary from all sources."
@@ -616,9 +621,17 @@ install_3xui() {
 
     # The official script is interactive; we pass 'y' to confirm installation
     local _3xui_script
+    local _3xui_script_file=""
     _3xui_script="$(github_download_script "${THREE_X_UI_INSTALL_URL}" 2>/dev/null)" || true
     if [[ -n "${_3xui_script}" ]]; then
-        echo "y" | bash -c "${_3xui_script}" 2>&1
+        _3xui_script_file="$(mktemp /tmp/3xui-install.XXXXXX.sh)"
+        printf '%s\n' "${_3xui_script}" > "${_3xui_script_file}"
+        if ! printf 'y\n' | bash "${_3xui_script_file}" 2>&1; then
+            rm -f "${_3xui_script_file}"
+            log_error "3x-ui install script execution failed."
+            return 1
+        fi
+        rm -f "${_3xui_script_file}"
     else
         log_error "Failed to download 3x-ui install script from all sources."
         return 1
@@ -648,25 +661,8 @@ install_3xui() {
     log_info "  Panel port: ${panel_port}"
     log_info "  Admin user: ${admin_user}"
 
-    # Use x-ui CLI to configure settings
-    # The x-ui binary supports setting configurations via its settings command
-    local xui_db="/etc/x-ui/x-ui.db"
-    if [[ -f "${xui_db}" ]]; then
-        # Use sqlite3 to update panel settings directly in the database
-        if command -v sqlite3 &>/dev/null; then
-            # Update port
-            sqlite3 "${xui_db}" "UPDATE settings SET value='${panel_port}' WHERE key='webPort';" 2>/dev/null || true
-            # Update admin credentials
-            sqlite3 "${xui_db}" "UPDATE users SET username='${admin_user}', password='${admin_pass}' WHERE id=1;" 2>/dev/null || true
-            log_info "Panel settings updated via database."
-        else
-            log_warn "sqlite3 not available. Using x-ui CLI to set port..."
-            # Fallback: use the x-ui setting subcommands (flags accept values directly)
-            x-ui setting -port "${panel_port}" 2>/dev/null || true
-            x-ui setting -username "${admin_user}" -password "${admin_pass}" 2>/dev/null || true
-        fi
-    else
-        log_warn "3x-ui database not found at ${xui_db}. Panel may need manual configuration."
+    if ! _configure_3xui_panel "${panel_port}" "${admin_user}" "${admin_pass}"; then
+        log_warn "Panel may need manual configuration after first login."
     fi
 
     # Restart to apply changes
@@ -705,6 +701,32 @@ install_3xui() {
     echo -e "${COLOR_INFO}============================================================${COLOR_RESET}"
     echo ""
     log_info "3x-ui panel deployment complete. Credentials shown on screen only."
+}
+
+_configure_3xui_panel() {
+    local panel_port="${1:?_configure_3xui_panel requires port}"
+    local admin_user="${2:?_configure_3xui_panel requires username}"
+    local admin_pass="${3:?_configure_3xui_panel requires password}"
+    local xui_db="/etc/x-ui/x-ui.db"
+
+    if x-ui setting -port "${panel_port}" >/dev/null 2>&1 && \
+        x-ui setting -username "${admin_user}" -password "${admin_pass}" >/dev/null 2>&1; then
+        log_info "Panel settings updated via official x-ui CLI."
+        return 0
+    fi
+
+    if [[ -f "${xui_db}" ]] && command -v sqlite3 &>/dev/null; then
+        log_warn "x-ui CLI configuration failed. Falling back to direct database update for legacy builds."
+        if sqlite3 "${xui_db}" "UPDATE settings SET value='${panel_port}' WHERE key='webPort';" >/dev/null 2>&1 && \
+            sqlite3 "${xui_db}" "UPDATE users SET username='${admin_user}', password='${admin_pass}' WHERE id=1;" >/dev/null 2>&1; then
+            log_info "Panel settings updated via legacy database fallback."
+            return 0
+        fi
+        log_warn "Legacy sqlite fallback failed while updating 3x-ui panel settings."
+    fi
+
+    log_warn "3x-ui CLI configuration failed and no legacy sqlite fallback succeeded."
+    return 1
 }
 
 # Open a firewall port using whichever firewall is available
@@ -938,16 +960,21 @@ _setup_acme_certificate() {
     if [[ ! -f "${HOME}/.acme.sh/acme.sh" ]]; then
         log_info "Installing acme.sh..."
         local _acme_script
+        local _acme_github_url="https://raw.githubusercontent.com/acmesh-official/get.acme.sh/master/index.html"
         _acme_script="$(mktemp /tmp/acme-install.XXXXXX.sh)"
         if github_download "https://get.acme.sh" "${_acme_script}" 60 2>/dev/null || \
            curl -fsSL --connect-timeout 15 --max-time 60 -o "${_acme_script}" "https://get.acme.sh" 2>/dev/null; then
             bash "${_acme_script}" --install-online -m "admin@${domain}" 2>&1
         else
-            # Fallback: try gitee mirror of acme.sh
-            log_warn "Cannot download acme.sh from official source. Trying gitee mirror..."
-            curl -fsSL --connect-timeout 15 --max-time 60 "https://gitee.com/neilpang/acme.sh/raw/master/acme.sh" | \
-                sh -s -- --install-online -m "admin@${domain}" 2>&1 || {
-                log_error "Failed to install acme.sh from all sources."
+            log_warn "Cannot download acme.sh from get.acme.sh. Trying the official GitHub source..."
+            if ! github_download "${_acme_github_url}" "${_acme_script}" 60; then
+                log_error "Failed to download acme.sh from official sources."
+                rm -f "${_acme_script}"
+                return 1
+            fi
+
+            bash "${_acme_script}" --install-online -m "admin@${domain}" 2>&1 || {
+                log_error "acme.sh installer execution failed."
                 rm -f "${_acme_script}"
                 return 1
             }
@@ -971,11 +998,35 @@ _setup_acme_certificate() {
 
     # Stop any service on port 80 temporarily
     local port80_service=""
-    if ss -tlnp | grep -q ':80 '; then
-        port80_service=$(ss -tlnp | grep ':80 ' | head -1 | sed -n 's/.*"//;s/".*//p')
-        if [[ -n "${port80_service}" ]]; then
-            log_warn "Port 80 is in use by ${port80_service}. Stopping temporarily..."
-            systemctl stop "${port80_service}" 2>/dev/null || true
+    local port80_listeners=""
+    port80_listeners="$(ss -tlnp 2>/dev/null | awk '$4 ~ /:80$/ {print}')"
+    if [[ -n "${port80_listeners}" ]]; then
+        local candidate_service
+        for candidate_service in caddy nginx apache2 httpd; do
+            if systemctl is-active --quiet "${candidate_service}" 2>/dev/null; then
+                port80_service="${candidate_service}"
+                break
+            fi
+        done
+
+        if [[ -z "${port80_service}" ]]; then
+            log_error "Port 80 is already in use, but no supported managed web service was detected."
+            log_error "Free port 80 manually before running acme.sh standalone certificate issuance."
+            echo "${port80_listeners}"
+            return 1
+        fi
+
+        log_warn "Port 80 is in use by managed service '${port80_service}'. Stopping temporarily..."
+        if ! systemctl stop "${port80_service}" 2>/dev/null; then
+            log_error "Failed to stop ${port80_service}. Cannot continue with standalone certificate issuance."
+            return 1
+        fi
+
+        if ss -tlnp 2>/dev/null | grep -q ':80 '; then
+            log_error "Port 80 is still occupied after stopping ${port80_service}. Cannot continue safely."
+            ss -tlnp 2>/dev/null | grep ':80 ' || true
+            systemctl start "${port80_service}" 2>/dev/null || true
+            return 1
         fi
     fi
 
@@ -1272,8 +1323,11 @@ _install_caddy() {
     case "${pkg_manager}" in
         apt)
             install_packages debian-keyring debian-archive-keyring apt-transport-https
-            curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
-                | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null || true
+            if ! curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
+                | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null; then
+                log_error "Failed to import the Caddy repository key. Refusing to trust an unverified repository."
+                return 1
+            fi
             echo "deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" \
                 > /etc/apt/sources.list.d/caddy-stable.list
             apt-get update -qq
@@ -1647,7 +1701,7 @@ _rewrite_xray_config_with_routing() {
     "inbounds": [
         {
             "listen": "0.0.0.0",
-            "port": ${port:-443},
+            "port": ${port:-8443},
             "protocol": "vless",
             "settings": {
                 "clients": [
@@ -1828,7 +1882,7 @@ test_connectivity_b() {
     if [[ -f "${DEPLOY_STATE_DIR}/state.env" ]]; then
         xray_port=$(grep '^XRAY_LISTEN_PORT=' "${DEPLOY_STATE_DIR}/state.env" 2>/dev/null | tail -1 | cut -d= -f2) || true
     fi
-    xray_port="${xray_port:-443}"
+    xray_port="${xray_port:-8443}"
 
     log_info "[1/5] Xray server listening on port ${xray_port}..."
     if systemctl is-active --quiet xray 2>/dev/null; then
@@ -1977,7 +2031,10 @@ deploy_server_b() {
         # shellcheck source=scripts/dd-reinstall.sh
         source "${_sb_script_dir}/dd-reinstall.sh"
         if declare -f pre_deploy_check &>/dev/null; then
-            pre_deploy_check || log_warn "Pre-deploy check encountered issues (non-fatal)."
+            if ! pre_deploy_check; then
+                log_error "Pre-deploy check failed. Cannot continue with Server B deployment."
+                return 1
+            fi
         fi
     else
         log_warn "dd-reinstall.sh not found. Skipping cloud agent cleanup."
@@ -2001,21 +2058,51 @@ deploy_server_b() {
     log_info "[Step 2/14] Applying security hardening..."
     if type -t full_security_hardening &>/dev/null; then
         # security.sh functions are available
-        harden_ssh || log_warn "SSH hardening failed (non-fatal)."
-        setup_firewall || log_warn "Firewall setup failed (non-fatal)."
-        harden_kernel || log_warn "Kernel hardening failed (non-fatal)."
-        setup_fail2ban || log_warn "fail2ban setup failed (non-fatal)."
-        setup_auto_updates || log_warn "Auto-updates setup failed (non-fatal)."
+        if ! harden_ssh; then
+            log_error "SSH hardening failed."
+            failed_steps+=("SSH Hardening")
+        fi
+        if ! setup_firewall; then
+            log_error "Firewall setup failed."
+            failed_steps+=("Firewall Setup")
+        fi
+        if ! harden_kernel; then
+            log_error "Kernel hardening failed."
+            failed_steps+=("Kernel Hardening")
+        fi
+        if ! setup_fail2ban; then
+            log_error "fail2ban setup failed."
+            failed_steps+=("fail2ban")
+        fi
+        if ! setup_auto_updates; then
+            log_error "Auto-updates setup failed."
+            failed_steps+=("Auto Updates")
+        fi
     elif [[ -f "$(dirname "${BASH_SOURCE[0]}")/security.sh" ]]; then
         source "$(dirname "${BASH_SOURCE[0]}")/security.sh"
-        harden_ssh || log_warn "SSH hardening failed (non-fatal)."
-        setup_firewall || log_warn "Firewall setup failed (non-fatal)."
-        harden_kernel || log_warn "Kernel hardening failed (non-fatal)."
-        setup_fail2ban || log_warn "fail2ban setup failed (non-fatal)."
-        setup_auto_updates || log_warn "Auto-updates setup failed (non-fatal)."
+        if ! harden_ssh; then
+            log_error "SSH hardening failed."
+            failed_steps+=("SSH Hardening")
+        fi
+        if ! setup_firewall; then
+            log_error "Firewall setup failed."
+            failed_steps+=("Firewall Setup")
+        fi
+        if ! harden_kernel; then
+            log_error "Kernel hardening failed."
+            failed_steps+=("Kernel Hardening")
+        fi
+        if ! setup_fail2ban; then
+            log_error "fail2ban setup failed."
+            failed_steps+=("fail2ban")
+        fi
+        if ! setup_auto_updates; then
+            log_error "Auto-updates setup failed."
+            failed_steps+=("Auto Updates")
+        fi
     else
-        log_warn "security.sh not found. Skipping security hardening."
-        log_warn "You should run security hardening separately."
+        log_error "security.sh not found. Cannot apply security hardening."
+        failed_steps+=("Security Hardening")
     fi
     echo ""
 
@@ -2089,10 +2176,17 @@ deploy_server_b() {
         # shellcheck source=scripts/anti-dpi.sh
         source "${_sb_script_dir}/anti-dpi.sh"
         if declare -f deploy_anti_dpi &>/dev/null; then
-            deploy_anti_dpi || log_warn "Anti-DPI deployment failed (non-fatal)."
+            if ! deploy_anti_dpi; then
+                log_error "Anti-DPI deployment failed."
+                failed_steps+=("Anti-DPI")
+            fi
+        else
+            log_error "deploy_anti_dpi not available after sourcing anti-dpi.sh."
+            failed_steps+=("Anti-DPI")
         fi
     else
-        log_warn "anti-dpi.sh not found. Skipping anti-DPI protection."
+        log_error "anti-dpi.sh not found. Cannot deploy anti-DPI protection."
+        failed_steps+=("Anti-DPI")
     fi
     echo ""
 
@@ -2102,23 +2196,36 @@ deploy_server_b() {
         # shellcheck source=scripts/keepalive.sh
         source "${_sb_script_dir}/keepalive.sh"
         if declare -f deploy_keepalive &>/dev/null; then
-            deploy_keepalive || log_warn "Keepalive deployment failed (non-fatal)."
+            if ! deploy_keepalive; then
+                log_error "Keepalive deployment failed."
+                failed_steps+=("Keepalive")
+            fi
+        else
+            log_error "deploy_keepalive not available after sourcing keepalive.sh."
+            failed_steps+=("Keepalive")
         fi
     else
-        log_warn "keepalive.sh not found. Skipping keepalive deployment."
+        log_error "keepalive.sh not found. Cannot deploy keepalive."
+        failed_steps+=("Keepalive")
     fi
     echo ""
 
     # ---- Step 11: Monitoring ----
     log_info "[Step 11/14] Setting up monitoring..."
     if type -t deploy_monitoring &>/dev/null; then
-        deploy_monitoring || log_warn "Monitoring setup failed (non-fatal)."
+        if ! deploy_monitoring; then
+            log_error "Monitoring setup failed."
+            failed_steps+=("Monitoring")
+        fi
     elif [[ -f "${_sb_script_dir}/monitoring.sh" ]]; then
         source "${_sb_script_dir}/monitoring.sh"
-        deploy_monitoring || log_warn "Monitoring setup failed (non-fatal)."
+        if ! deploy_monitoring; then
+            log_error "Monitoring setup failed."
+            failed_steps+=("Monitoring")
+        fi
     else
-        log_warn "monitoring.sh not found. Skipping monitoring setup."
-        log_warn "You should install Netdata separately."
+        log_error "monitoring.sh not found. Cannot set up monitoring."
+        failed_steps+=("Monitoring")
     fi
     echo ""
 
@@ -2137,10 +2244,16 @@ deploy_server_b() {
     local deploy_minutes=$(( deploy_duration / 60 ))
     local deploy_seconds=$(( deploy_duration % 60 ))
 
-    _print_deployment_summary "${deploy_minutes}" "${deploy_seconds}" ${failed_steps[@]+"${failed_steps[@]}"}
+    _print_deployment_summary "${deploy_minutes}" "${deploy_seconds}" "${failed_steps[@]}"
 
     # ---- Save final connection info for Server A ----
     _save_final_connection_info
+
+    if [[ ${#failed_steps[@]} -gt 0 ]]; then
+        return 1
+    fi
+
+    return 0
 }
 
 # Print the final deployment summary
@@ -2155,11 +2268,19 @@ _print_deployment_summary() {
 
     echo ""
     echo ""
-    log_info "=================================================================="
-    log_info ""
-    log_info "   AI GATEWAY BRIDGE - SERVER B DEPLOYMENT COMPLETE"
-    log_info ""
-    log_info "=================================================================="
+    if [[ ${#failed_steps[@]} -eq 0 ]]; then
+        log_info "=================================================================="
+        log_info ""
+        log_info "   AI GATEWAY BRIDGE - SERVER B DEPLOYMENT COMPLETE"
+        log_info ""
+        log_info "=================================================================="
+    else
+        log_error "=================================================================="
+        log_error ""
+        log_error "   AI GATEWAY BRIDGE - SERVER B DEPLOYMENT INCOMPLETE"
+        log_error ""
+        log_error "=================================================================="
+    fi
     log_info ""
     log_info "   Deployment time: ${minutes}m ${seconds}s"
     log_info ""
@@ -2251,9 +2372,11 @@ _print_deployment_summary() {
     # Failed steps
     if [[ ${#failed_steps[@]} -gt 0 ]]; then
         log_warn "   FAILED/SKIPPED STEPS:"
-        for step in ${failed_steps[@]+"${failed_steps[@]}"}; do
+        for step in "${failed_steps[@]}"; do
             log_warn "     - ${step}"
         done
+        echo ""
+        log_error "   Deployment status: incomplete. Review the failed steps above before using this server."
         echo ""
     fi
 

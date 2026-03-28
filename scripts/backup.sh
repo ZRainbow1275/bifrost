@@ -136,8 +136,8 @@ _get_encryption_key() {
 
     echo "${key}" > "${BACKUP_ENCRYPTION_KEY_FILE}"
     chmod 600 "${BACKUP_ENCRYPTION_KEY_FILE}"
-    log_info "Encryption key generated and stored at ${BACKUP_ENCRYPTION_KEY_FILE}"
-    log_warn "IMPORTANT: Keep this key safe. Without it you cannot restore backups."
+    log_info "Encryption key generated and stored at ${BACKUP_ENCRYPTION_KEY_FILE}" >&2
+    log_warn "IMPORTANT: Keep this key safe. Without it you cannot restore backups." >&2
 
     echo "${key}"
 }
@@ -217,6 +217,27 @@ _prune_old_backups() {
 }
 
 ###############################################################################
+# _backup_stage_path()
+#
+# Copy one config path into the temporary staging tree while preserving its
+# absolute path relative to /.
+###############################################################################
+_backup_stage_path() {
+    local source_path="${1:?_backup_stage_path requires a source path}"
+    local stage_root="${2:?_backup_stage_path requires a staging root}"
+    local relative_path="${source_path#/}"
+    local staged_path="${stage_root}/${relative_path}"
+
+    mkdir -p "$(dirname "${staged_path}")"
+    if ! cp -a "${source_path}" "${staged_path}" 2>/dev/null; then
+        log_error "Failed to stage backup path: ${source_path}"
+        return 1
+    fi
+
+    return 0
+}
+
+###############################################################################
 # backup_config()
 #
 # Create an encrypted tar.gz archive of all Bifrost configs.
@@ -248,9 +269,13 @@ backup_config() {
         fi
     fi
 
+    # Get encryption key
+    local enc_key
+    enc_key="$(_get_encryption_key)"
+
     _ensure_backup_dir
 
-    # Collect paths
+    # Collect paths after the key exists so the backup can include it.
     local -a config_paths=()
     while IFS= read -r path; do
         config_paths+=("${path}")
@@ -263,10 +288,6 @@ backup_config() {
 
     log_info "Found ${#config_paths[@]} config path(s) to back up."
 
-    # Get encryption key
-    local enc_key
-    enc_key="$(_get_encryption_key)"
-
     # Build archive name
     local timestamp
     timestamp="$(date '+%Y%m%d_%H%M%S')"
@@ -276,61 +297,59 @@ backup_config() {
     local tar_path="${BACKUP_BASE_DIR}/${archive_name}.tar.gz"
     local enc_path="${BACKUP_BASE_DIR}/${archive_name}.tar.gz.enc"
     local manifest_path="${BACKUP_BASE_DIR}/${archive_name}.manifest"
+    local staging_dir
+    local staged_configs_dir
+    local staged_metadata_dir
+    staging_dir="$(mktemp -d /tmp/bifrost-backup.XXXXXX)"
+    staged_configs_dir="${staging_dir}/configs"
+    staged_metadata_dir="${staging_dir}/metadata"
+    mkdir -p "${staged_configs_dir}" "${staged_metadata_dir}"
 
-    # Also export the current crontab
-    local crontab_tmp
-    crontab_tmp="$(mktemp /tmp/crontab-backup.XXXXXX)"
-    crontab -l > "${crontab_tmp}" 2>/dev/null || echo "# No crontab" > "${crontab_tmp}"
+    # Stage config payload first so archive creation is atomic and verifiable.
+    local source_path=""
+    for source_path in ${config_paths[@]+"${config_paths[@]}"}; do
+        _backup_stage_path "${source_path}" "${staged_configs_dir}" || {
+            rm -rf "${staging_dir}"
+            return 1
+        }
+    done
 
-    # Also export Docker container info if applicable
-    local docker_info_tmp
-    docker_info_tmp="$(mktemp /tmp/docker-info-backup.XXXXXX)"
+    # Export metadata with stable filenames so tests and restore previews are deterministic.
+    if ! crontab -l > "${staged_metadata_dir}/crontab.txt" 2>/dev/null; then
+        echo "# No crontab" > "${staged_metadata_dir}/crontab.txt"
+    fi
+
     if command_exists docker && docker info &>/dev/null; then
-        docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' > "${docker_info_tmp}" 2>/dev/null || true
-        # Also save docker-compose.yml if it exists
+        docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' > "${staged_metadata_dir}/docker-info.txt" 2>/dev/null || {
+            rm -rf "${staging_dir}"
+            die "Failed to export Docker metadata for backup."
+        }
+
+        local compose_dir=""
         for compose_dir in "${NEW_API_DIR}" "${INSTALL_DIR}/docker"; do
             if [[ -f "${compose_dir}/docker-compose.yml" ]]; then
-                cp "${compose_dir}/docker-compose.yml" "${docker_info_tmp}.compose-$(basename "${compose_dir}")" 2>/dev/null || true
+                cp "${compose_dir}/docker-compose.yml" \
+                    "${staged_metadata_dir}/docker-compose-$(basename "${compose_dir}").yml" 2>/dev/null || {
+                    rm -rf "${staging_dir}"
+                    die "Failed to stage docker-compose metadata from ${compose_dir}."
+                }
             fi
         done
     else
-        echo "# Docker not available" > "${docker_info_tmp}"
+        echo "# Docker not available" > "${staged_metadata_dir}/docker-info.txt"
     fi
 
-    # Create tar archive
+    # Create tar archive once from the staged tree.
     log_info "Creating tar archive..."
-    tar czf "${tar_path}" \
-        --ignore-failed-read \
-        --warning=no-file-changed \
-        -C / \
-        "${config_paths[@]/#/}" \
-        --transform='s|^|configs/|' \
-        2>/dev/null || true
+    tar czf "${tar_path}" -C "${staging_dir}" configs metadata 2>/dev/null || {
+        rm -rf "${staging_dir}"
+        die "Failed to create backup archive."
+    }
+    rm -rf "${staging_dir}"
 
-    # Append extra metadata files
-    tar rf "${tar_path%.gz}" \
-        --transform='s|.*/|metadata/|' \
-        "${crontab_tmp}" \
-        "${docker_info_tmp}" \
-        2>/dev/null || true
-
-    # Re-compress if we appended
-    if [[ -f "${tar_path%.gz}" ]]; then
-        gzip -f "${tar_path%.gz}" 2>/dev/null || true
+    if [[ ! -s "${tar_path}" ]]; then
+        die "Backup archive is empty or missing after tar creation."
     fi
-
-    # If tar didn't produce a file, try a simpler approach
-    if [[ ! -f "${tar_path}" ]]; then
-        log_info "Retrying with simplified tar command..."
-        tar czf "${tar_path}" \
-            --ignore-failed-read \
-            ${config_paths[@]+"${config_paths[@]}"} \
-            "${crontab_tmp}" \
-            "${docker_info_tmp}" \
-            2>/dev/null || die "Failed to create backup archive."
-    fi
-
-    rm -f "${crontab_tmp}" "${docker_info_tmp}" "${docker_info_tmp}".compose-* 2>/dev/null || true
 
     # Encrypt the archive
     log_info "Encrypting backup with AES-256-CBC..."
@@ -357,6 +376,11 @@ backup_config() {
         for p in ${config_paths[@]+"${config_paths[@]}"}; do
             echo "${p}"
         done
+        echo "#"
+        echo "# Included metadata:"
+        echo "metadata/crontab.txt"
+        echo "metadata/docker-info.txt"
+        echo "metadata/docker-compose-*.yml (if present)"
     } > "${manifest_path}"
     chmod 600 "${manifest_path}"
 
@@ -605,6 +629,127 @@ restore_config() {
     log_success "Configuration restore completed."
 }
 
+_backup_ensure_crontab_available() {
+    _backup_cron_scheduler_running() {
+        if command_exists systemctl; then
+            if systemctl is-active --quiet cron 2>/dev/null || systemctl is-active --quiet crond 2>/dev/null; then
+                return 0
+            fi
+        fi
+
+        if command_exists pgrep; then
+            if pgrep -x cron >/dev/null 2>&1 || pgrep -x crond >/dev/null 2>&1; then
+                return 0
+            fi
+        fi
+
+        return 1
+    }
+
+    _backup_start_cron_scheduler() {
+        if command_exists systemctl; then
+            if systemctl enable --now cron 2>/dev/null; then
+                _backup_cron_scheduler_running && return 0
+                log_error "cron service did not become active after systemctl enable --now cron."
+                return 1
+            fi
+            if systemctl enable --now crond 2>/dev/null; then
+                _backup_cron_scheduler_running && return 0
+                log_error "crond service did not become active after systemctl enable --now crond."
+                return 1
+            fi
+        fi
+
+        if command_exists service; then
+            if service cron start 2>/dev/null; then
+                _backup_cron_scheduler_running && return 0
+                log_error "cron service did not stay active after service cron start."
+                return 1
+            fi
+            if service crond start 2>/dev/null; then
+                _backup_cron_scheduler_running && return 0
+                log_error "crond service did not stay active after service crond start."
+                return 1
+            fi
+        fi
+
+        log_error "Unable to start a cron scheduler service (cron/crond)."
+        return 1
+    }
+
+    if command_exists crontab; then
+        if _backup_cron_scheduler_running; then
+            return 0
+        fi
+
+        log_warn "crontab is available but no active cron scheduler was detected. Attempting to start cron/crond..."
+        _backup_start_cron_scheduler || return 1
+
+        if ! _backup_cron_scheduler_running; then
+            log_error "cron scheduler is still not active after bootstrap."
+            return 1
+        fi
+
+        return 0
+    fi
+
+    log_warn "crontab command not found. Attempting to install cron scheduler..."
+    if declare -f install_packages >/dev/null 2>&1; then
+        case "${PKG_MGR:-unknown}" in
+            apt)
+                install_packages cron || return 1
+                ;;
+            dnf|yum)
+                install_packages cronie || return 1
+                ;;
+            *)
+                log_error "Unsupported package manager for cron bootstrap: ${PKG_MGR:-unknown}"
+                return 1
+                ;;
+        esac
+    fi
+
+    if ! command_exists crontab; then
+        log_error "crontab is still unavailable after attempted bootstrap."
+        return 1
+    fi
+
+    _backup_start_cron_scheduler || return 1
+
+    if ! _backup_cron_scheduler_running; then
+        log_error "cron scheduler is still not active after bootstrap."
+        return 1
+    fi
+
+    return 0
+}
+
+_backup_read_existing_crontab() {
+    local crontab_output=""
+    local stderr_file=""
+    local status=0
+    local stderr_text=""
+
+    stderr_file="$(mktemp)"
+    if crontab_output="$(crontab -l 2>"${stderr_file}")"; then
+        rm -f "${stderr_file}"
+        if [[ -n "${crontab_output}" ]]; then
+            printf '%s\n' "${crontab_output}"
+        fi
+        return 0
+    fi
+    status=$?
+    stderr_text="$(tr -d '\r' < "${stderr_file}")"
+    rm -f "${stderr_file}"
+
+    if [[ "${status}" -eq 1 ]] && { [[ -z "${stderr_text}" ]] || grep -qi 'no crontab' <<<"${stderr_text}"; }; then
+        return 0
+    fi
+
+    log_error "Failed to read current crontab: ${stderr_text:-exit ${status}}"
+    return "${status}"
+}
+
 ###############################################################################
 # setup_auto_backup()
 #
@@ -616,6 +761,7 @@ setup_auto_backup() {
     log_step "Setting up automatic daily backup..."
 
     local script_path
+    local backup_log_dir="${LOG_DIR:-/var/log/bifrost}"
     script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/backup.sh"
 
     if [[ ! -f "${script_path}" ]]; then
@@ -623,31 +769,39 @@ setup_auto_backup() {
         script_path="/opt/bifrost/scripts/backup.sh"
     fi
 
-    local cron_entry="0 3 * * * /usr/bin/env bash ${script_path} backup >> /var/log/bifrost/backup-cron.log 2>&1"
+    local cron_entry="0 3 * * * /usr/bin/env bash ${script_path} backup >> ${backup_log_dir}/backup-cron.log 2>&1"
     local cron_marker="# bifrost-daily-backup"
+
+    # Ensure prerequisites exist before mutating crontab.
+    _get_encryption_key > /dev/null
+    if ! mkdir -p "${backup_log_dir}"; then
+        log_error "Failed to create backup log directory: ${backup_log_dir}"
+        return 1
+    fi
+
+    _backup_ensure_crontab_available || return 1
 
     # Remove existing entry if present (idempotent)
     local current_crontab
-    current_crontab="$(crontab -l 2>/dev/null)" || current_crontab=""
+    current_crontab="$(_backup_read_existing_crontab)" || return 1
 
-    if echo "${current_crontab}" | grep -qF "${cron_marker}"; then
+    if grep -qF "${cron_marker}" <<<"${current_crontab}"; then
         log_info "Existing backup cron job found. Updating..."
-        current_crontab="$(echo "${current_crontab}" | grep -vF "${cron_marker}")"
+        current_crontab="$(printf '%s\n' "${current_crontab}" | grep -vF "${cron_marker}" || true)"
     fi
 
     # Add the cron job
-    (echo "${current_crontab}"; echo "${cron_entry} ${cron_marker}") | crontab -
-
-    # Ensure encryption key exists
-    _get_encryption_key > /dev/null
-
-    # Ensure log directory exists
-    mkdir -p /var/log/bifrost
+    {
+        if [[ -n "${current_crontab}" ]]; then
+            printf '%s\n' "${current_crontab}"
+        fi
+        printf '%s %s\n' "${cron_entry}" "${cron_marker}"
+    } | crontab -
 
     log_success "Daily backup cron job registered."
     log_info "  Schedule: Every day at 03:00 AM"
     log_info "  Script:   ${script_path}"
-    log_info "  Log:      /var/log/bifrost/backup-cron.log"
+    log_info "  Log:      ${backup_log_dir}/backup-cron.log"
     log_info "  Storage:  ${BACKUP_BASE_DIR} (keep ${BACKUP_MAX_KEEP})"
     log_info "  Key:      ${BACKUP_ENCRYPTION_KEY_FILE}"
     echo ""
@@ -692,7 +846,7 @@ emergency_ip_rotation() {
 
     # Detect old IP from existing config
     local old_ip="unknown"
-    local xray_config="/usr/local/etc/xray/config.json"
+    local xray_config="${XRAY_CONFIG_DIR%/}/config.json"
     if [[ -f "${xray_config}" ]] && command_exists jq; then
         old_ip="$(jq -r '.outbounds[]? | select(.tag == "proxy") | .settings.vnext[0].address // empty' "${xray_config}" 2>/dev/null)" || old_ip="unknown"
     elif [[ -f "${xray_config}" ]]; then
@@ -715,7 +869,10 @@ emergency_ip_rotation() {
 
     # Create a backup before making changes
     log_info "Creating pre-rotation backup..."
-    backup_config || log_warn "Backup failed, but continuing with rotation."
+    if ! backup_config; then
+        log_error "Pre-rotation backup failed. Refusing to continue with IP rotation."
+        return 1
+    fi
 
     local changes_made=0
 
@@ -756,7 +913,7 @@ emergency_ip_rotation() {
     fi
 
     # --- 2. Update Mihomo config ---
-    local mihomo_config="/etc/mihomo/config.yaml"
+    local mihomo_config="${MIHOMO_CONFIG_DIR%/}/config.yaml"
     if [[ ! -f "${mihomo_config}" ]]; then
         mihomo_config="/etc/clash/config.yaml"
     fi
@@ -812,6 +969,14 @@ emergency_ip_rotation() {
         log_info "Connection info file updated."
     fi
 
+    if [[ ${changes_made} -le 0 ]]; then
+        echo ""
+        echo "==========================================="
+        log_error "No configuration files were updated. IP rotation aborted."
+        echo "==========================================="
+        return 1
+    fi
+
     # --- 4. Restart services ---
     log_info "[4/4] Restarting services..."
     local restart_ok=true
@@ -838,17 +1003,10 @@ emergency_ip_rotation() {
 
     echo ""
     echo "==========================================="
-    if [[ ${changes_made} -gt 0 ]]; then
-        log_success "IP rotation complete. Updated ${changes_made} config(s)."
-        log_info "  Old IP: ${old_ip}"
-        log_info "  New IP: ${new_ip}"
-    else
-        log_warn "No configuration files were updated."
-    fi
-
     if [[ "${restart_ok}" != "true" ]]; then
         log_error "Some services failed to restart. Check logs."
         log_info "To rollback, restore the latest backup: bash backup.sh restore"
+        echo "==========================================="
         return 1
     fi
 
@@ -862,12 +1020,18 @@ emergency_ip_rotation() {
         --connect-timeout 15 --max-time 30 \
         "${test_url}" 2>/dev/null)" || http_code="000"
 
-    if [[ "${http_code}" != "000" ]]; then
-        log_success "Connectivity test passed. Tunnel is working with new IP."
-    else
-        log_warn "Connectivity test failed (HTTP ${http_code}). The tunnel may need time to establish."
+    if [[ "${http_code}" == "000" ]]; then
+        log_error "Connectivity test failed (HTTP ${http_code}). Configuration was updated but tunnel verification failed."
         log_info "Check manually: curl --proxy socks5://127.0.0.1:10808 https://api.anthropic.com"
+        log_info "To rollback, restore the latest backup: bash backup.sh restore"
+        echo "==========================================="
+        return 1
     fi
+
+    log_success "Connectivity test passed. Tunnel is working with new IP."
+    log_success "IP rotation complete. Updated ${changes_made} config(s)."
+    log_info "  Old IP: ${old_ip}"
+    log_info "  New IP: ${new_ip}"
     echo "==========================================="
 }
 

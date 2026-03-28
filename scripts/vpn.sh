@@ -65,6 +65,7 @@ readonly HEADSCALE_DB="${HEADSCALE_DIR}/db.sqlite"
 readonly HEADSCALE_SOCKET="${HEADSCALE_DIR}/headscale.sock"
 readonly HEADSCALE_PORT=8080
 readonly HEADSCALE_METRICS_PORT=9090
+readonly HEADSCALE_REPO="juanfont/headscale"
 
 # State
 readonly VPN_STATE_DIR="/etc/bifrost/vpn"
@@ -154,6 +155,30 @@ _vpn_check_prerequisites() {
     fi
 
     log_success "Prerequisites check completed."
+}
+
+# Resolve the Headscale version to install.
+# Priority: explicit environment override -> latest GitHub release tag.
+_vpn_headscale_resolve_version() {
+    local configured_version="${BIFROST_HEADSCALE_VERSION:-}"
+    local release_json=""
+    local release_tag=""
+
+    if [[ -n "${configured_version}" ]]; then
+        echo "${configured_version#v}"
+        return 0
+    fi
+
+    release_json="$(github_fetch_text "https://api.github.com/repos/${HEADSCALE_REPO}/releases/latest" 20 10)" || release_json=""
+    release_tag="$(printf '%s' "${release_json}" | grep -oE '"tag_name":\s*"v?[^"]+"' | head -1 | sed -E 's/.*"v?([^"]+)"/\1/')"
+    if [[ -z "${release_tag}" ]]; then
+        log_error "Failed to resolve the latest Headscale release from GitHub."
+        log_error "$(github_mirror_help)"
+        log_error "You can pin a version explicitly with BIFROST_HEADSCALE_VERSION=<version>."
+        return 1
+    fi
+
+    echo "${release_tag}"
 }
 
 # Install WireGuard tools and kernel module.
@@ -609,8 +634,10 @@ _vpn_deploy_headscale() {
     # ----- Install Headscale -----
     log_info "Installing Headscale..."
 
-    local headscale_version="0.23.0"
+    local headscale_version=""
     local arch_suffix
+
+    headscale_version="$(_vpn_headscale_resolve_version)" || return 1
 
     case "${ARCH}" in
         x86_64|amd64) arch_suffix="amd64" ;;
@@ -618,28 +645,29 @@ _vpn_deploy_headscale() {
         *) die "Unsupported architecture for Headscale: ${ARCH}" ;;
     esac
 
-    local headscale_url="https://github.com/juanfont/headscale/releases/download/v${headscale_version}/headscale_${headscale_version}_linux_${arch_suffix}.deb"
+    local headscale_tag="v${headscale_version}"
+    local headscale_url="https://github.com/${HEADSCALE_REPO}/releases/download/${headscale_tag}/headscale_${headscale_version}_linux_${arch_suffix}.deb"
+    local headscale_bin_url="https://github.com/${HEADSCALE_REPO}/releases/download/${headscale_tag}/headscale_${headscale_version}_linux_${arch_suffix}"
 
     if [[ "${PKG_MGR}" == "apt" ]]; then
         local tmp_deb
         tmp_deb="$(mktemp /tmp/headscale.XXXXXX.deb)"
         register_cleanup "${tmp_deb}"
-        log_info "Downloading Headscale v${headscale_version} (with China mirror fallback)..."
+        log_info "Downloading Headscale v${headscale_version} (with configured GitHub mirror fallback)..."
         if ! github_download "${headscale_url}" "${tmp_deb}" 120; then
-            die "Failed to download Headscale from all sources (direct + mirrors)."
+            die "Failed to download Headscale package from all sources (direct + configured mirrors)."
         fi
         dpkg -i "${tmp_deb}" || apt-get install -f -y
     else
-        # For RPM-based distros, use the RPM package
-        local headscale_rpm_url="https://github.com/juanfont/headscale/releases/download/v${headscale_version}/headscale_${headscale_version}_linux_${arch_suffix}.rpm"
-        local tmp_rpm
-        tmp_rpm="$(mktemp /tmp/headscale.XXXXXX.rpm)"
-        register_cleanup "${tmp_rpm}"
-        log_info "Downloading Headscale v${headscale_version} (with China mirror fallback)..."
-        if ! github_download "${headscale_rpm_url}" "${tmp_rpm}" 120; then
-            die "Failed to download Headscale RPM from all sources (direct + mirrors)."
+        # Upstream latest releases publish Linux binaries but not RPM packages.
+        local tmp_bin
+        tmp_bin="$(mktemp /tmp/headscale.XXXXXX.bin)"
+        register_cleanup "${tmp_bin}"
+        log_info "Downloading Headscale v${headscale_version} binary (with configured GitHub mirror fallback)..."
+        if ! github_download "${headscale_bin_url}" "${tmp_bin}" 120; then
+            die "Failed to download Headscale binary from all sources (direct + configured mirrors)."
         fi
-        rpm -i "${tmp_rpm}" || ${PKG_INSTALL} -f
+        install -m 755 "${tmp_bin}" /usr/local/bin/headscale
     fi
 
     if ! check_command headscale; then
@@ -717,12 +745,22 @@ SERVICE
 
     # ----- Create default namespace/user -----
     sleep 3
-    headscale users create "employees" 2>/dev/null || \
-        log_warn "User 'employees' may already exist."
+    if ! headscale users create "employees" 2>/dev/null; then
+        if headscale users list 2>/dev/null | grep -Eq '(^|[[:space:]])employees([[:space:]]|$)'; then
+            log_warn "User 'employees' already exists."
+        else
+            log_error "Failed to create default Headscale user 'employees'."
+            return 1
+        fi
+    fi
 
     # ----- Generate API key -----
-    local api_key
-    api_key="$(headscale apikeys create --expiration 365d 2>/dev/null || echo '')"
+    local api_key=""
+    api_key="$(headscale apikeys create --expiration 365d 2>/dev/null || true)"
+    if [[ -z "${api_key}" ]]; then
+        log_error "Failed to generate Headscale API key."
+        return 1
+    fi
 
     # ----- Save state -----
     _vpn_save_state "VPN_TYPE" "headscale"
@@ -779,14 +817,14 @@ create_vpn_user() {
 
     case "${vpn_type}" in
         firezone)
-            _create_firezone_user "${username}" "${user_dir}"
+            _create_firezone_user "${username}" "${user_dir}" || return 1
             ;;
         headscale)
-            _create_headscale_user "${username}" "${user_dir}"
+            _create_headscale_user "${username}" "${user_dir}" || return 1
             ;;
         *)
             # Standalone WireGuard (direct management)
-            _create_wireguard_user "${username}" "${user_dir}"
+            _create_wireguard_user "${username}" "${user_dir}" || return 1
             ;;
     esac
 
@@ -853,6 +891,19 @@ _create_wireguard_user() {
     server_pubkey="$(_vpn_load_state "SERVER_PUBLIC_KEY")"
     if [[ -z "${server_pubkey}" ]]; then
         server_pubkey="$(cat "${VPN_KEYS_DIR}/server.pub" 2>/dev/null || echo '')"
+    fi
+
+    if [[ -z "${PUBLIC_IP:-}" || "${PUBLIC_IP}" == "unknown" ]]; then
+        PUBLIC_IP="$(get_public_ip 2>/dev/null || echo 'unknown')"
+    fi
+    if [[ -z "${PUBLIC_IP:-}" || "${PUBLIC_IP}" == "unknown" ]] && [[ -t 0 ]]; then
+        read_input "WireGuard public endpoint IP" "" "^([0-9]{1,3}\\.){3}[0-9]{1,3}$"
+        PUBLIC_IP="${INPUT_RESULT}"
+    fi
+    if [[ -z "${PUBLIC_IP:-}" || "${PUBLIC_IP}" == "unknown" ]]; then
+        log_error "Unable to determine a valid public IPv4 address for the WireGuard endpoint."
+        log_error "Run VPN deployment first or export PUBLIC_IP before creating WireGuard users."
+        return 1
     fi
 
     local server_endpoint
@@ -958,12 +1009,12 @@ _create_headscale_user() {
         log_info "Creating Headscale pre-auth key for ${username}..."
 
         # Create a pre-auth key (one-time use, expires in 24h)
-        local preauth_key
+        local preauth_key=""
         preauth_key="$(headscale preauthkeys create \
             --user employees \
             --reusable=false \
             --expiration 24h \
-            2>/dev/null || echo '')"
+            2>/dev/null || true)"
 
         if [[ -n "${preauth_key}" ]]; then
             echo "${preauth_key}" > "${user_dir}/preauth-key.txt"
@@ -977,11 +1028,13 @@ _create_headscale_user() {
             _vpn_save_state "USER_${username}_PREAUTH_FILE" "${user_dir}/preauth-key.txt"
 
             # Print pre-auth key ONLY to stdout (not to log file) to avoid
-            # persisting secrets in /var/log/bifrost.log.
+            # persisting secrets in /var/log/bifrost/bifrost.log.
             echo "Pre-auth key created. User should run:"
             echo "  tailscale up --login-server ${server_url} --authkey ${preauth_key}"
         else
-            log_warn "Could not generate pre-auth key. Create manually."
+            log_error "Could not generate Headscale pre-auth key for '${username}'."
+            log_error "Refusing to mark VPN user as created without a usable login credential."
+            return 1
         fi
     else
         log_warn "Headscale CLI not found. Cannot create user."
@@ -1333,8 +1386,14 @@ deploy_vpn() {
 
     # ----- Prerequisites -----
     print_section "Step 1/5: Prerequisites"
-    detect_system
-    _vpn_check_prerequisites
+    if ! detect_system; then
+        log_error "Failed to detect system environment. Cannot continue with VPN deployment."
+        return 1
+    fi
+    if ! _vpn_check_prerequisites; then
+        log_error "VPN prerequisites check failed. Cannot continue with VPN deployment."
+        return 1
+    fi
 
     # ----- Choose VPN type -----
     print_section "Step 2/5: Select VPN Solution"
@@ -1347,19 +1406,34 @@ deploy_vpn() {
 
     # ----- Network configuration -----
     print_section "Step 3/5: Network Configuration"
-    setup_vpn_network
+    if ! setup_vpn_network; then
+        log_error "VPN network configuration failed. Cannot continue with VPN deployment."
+        return 1
+    fi
 
     # ----- Deploy VPN server -----
     print_section "Step 4/5: VPN Server Deployment"
 
     case "${vpn_choice}" in
         1)
-            _vpn_install_wireguard
-            _vpn_generate_server_keys
-            _vpn_deploy_firezone
+            if ! _vpn_install_wireguard; then
+                log_error "WireGuard installation failed. Cannot continue with VPN deployment."
+                return 1
+            fi
+            if ! _vpn_generate_server_keys; then
+                log_error "WireGuard server key generation failed. Cannot continue with VPN deployment."
+                return 1
+            fi
+            if ! _vpn_deploy_firezone; then
+                log_error "Firezone deployment failed. Cannot continue with VPN deployment."
+                return 1
+            fi
             ;;
         2)
-            _vpn_deploy_headscale
+            if ! _vpn_deploy_headscale; then
+                log_error "Headscale deployment failed. Cannot continue with VPN deployment."
+                return 1
+            fi
             ;;
         *)
             die "Invalid VPN choice: ${vpn_choice}"
@@ -1368,7 +1442,10 @@ deploy_vpn() {
 
     # ----- Firewall -----
     print_section "Step 5/5: Firewall Configuration"
-    setup_vpn_firewall
+    if ! setup_vpn_firewall; then
+        log_error "VPN firewall configuration failed. Cannot continue with VPN deployment."
+        return 1
+    fi
 
     # ----- Final summary -----
     print_section "VPN Deployment Complete"

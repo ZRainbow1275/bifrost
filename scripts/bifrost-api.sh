@@ -206,6 +206,9 @@ deploy_bifrost_api() {
     if ! docker compose version &>/dev/null; then
         die "Docker Compose plugin is required. Install docker-compose-plugin."
     fi
+    if ! require_docker_server_version "20.10.0" "Bifrost API Docker host-gateway mapping"; then
+        return 1
+    fi
     log_success "Docker and Compose are available."
 
     # --- Step 2: Check NewAPI ---
@@ -241,10 +244,22 @@ deploy_bifrost_api() {
     log_info "[4/7] Generating Bifrost API admin key..."
     local bifrost_admin_key=""
     local env_file="${BIFROST_API_DIR}/.env"
+    local public_base_url=""
+    local allow_self_register="true"
+    local default_quota="100"
+    local max_register_per_day="50"
+    local rate_limit_per_minute="30"
+    local cors_allow_origins=""
 
     # Reuse existing key if .env already exists
     if [[ -f "${env_file}" ]]; then
         bifrost_admin_key="$(grep '^BIFROST_ADMIN_KEY=' "${env_file}" 2>/dev/null | cut -d'=' -f2-)" || bifrost_admin_key=""
+        public_base_url="$(grep '^BIFROST_PUBLIC_BASE_URL=' "${env_file}" 2>/dev/null | cut -d'=' -f2-)" || public_base_url=""
+        allow_self_register="$(grep '^BIFROST_ALLOW_SELF_REGISTER=' "${env_file}" 2>/dev/null | cut -d'=' -f2-)" || allow_self_register="true"
+        default_quota="$(grep '^BIFROST_DEFAULT_QUOTA=' "${env_file}" 2>/dev/null | cut -d'=' -f2-)" || default_quota="100"
+        max_register_per_day="$(grep '^BIFROST_MAX_REGISTER_PER_DAY=' "${env_file}" 2>/dev/null | cut -d'=' -f2-)" || max_register_per_day="50"
+        rate_limit_per_minute="$(grep '^BIFROST_RATE_LIMIT_PER_MINUTE=' "${env_file}" 2>/dev/null | cut -d'=' -f2-)" || rate_limit_per_minute="30"
+        cors_allow_origins="$(grep '^BIFROST_CORS_ALLOW_ORIGINS=' "${env_file}" 2>/dev/null | cut -d'=' -f2-)" || cors_allow_origins=""
     fi
 
     if [[ -z "${bifrost_admin_key}" ]]; then
@@ -262,19 +277,61 @@ deploy_bifrost_api() {
 
     # --- Step 5: Create .env file ---
     log_info "[5/7] Writing environment configuration..."
+    if [[ -z "${public_base_url}" ]] && [[ -f /root/server-a-domain.conf ]]; then
+        # shellcheck source=/root/server-a-domain.conf
+        source /root/server-a-domain.conf
+        if [[ -n "${DOMAIN:-}" ]]; then
+            public_base_url="https://${DOMAIN}"
+        fi
+    fi
+
+    while true; do
+        local prompt_suffix=""
+        if [[ -n "${public_base_url}" ]]; then
+            prompt_suffix=" [${public_base_url}]"
+        fi
+
+        read -r -p "$(echo -e "${CYAN}Enter public AI gateway URL for users${prompt_suffix}: ${NC}")" public_base_url_input
+        public_base_url_input="${public_base_url_input:-${public_base_url}}"
+        public_base_url_input="$(echo "${public_base_url_input}" | tr -d '[:space:]')"
+        public_base_url_input="${public_base_url_input%/}"
+
+        if [[ "${public_base_url_input}" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?$ ]]; then
+            public_base_url="${public_base_url_input}"
+            break
+        fi
+
+        log_error "Invalid public URL. Example: https://ai.your-company.com"
+    done
+
     cat > "${env_file}" <<ENV_EOF
 # Bifrost API - Environment Configuration
 # Generated: $(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
+# NewAPI base URL from the container's perspective
+BIFROST_NEWAPI_BASE_URL=http://host.docker.internal:3000
+
 # NewAPI admin token
-NEWAPI_ADMIN_TOKEN=${admin_token}
+BIFROST_NEWAPI_ADMIN_TOKEN=${admin_token}
 
 # Bifrost API admin key (for X-Admin-Key header)
 BIFROST_ADMIN_KEY=${bifrost_admin_key}
 
+# Public AI gateway URL returned to registered users
+BIFROST_PUBLIC_BASE_URL=${public_base_url}
+
 # Registration settings
-ALLOW_SELF_REGISTER=true
-DEFAULT_QUOTA=100
+BIFROST_ALLOW_SELF_REGISTER=${allow_self_register}
+BIFROST_DEFAULT_QUOTA=${default_quota}
+BIFROST_MAX_REGISTER_PER_DAY=${max_register_per_day}
+BIFROST_RATE_LIMIT_PER_MINUTE=${rate_limit_per_minute}
+
+# Persist registration counters across container restarts
+BIFROST_REGISTRATION_STATE_FILE=/data/registration-state.json
+
+# Leave empty for same-origin only access
+BIFROST_CORS_ALLOW_ORIGINS=${cors_allow_origins}
+BIFROST_CORS_ALLOW_CREDENTIALS=false
 ENV_EOF
     chmod 600 "${env_file}"
     log_success "Environment file created: ${env_file}"
@@ -312,12 +369,12 @@ ENV_EOF
 
     # --- Step 7: Health check ---
     log_info "[7/7] Verifying deployment..."
-    if _ba_wait_for_health 45; then
-        log_success "Bifrost API is healthy and running."
-    else
-        log_warn "Health check timed out. The service may still be starting."
+    if ! _ba_wait_for_health 45; then
+        log_error "Bifrost API health check timed out. Refusing to print deployment summary before the service is reachable."
         log_info "Check logs with: docker compose -f ${BIFROST_API_DIR}/docker-compose.yml logs"
+        return 1
     fi
+    log_success "Bifrost API is healthy and running."
 
     # --- Print access information ---
     echo ""
@@ -329,11 +386,13 @@ ENV_EOF
     echo "  API Docs:        http://127.0.0.1:${BIFROST_API_PORT}/docs"
     echo "  Health Check:    http://127.0.0.1:${BIFROST_API_PORT}/health"
     echo ""
+    echo "  Public API URL:  ${public_base_url}/v1"
+    echo ""
     echo "  Admin Key:       ${bifrost_admin_key}"
     echo ""
     echo "  If Caddy is configured with /manage/ proxy:"
-    echo "    API Docs:      https://YOUR_DOMAIN/manage/docs"
-    echo "    Registration:  https://YOUR_DOMAIN/manage/register"
+    echo "    API Docs:      ${public_base_url}/manage/docs"
+    echo "    Registration:  ${public_base_url}/manage/register"
     echo ""
     echo "  Management Commands:"
     echo "    View logs:     cd ${BIFROST_API_DIR} && docker compose logs -f"
@@ -421,12 +480,16 @@ _ba_restart() {
     fi
 
     log_info "Restarting Bifrost API..."
-    cd "${BIFROST_API_DIR}" && docker compose restart
+    if ! (cd "${BIFROST_API_DIR}" && docker compose restart); then
+        log_error "Failed to restart Bifrost API container."
+        return 1
+    fi
 
     if _ba_wait_for_health 30; then
         log_success "Bifrost API restarted successfully."
     else
-        log_warn "Service restarted but health check timed out."
+        log_error "Bifrost API restart health check timed out."
+        return 1
     fi
 }
 
@@ -447,8 +510,15 @@ _ba_uninstall() {
     # Stop and remove container
     if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${BIFROST_API_CONTAINER}$"; then
         log_info "Stopping and removing Bifrost API container..."
-        cd "${BIFROST_API_DIR}" && docker compose down --rmi local 2>/dev/null || \
-            docker rm -f "${BIFROST_API_CONTAINER}" 2>/dev/null || true
+        if ! (cd "${BIFROST_API_DIR}" && docker compose down --rmi local 2>/dev/null) && \
+           ! docker rm -f "${BIFROST_API_CONTAINER}" 2>/dev/null; then
+            log_error "Failed to remove Bifrost API container."
+            return 1
+        fi
+        if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${BIFROST_API_CONTAINER}$"; then
+            log_error "Bifrost API container still exists after removal attempt."
+            return 1
+        fi
         log_success "Container removed."
     else
         log_info "No container to remove."
@@ -458,7 +528,10 @@ _ba_uninstall() {
     local env_file="${BIFROST_API_DIR}/.env"
     if [[ -f "${env_file}" ]]; then
         if confirm_action "Remove configuration file (.env)?"; then
-            rm -f "${env_file}"
+            if ! rm -f "${env_file}"; then
+                log_error "Failed to remove configuration file: ${env_file}"
+                return 1
+            fi
             log_success "Configuration file removed."
         else
             log_info "Configuration file preserved at: ${env_file}"

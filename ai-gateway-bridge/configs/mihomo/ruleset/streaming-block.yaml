@@ -1,0 +1,133 @@
+# =============================================================================
+# AI Gateway Bridge - Streaming Services Block Ruleset for Mihomo
+# =============================================================================
+# Format: Mihomo classical ruleset
+# Purpose: Block streaming, social media, and other non-work domains to
+#          prevent abuse of the AI proxy tunnel.
+#
+# These domains are routed to the REJECT group (blackholed).
+# Mirrors the block rules from configs/xray/client.json.tpl
+# =============================================================================
+payload:
+  # =========================================================================
+  # Video Streaming - Netflix
+  # =========================================================================
+  - DOMAIN-SUFFIX,netflix.com
+  - DOMAIN-SUFFIX,netflix.net
+  - DOMAIN-SUFFIX,nflxvideo.net
+  - DOMAIN-SUFFIX,nflxso.net
+  - DOMAIN-SUFFIX,nflxext.com
+  - DOMAIN-SUFFIX,nflximg.net
+
+  # =========================================================================
+  # Video Streaming - YouTube
+  # =========================================================================
+  - DOMAIN-SUFFIX,youtube.com
+  - DOMAIN-SUFFIX,youtu.be
+  - DOMAIN-SUFFIX,googlevideo.com
+  - DOMAIN-SUFFIX,ytimg.com
+  - DOMAIN-SUFFIX,yt3.ggpht.com
+
+  # =========================================================================
+  # Video Streaming - Twitch
+  # =========================================================================
+  - DOMAIN-SUFFIX,twitch.tv
+  - DOMAIN-SUFFIX,ttvnw.net
+  - DOMAIN-SUFFIX,jtvnw.net
+
+  # =========================================================================
+  # Video Streaming - Disney+
+  # =========================================================================
+  - DOMAIN-SUFFIX,disneyplus.com
+  - DOMAIN-SUFFIX,disney-plus.net
+  - DOMAIN-SUFFIX,bamgrid.com
+  - DOMAIN-SUFFIX,dssott.com
+
+  # =========================================================================
+  # Video Streaming - HBO
+  # =========================================================================
+  - DOMAIN-SUFFIX,hbo.com
+  - DOMAIN-SUFFIX,hbonow.com
+  - DOMAIN-SUFFIX,hbomax.com
+
+  # =========================================================================
+  # Video Streaming - Hulu
+  # =========================================================================
+  - DOMAIN-SUFFIX,hulu.com
+  - DOMAIN-SUFFIX,hulustream.com
+
+  # =========================================================================
+  # Video Streaming - Amazon Prime Video
+  # =========================================================================
+  - DOMAIN-SUFFIX,primevideo.com
+  - DOMAIN-SUFFIX,amazonvideo.com
+
+  # =========================================================================
+  # Music Streaming - Spotify
+  # =========================================================================
+  - DOMAIN-SUFFIX,spotify.com
+  - DOMAIN-SUFFIX,spotifycdn.com
+  - DOMAIN-SUFFIX,scdn.co
+
+  # =========================================================================
+  # Music Streaming - Tidal
+  # =========================================================================
+  - DOMAIN-SUFFIX,tidal.com
+  - DOMAIN-SUFFIX,tidalhifi.com
+
+  # =========================================================================
+  # Social Media - TikTok
+  # =========================================================================
+  - DOMAIN-SUFFIX,tiktok.com
+  - DOMAIN-SUFFIX,tiktokv.com
+  - DOMAIN-SUFFIX,musical.ly
+
+  # =========================================================================
+  # Social Media - Instagram / Facebook (Meta)
+  # =========================================================================
+  - DOMAIN-SUFFIX,instagram.com
+  - DOMAIN-SUFFIX,cdninstagram.com
+  - DOMAIN-SUFFIX,facebook.com
+  - DOMAIN-SUFFIX,fbcdn.net
+
+  # =========================================================================
+  # Social Media - Twitter / X
+  # =========================================================================
+  - DOMAIN-SUFFIX,twitter.com
+  - DOMAIN-SUFFIX,x.com
+  - DOMAIN-SUFFIX,twimg.com
+
+  # =========================================================================
+  # Social Media - Reddit
+  # =========================================================================
+  - DOMAIN-SUFFIX,reddit.com
+  - DOMAIN-SUFFIX,redd.it
+  - DOMAIN-SUFFIX,redditstatic.com
+
+  # =========================================================================
+  # Adult Content
+  # =========================================================================
+  - DOMAIN-SUFFIX,pornhub.com
+  - DOMAIN-SUFFIX,xvideos.com
+  - DOMAIN-SUFFIX,xhamster.com
+
+  # =========================================================================
+  # Torrent / P2P Trackers
+  # =========================================================================
+  - DOMAIN-KEYWORD,torrent
+  - DOMAIN-KEYWORD,tracker
+  - DOMAIN-SUFFIX,thepiratebay.org
+  - DOMAIN-SUFFIX,1337x.to
+  - DOMAIN-SUFFIX,rarbg.to
+  - DOMAIN-SUFFIX,nyaa.si
+
+  # =========================================================================
+  # Gaming Platforms (bandwidth-heavy)
+  # =========================================================================
+  - DOMAIN-SUFFIX,steampowered.com
+  - DOMAIN-SUFFIX,steamcommunity.com
+  - DOMAIN-SUFFIX,steamstatic.com
+  - DOMAIN-SUFFIX,epicgames.com
+  - DOMAIN-SUFFIX,origin.com
+  - DOMAIN-SUFFIX,battle.net
+  - DOMAIN-SUFFIX,blizzard.com

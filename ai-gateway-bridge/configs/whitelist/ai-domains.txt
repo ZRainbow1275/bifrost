@@ -1,0 +1,120 @@
+###############################################################################
+# AI Gateway Bridge - AI Service Domain Whitelist
+#
+# This file contains all domains that should be routed through the proxy tunnel.
+# Used by Xray routing rules to selectively forward only AI-related traffic.
+#
+# Format: one domain per line
+# Lines starting with # are comments
+# Empty lines are ignored
+#
+# IMPORTANT: Only add domains that are necessary for AI development tools.
+# Streaming services (Netflix, YouTube, etc.) are explicitly excluded.
+###############################################################################
+
+# =============================================================================
+# Anthropic (Claude AI)
+# Claude Code, Claude API, Claude Web, Console
+# =============================================================================
+api.anthropic.com
+claude.ai
+console.anthropic.com
+statsig.anthropic.com
+sentry.io
+
+# =============================================================================
+# OpenAI (GPT, Codex CLI, ChatGPT)
+# API endpoint, CDN for assets, Platform dashboard, ChatGPT web
+# =============================================================================
+api.openai.com
+cdn.openai.com
+platform.openai.com
+chat.openai.com
+auth0.openai.com
+
+# =============================================================================
+# Google (Gemini, AI Studio)
+# Generative Language API, AI Studio web UI, Google AI developer portal
+# =============================================================================
+generativelanguage.googleapis.com
+aistudio.google.com
+ai.google.dev
+alkalimakersuite-pa.clients6.google.com
+makersuite-pa.googleapis.com
+
+# =============================================================================
+# DeepSeek
+# DeepSeek API for code generation and chat
+# =============================================================================
+api.deepseek.com
+
+# =============================================================================
+# Mistral AI
+# Mistral API endpoint for language models
+# =============================================================================
+api.mistral.ai
+
+# =============================================================================
+# Groq
+# Groq API for high-speed LLM inference
+# =============================================================================
+api.groq.com
+
+# =============================================================================
+# GitHub / Copilot
+# GitHub API, Copilot proxy, GitHub web (for Copilot auth and code search)
+# =============================================================================
+api.github.com
+copilot-proxy.githubusercontent.com
+github.com
+copilot.github.com
+githubcopilot.com
+default.exp-tas.com
+
+# =============================================================================
+# Hugging Face
+# Model hub, Inference API for running models
+# =============================================================================
+huggingface.co
+api-inference.huggingface.co
+cdn-lfs.huggingface.co
+
+# =============================================================================
+# Cohere
+# Cohere API for embeddings, generation, and reranking
+# =============================================================================
+api.cohere.ai
+api.cohere.com
+
+# =============================================================================
+# Perplexity AI
+# Perplexity API for search-augmented generation
+# =============================================================================
+api.perplexity.ai
+
+# =============================================================================
+# Together AI
+# Together API for open-source model hosting and inference
+# =============================================================================
+api.together.xyz
+api.together.ai
+
+# =============================================================================
+# Package Registries (Development Tool Dependencies)
+# Required for npm, pip, cargo package installation
+# =============================================================================
+registry.npmjs.org
+pypi.org
+files.pythonhosted.org
+crates.io
+static.crates.io
+
+# =============================================================================
+# Additional Development Infrastructure
+# Container registries and other dev tools
+# =============================================================================
+registry.docker.com
+docker.io
+registry-1.docker.io
+production.cloudflare.docker.com
+ghcr.io

@@ -27,6 +27,8 @@ async def get_newapi_client() -> NewAPIClient:
     Lazily instantiated on first call using the current settings.
     """
     global _client
+    if not settings.newapi_admin_token.strip():
+        raise HTTPException(status_code=503, detail="服务端未配置 NewAPI 管理令牌")
     if _client is None:
         _client = NewAPIClient(
             settings.newapi_base_url,
@@ -36,13 +38,17 @@ async def get_newapi_client() -> NewAPIClient:
 
 
 async def require_admin(
-    x_admin_key: str = Header(..., alias="X-Admin-Key"),
+    x_admin_key: str | None = Header(None, alias="X-Admin-Key"),
 ) -> str:
     """Dependency that enforces admin authentication.
 
-    Raises 403 if the provided ``X-Admin-Key`` header does not match
-    the configured ``admin_key``.
+    Returns 401 when the header is missing, 403 when it is present but invalid,
+    and 503 when the service is misconfigured without an admin key.
     """
-    if not settings.admin_key or x_admin_key != settings.admin_key:
+    if not settings.admin_key:
+        raise HTTPException(status_code=503, detail="服务端未配置管理密钥")
+    if x_admin_key is None:
+        raise HTTPException(status_code=401, detail="缺少管理密钥")
+    if x_admin_key != settings.admin_key:
         raise HTTPException(status_code=403, detail="无效的管理密钥")
     return x_admin_key

@@ -923,15 +923,29 @@ setup_dest_rotation_cron() {
     local cron_schedule="17 3 * * 0"
     local cron_line="${cron_schedule} ${ROTATE_CRON_SCRIPT} >> ${ROTATE_LOG_FILE} 2>&1"
     local cron_marker="# bifrost: dest rotation"
+    local current_crontab=""
+    local updated_crontab=""
+
+    if ! command_exists crontab; then
+        log_error "crontab command not found. Cannot install rotation schedule."
+        return 1
+    fi
 
     # Remove any existing cron entry for this script
-    crontab -l 2>/dev/null | grep -v "${ROTATE_CRON_SCRIPT}" | grep -v "${cron_marker}" | crontab - 2>/dev/null || true
+    current_crontab="$(crontab -l 2>/dev/null)" || current_crontab=""
+    updated_crontab="$(printf '%s\n' "${current_crontab}" | grep -vF "${ROTATE_CRON_SCRIPT}" | grep -vF "${cron_marker}" || true)"
 
     # Add the new entry
-    (crontab -l 2>/dev/null; echo "${cron_marker}"; echo "${cron_line}") | crontab -
+    {
+        if [[ -n "${updated_crontab}" ]]; then
+            printf '%s\n' "${updated_crontab}"
+        fi
+        printf '%s\n%s\n' "${cron_marker}" "${cron_line}"
+    } | crontab -
 
     # Verify installation
-    if crontab -l 2>/dev/null | grep -q "${ROTATE_CRON_SCRIPT}"; then
+    current_crontab="$(crontab -l 2>/dev/null)" || current_crontab=""
+    if grep -qF "${ROTATE_CRON_SCRIPT}" <<<"${current_crontab}"; then
         log_success "Cron job installed: ${cron_schedule} (weekly Sunday 03:17 UTC)"
         log_info "Rotation script: ${ROTATE_CRON_SCRIPT}"
         log_info "Rotation log: ${ROTATE_LOG_FILE}"
