@@ -153,7 +153,9 @@ Short ID:     (空或 0123456789abcdef)
 
 - 确保 Server B 已部署完成
 - 准备好 Server B 的连接信息
-- (推荐) 准备一个 ICP 备案域名
+- TLS 入口二选一：
+  - 长期生产推荐：准备一个 ICP 备案域名，使用默认 `BIFROST_SERVER_A_TLS_MODE=domain`
+  - 腾讯云等暂不绑定域名的真实测试：使用 `BIFROST_SERVER_A_TLS_MODE=ip`，脚本会通过 Certbot 5.4+ 申请 Let's Encrypt 短生命周期 IP 证书，并把证书显式接入 Caddy
 
 ### 2.2 运行部署
 
@@ -166,7 +168,14 @@ git clone https://github.com/ZRainbow1275/bifrost.git
 cd bifrost
 chmod +x install.sh scripts/*.sh
 
-# 运行
+# 域名模式（默认）：需要域名解析到 Server A，并满足国内服务器备案前提
+sudo ./install.sh
+
+# IP HTTPS 模式：不绑定域名，用 Server A 公网 IPv4 申请 Let's Encrypt IP 证书
+# 证书有效期约 160 小时，脚本会配置 8 小时一次的 certbot renew timer
+export BIFROST_SERVER_A_TLS_MODE=ip
+export BIFROST_SERVER_A_PUBLIC_IP=<SERVER_A_PUBLIC_IPV4>
+export BIFROST_ACME_EMAIL=<your-email@example.com>  # 可选，但推荐
 sudo ./install.sh
 ```
 
@@ -183,7 +192,7 @@ sudo ./install.sh
 5. **Docker 安装** — 安装 Docker CE
 6. **New API 部署** — Docker Compose 部署 AI API 网关
 7. **伪装网站部署** — 正常企业网站
-8. **Caddy 部署** — 反向代理到 New API
+8. **Caddy 部署** — 反向代理到 New API；域名模式走 Caddy 自动证书，IP 模式走 Certbot `shortlived` IP 证书
 9. **Netdata 监控**
 10. **连通性测试** — 自动测试隧道和 API 网关
 
@@ -191,9 +200,33 @@ sudo ./install.sh
 
 部署完成后将显示：
 - New API 管理面板地址
-- 默认管理员账号密码
 - API 端点地址
 - 用户配置示例
+
+注意：New API 管理员账号由首次访问初始化页面时创建，脚本不会再输出或假定共享默认密码。
+
+### 2.5 无备案域名时的 IP HTTPS 模式
+
+当 Server A 位于腾讯云等国内云厂商且暂不绑定备案域名时，可以显式启用 IP HTTPS：
+
+```bash
+export BIFROST_SERVER_A_TLS_MODE=ip
+export BIFROST_SERVER_A_PUBLIC_IP=<SERVER_A_PUBLIC_IPV4>
+export BIFROST_ACME_EMAIL=<your-email@example.com>
+sudo ./install.sh
+# 选择「2. 部署国内服务器 (Server A)」
+```
+
+这个模式的部署合同：
+
+- 使用 Let's Encrypt IP address certificate，必须请求 `shortlived` profile。
+- 依赖 Certbot 5.4+ 的 `--ip-address` 与 `--webroot` 支持；Ubuntu 22.04 默认 apt 源可能版本不足，脚本默认用 snap 安装/更新 Certbot。
+- 证书路径为 `/etc/letsencrypt/live/<SERVER_A_PUBLIC_IPV4>/fullchain.pem` 和 `/etc/letsencrypt/live/<SERVER_A_PUBLIC_IPV4>/privkey.pem`，Caddy 通过 `tls <fullchain> <privkey>` 显式加载。
+- 证书有效期约 160 小时，脚本会保留 HTTP-01 challenge webroot，并创建 `bifrost-certbot-renew.timer` 每 8 小时尝试续期。
+- 云安全组和系统防火墙必须允许公网访问 Server A 的 `80/tcp` 与 `443/tcp`；`80/tcp` 不开放会导致续期失败。
+- IP 变化后必须重新运行 Server A Caddy/IP 证书配置，旧 IP 证书不会自动覆盖新 IP。
+
+域名模式仍是长期生产推荐路径；IP HTTPS 模式用于没有备案域名时把真实服务器测试链路先跑通。
 
 ---
 

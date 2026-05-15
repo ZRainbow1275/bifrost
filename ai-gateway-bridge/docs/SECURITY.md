@@ -88,7 +88,8 @@
 | 每月 | 更新所有组件 | 见 USAGE.md 更新组件部分 |
 | 每月 | 轮换管理面板密码 | New API/3x-ui 面板设置 |
 | 每季度 | 审计 API Key 使用情况 | New API 面板 → 日志 |
-| 每季度 | 检查 SSL 证书有效期 | `caddy list-certificates` |
+| 每季度 | 检查域名 SSL 证书有效期 | `caddy list-certificates` |
+| 每日 | IP HTTPS 模式检查短生命周期证书续期 | `systemctl is-active bifrost-certbot-renew.timer && certbot certificates --cert-name <SERVER_A_PUBLIC_IPV4>` |
 
 ### API Key 管理
 

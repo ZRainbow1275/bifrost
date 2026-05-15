@@ -219,10 +219,14 @@ test_ports() {
        grep -q 'New API static assets require VPN/private access in vpn-first profile' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
        grep -q 'New API static assets require VPN/private access in vpn-first profile' "${SCRIPT_DIR}/scripts/server-a.sh" && \
        grep -q 'Bifrost management requires VPN/private access in vpn-first profile' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
-       grep -q 'Bifrost management requires VPN/private access in vpn-first profile' "${SCRIPT_DIR}/scripts/server-a.sh"; then
-        record_pass "Server A /manage 前缀与 vpn-first 暴露面在模板与运行脚本中一致"
+       grep -q 'Bifrost management requires VPN/private access in vpn-first profile' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -q 'tls {{TLS_CERT_FILE}} {{TLS_KEY_FILE}}' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -q 'server_a_caddy_tls_block' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -q -- '--preferred-profile shortlived' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -q -- '--ip-address "$public_ip"' "${SCRIPT_DIR}/scripts/server-a.sh"; then
+        record_pass "Server A /manage 前缀、vpn-first 暴露面与 IP HTTPS 证书合同在模板与运行脚本中一致"
     else
-        record_fail "Server A /manage 前缀与 vpn-first 暴露面在模板与运行脚本中不一致"
+        record_fail "Server A /manage 前缀、vpn-first 暴露面与 IP HTTPS 证书合同在模板与运行脚本中不一致"
     fi
 
     # Server B panel path and exposure-profile parity

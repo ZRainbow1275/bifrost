@@ -2177,7 +2177,8 @@ _check_server_a_caddy_generation() {
     temp_root="$(mktemp -d)"
     fakebin="${temp_root}/bin"
     workdir="${temp_root}/server-a"
-    mkdir -p "${fakebin}" "${workdir}" "${temp_root}/caddy" "${temp_root}/www" "${temp_root}/logs/caddy"
+    mkdir -p "${fakebin}" "${workdir}" "${temp_root}/caddy" "${temp_root}/www" "${temp_root}/logs/caddy" \
+        "${temp_root}/acme" "${temp_root}/letsencrypt/live" "${temp_root}/renewal-hooks" "${temp_root}/systemd"
     cp "${SCRIPT_DIR}/${source_dir}/server-a.sh" "${workdir}/server-a.sh"
     cp "${SCRIPT_DIR}/${source_dir}/common.sh" "${workdir}/common.sh"
     sed -i "s|^readonly CADDY_CONFIG=.*$|readonly CADDY_CONFIG=\"${temp_root}/caddy/Caddyfile\"|" "${workdir}/server-a.sh"
@@ -2195,6 +2196,38 @@ esac
 EOF
     chmod +x "${fakebin}/caddy"
 
+    cat > "${fakebin}/certbot" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+    echo "certbot 5.4.0"
+    exit 0
+fi
+printf '%s\n' "$*" >> "${BIFROST_FAKE_CERTBOT_LOG}"
+if [[ "${1:-}" == "certonly" ]]; then
+    ip=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --ip-address|--cert-name)
+                ip="$2"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+    mkdir -p "${BIFROST_LETSENCRYPT_LIVE_DIR}/${ip}"
+    printf 'fake cert\n' > "${BIFROST_LETSENCRYPT_LIVE_DIR}/${ip}/fullchain.pem"
+    printf 'fake key\n' > "${BIFROST_LETSENCRYPT_LIVE_DIR}/${ip}/privkey.pem"
+    exit 0
+fi
+if [[ "${1:-}" == "renew" ]]; then
+    exit 0
+fi
+exit 0
+EOF
+    chmod +x "${fakebin}/certbot"
+
     cat > "${fakebin}/systemctl" <<'EOF'
 #!/usr/bin/env bash
 exit 0
@@ -2203,6 +2236,12 @@ EOF
 
     if BIFROST_TRACE_COMMON_LOAD=0 \
         PATH="${fakebin}:${PATH}" \
+        TEMP_ROOT="${temp_root}" \
+        BIFROST_ACME_WEBROOT="${temp_root}/acme" \
+        BIFROST_LETSENCRYPT_LIVE_DIR="${temp_root}/letsencrypt/live" \
+        BIFROST_LETSENCRYPT_RENEWAL_HOOK_DIR="${temp_root}/renewal-hooks" \
+        BIFROST_SYSTEMD_SYSTEM_DIR="${temp_root}/systemd" \
+        BIFROST_FAKE_CERTBOT_LOG="${temp_root}/certbot.log" \
         SERVER_A_SH="${workdir}/server-a.sh" \
         bash -c '
             set -euo pipefail
@@ -2237,11 +2276,32 @@ EOF
             grep -Fq "handle /logo.png" "$CADDY_CONFIG"
             grep -q "handle /dashboard" "$CADDY_CONFIG"
             ! grep -q "Bifrost management requires VPN/private access in vpn-first profile" "$CADDY_CONFIG"
+
+            BIFROST_SERVER_A_TLS_MODE=ip \
+            BIFROST_SERVER_A_PUBLIC_IP="203.0.113.10" \
+            BIFROST_ACME_EMAIL="ops@example.com" \
+            BIFROST_ACME_WEBROOT="${TEMP_ROOT}/acme" \
+            BIFROST_LETSENCRYPT_LIVE_DIR="${TEMP_ROOT}/letsencrypt/live" \
+            BIFROST_LETSENCRYPT_RENEWAL_HOOK_DIR="${TEMP_ROOT}/renewal-hooks" \
+            BIFROST_SYSTEMD_SYSTEM_DIR="${TEMP_ROOT}/systemd" \
+            BIFROST_FAKE_CERTBOT_LOG="${TEMP_ROOT}/certbot.log" \
+            setup_caddy_a >/dev/null
+
+            grep -q "# TLS mode: ip" "$CADDY_CONFIG"
+            grep -q "https://203.0.113.10 {" "$CADDY_CONFIG"
+            grep -Fq "tls ${TEMP_ROOT}/letsencrypt/live/203.0.113.10/fullchain.pem ${TEMP_ROOT}/letsencrypt/live/203.0.113.10/privkey.pem" "$CADDY_CONFIG"
+            grep -q "http://203.0.113.10 {" "$CADDY_CONFIG"
+            grep -Fq "root * ${TEMP_ROOT}/acme" "$CADDY_CONFIG"
+            grep -q "ENDPOINT_MODE=ip" "${TEMP_ROOT}/server-a-domain.conf"
+            grep -q "SERVER_A_BASE_URL=https://203.0.113.10" "${TEMP_ROOT}/server-a-domain.conf"
+            grep -q -- "--preferred-profile shortlived" "${TEMP_ROOT}/certbot.log"
+            grep -q -- "--ip-address 203.0.113.10" "${TEMP_ROOT}/certbot.log"
+            grep -q "cert-name 203.0.113.10" "${TEMP_ROOT}/systemd/bifrost-certbot-renew.service"
             exit 0
         '; then
-        record_pass "${label} Server A Caddyfile 生成按 vpn-first/public-managed 区分管理面暴露"
+        record_pass "${label} Server A Caddyfile 生成按 vpn-first/public-managed/IP HTTPS 区分管理面暴露"
     else
-        record_fail "${label} Server A Caddyfile 生成按 vpn-first/public-managed 区分管理面暴露"
+        record_fail "${label} Server A Caddyfile 生成按 vpn-first/public-managed/IP HTTPS 区分管理面暴露"
     fi
 
     rm -rf "${temp_root}"
@@ -5325,10 +5385,14 @@ test_ports() {
        grep -q 'New API static assets require VPN/private access in vpn-first profile' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
        grep -q 'New API static assets require VPN/private access in vpn-first profile' "${SCRIPT_DIR}/scripts/server-a.sh" && \
        grep -q 'Bifrost management requires VPN/private access in vpn-first profile' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
-       grep -q 'Bifrost management requires VPN/private access in vpn-first profile' "${SCRIPT_DIR}/scripts/server-a.sh"; then
-        record_pass "Server A /manage 前缀与 vpn-first 暴露面在模板与运行脚本中一致"
+       grep -q 'Bifrost management requires VPN/private access in vpn-first profile' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -q 'tls {{TLS_CERT_FILE}} {{TLS_KEY_FILE}}' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -q 'server_a_caddy_tls_block' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -q -- '--preferred-profile shortlived' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -q -- '--ip-address "$public_ip"' "${SCRIPT_DIR}/scripts/server-a.sh"; then
+        record_pass "Server A /manage 前缀、vpn-first 暴露面与 IP HTTPS 证书合同在模板与运行脚本中一致"
     else
-        record_fail "Server A /manage 前缀与 vpn-first 暴露面在模板与运行脚本中不一致"
+        record_fail "Server A /manage 前缀、vpn-first 暴露面与 IP HTTPS 证书合同在模板与运行脚本中不一致"
     fi
 
     # Server B panel path and exposure-profile parity

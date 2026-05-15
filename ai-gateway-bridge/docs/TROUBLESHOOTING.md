@@ -147,6 +147,7 @@ journalctl -u caddy -n 50 --no-pager
 
 # 3. 检查证书
 caddy list-certificates
+certbot certificates
 
 # 4. 验证 Caddyfile 语法
 caddy validate --config /etc/caddy/Caddyfile
@@ -157,12 +158,38 @@ ss -tlnp | grep -E ':80|:443'
 # 6. 确认域名解析
 dig your-domain.com
 nslookup your-domain.com
+
+# 7. IP HTTPS 模式：检查短生命周期 IP 证书续期 timer
+systemctl status bifrost-certbot-renew.timer
+systemctl list-timers | grep -E 'bifrost-certbot-renew|certbot'
+certbot renew --dry-run --cert-name <SERVER_A_PUBLIC_IPV4>
 ```
 
 **常见原因：**
 - 域名未解析到服务器 IP
 - 80 端口被占用（证书自动获取需要 80 端口）
 - 国内服务器域名未备案
+- IP HTTPS 模式未开放公网 `80/tcp`，Let's Encrypt HTTP-01 challenge 或后续续期无法到达 Server A
+- Certbot 版本低于 5.4，缺少 `--ip-address` 或 IP webroot 支持
+- Caddyfile 中 IP 模式没有显式加载 `/etc/letsencrypt/live/<IP>/fullchain.pem` 与 `privkey.pem`
+
+### 症状：IP HTTPS 证书 6 天内过期或浏览器提示证书无效
+
+```bash
+# 1. 查看当前证书和到期时间
+certbot certificates --cert-name <SERVER_A_PUBLIC_IPV4>
+openssl x509 -in /etc/letsencrypt/live/<SERVER_A_PUBLIC_IPV4>/fullchain.pem -noout -issuer -dates -ext subjectAltName
+
+# 2. 检查 Bifrost 续期 timer
+systemctl status bifrost-certbot-renew.timer
+journalctl -u bifrost-certbot-renew.service -n 80 --no-pager
+
+# 3. 手动触发一次续期并重载 Caddy
+certbot renew --cert-name <SERVER_A_PUBLIC_IPV4>
+systemctl reload caddy
+```
+
+IP 证书是短生命周期证书，有效期约 160 小时。不要按传统 90 天证书节奏维护；如果 `bifrost-certbot-renew.timer` 没有正常运行，必须先修复 timer、`80/tcp` 可达性和 Certbot 版本。
 
 ---
 

@@ -22,7 +22,7 @@
 ┌─────────────────────────────────────────────────┐
 │                  用户层                          │
 │  Claude Code / Codex CLI / OpenCode / 浏览器     │
-│  配置 API Base URL = https://<domain>/v1         │
+│  配置 API Base URL = https://<domain-or-ip>/v1   │
 │  配置 API Key = sk-xxx (NewAPI 签发)             │
 └────────────────────┬────────────────────────────┘
                      │ WireGuard VPN (UDP:51820)
@@ -190,10 +190,10 @@ bifrost/
   → POST /manage/api/v1/register {"username":"alice"}
   → Bifrost API → NewAPI: POST /api/user (创建用户)
   → Bifrost API → NewAPI: POST /api/token (创建 Token, 绑定用户)
-  → 返回: api_key="sk-xxx", base_url="https://domain/v1"
+  → 返回: api_key="sk-xxx", base_url="https://domain-or-ip/v1"
 
 员工使用 AI 工具
-  → Claude Code 配置: ANTHROPIC_BASE_URL=https://domain/v1, API_KEY=sk-xxx
+  → Claude Code 配置: ANTHROPIC_BASE_URL=https://domain-or-ip/v1, API_KEY=sk-xxx
   → Claude Code → WireGuard VPN → Server A
   → Caddy (:443) → NewAPI (:3000)
   → NewAPI 验证 Token → 选择渠道 → HTTP_PROXY → Mihomo (:7890)

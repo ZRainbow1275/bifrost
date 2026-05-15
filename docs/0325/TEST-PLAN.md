@@ -5,12 +5,12 @@
 | 角色 | OS | 配置 | 网络 |
 |------|------|------|------|
 | Server B (海外) | Ubuntu 22.04 | 1C1G 20GB SSD | 公网 IP, 带宽 ≥ 30Mbps |
-| Server A (国内) | Ubuntu 22.04 | 2C4G 40GB SSD | 公网 IP, 带宽 ≥ 10Mbps, 域名 |
+| Server A (国内) | Ubuntu 22.04 | 2C4G 40GB SSD | 公网 IP, 带宽 ≥ 10Mbps, ICP 备案域名或 IP HTTPS 模式 |
 | 客户端 | 任意 | WireGuard + curl | 可达 Server A |
 
 前置条件:
 - Server A 可 SSH 登录 Server B
-- Server A 有 ICP 备案域名（或跳过 Caddy TLS）
+- Server A 有 ICP 备案域名，或显式启用 `BIFROST_SERVER_A_TLS_MODE=ip` 并开放公网 `80/tcp`、`443/tcp` 申请 Let's Encrypt IP 证书
 - 已修复 AUDIT-REPORT.md 中的 4 个 BLOCKER
 
 说明:
@@ -63,7 +63,7 @@ ss -tlnp | grep xray
 # 1.3 防火墙开放
 ufw status | grep $(ss -tlnp | grep xray | awk '{print $4}' | cut -d: -f2)
 
-# 1.4 Caddy 运行（如启用域名）
+# 1.4 Caddy 运行（域名 TLS 或 IP HTTPS）
 systemctl is-active caddy 2>/dev/null && echo "PASS" || echo "SKIP"
 
 # 1.5 无端口冲突
@@ -109,7 +109,7 @@ curl -s http://127.0.0.1:3000/api/status | python3 -c "import json,sys;print(jso
 # 2.5 ⚠️ 首次访问立即完成初始化
 echo "访问 http://127.0.0.1:3000 或 /dashboard，立即完成 New API 初始化并设置强管理员密码"
 
-# 2.6 Caddy HTTPS (如有域名)
+# 2.6 Caddy HTTPS (域名或 IP HTTPS)
 curl -sI https://<DOMAIN>/api/status | head -3
 ```
 

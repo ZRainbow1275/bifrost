@@ -38,6 +38,10 @@ readonly NEW_API_DIR="/opt/new-api"
 readonly CADDY_CONFIG="/etc/caddy/Caddyfile"
 readonly DECOY_WEBROOT="/var/www/html"
 readonly CADDY_LOG_DIR="/var/log/caddy"
+readonly ACME_WEBROOT="${BIFROST_ACME_WEBROOT:-/var/www/bifrost-acme}"
+readonly LETSENCRYPT_LIVE_DIR="${BIFROST_LETSENCRYPT_LIVE_DIR:-/etc/letsencrypt/live}"
+readonly LETSENCRYPT_RENEWAL_HOOK_DIR="${BIFROST_LETSENCRYPT_RENEWAL_HOOK_DIR:-/etc/letsencrypt/renewal-hooks/deploy}"
+readonly SYSTEMD_SYSTEM_DIR="${BIFROST_SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}"
 
 # ---------------------------------------------------------------------------
 # 1. collect_server_b_info
@@ -179,6 +183,316 @@ validate_ip() {
 validate_port() {
     local port="$1"
     [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 ))
+}
+
+validate_domain_name() {
+    local domain="$1"
+    [[ -n "$domain" && "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$ ]]
+}
+
+server_a_tls_mode() {
+    local mode="${BIFROST_SERVER_A_TLS_MODE:-domain}"
+    case "$mode" in
+        domain|fqdn)
+            echo "domain"
+            ;;
+        ip|ip-cert|ip-address)
+            echo "ip"
+            ;;
+        *)
+            log_error "Invalid BIFROST_SERVER_A_TLS_MODE='${mode}'. Use 'domain' or 'ip'."
+            return 1
+            ;;
+    esac
+}
+
+detect_public_ipv4() {
+    local service ip
+    for service in \
+        "https://api.ipify.org" \
+        "https://ipv4.icanhazip.com" \
+        "https://ifconfig.me/ip"; do
+        ip="$(curl -fsS --connect-timeout 5 --max-time 8 "$service" 2>/dev/null | tr -d '[:space:]')" || true
+        if validate_ip "$ip"; then
+            echo "$ip"
+            return 0
+        fi
+    done
+    return 1
+}
+
+collect_server_a_domain() {
+    local domain=""
+    while true; do
+        read -rp "$(echo -e "${CYAN}Enter your domain name (must be ICP-registered): ${NC}")" domain
+        if validate_domain_name "$domain"; then
+            echo "$domain"
+            return 0
+        fi
+        log_error "Invalid domain name. Please enter a valid FQDN (e.g. api.yourcompany.com)."
+    done
+}
+
+collect_server_a_public_ip() {
+    local public_ip="${BIFROST_SERVER_A_PUBLIC_IP:-}"
+    local detected_ip=""
+
+    if [[ -n "$public_ip" ]]; then
+        if validate_ip "$public_ip"; then
+            echo "$public_ip"
+            return 0
+        fi
+        log_error "BIFROST_SERVER_A_PUBLIC_IP is not a valid IPv4 address: ${public_ip}"
+        return 1
+    fi
+
+    detected_ip="$(detect_public_ipv4 || true)"
+    while true; do
+        if [[ -n "$detected_ip" ]]; then
+            read -rp "$(echo -e "${CYAN}Enter this server's public IPv4 address [${detected_ip}]: ${NC}")" public_ip
+            public_ip="${public_ip:-$detected_ip}"
+        else
+            read -rp "$(echo -e "${CYAN}Enter this server's public IPv4 address: ${NC}")" public_ip
+        fi
+        if validate_ip "$public_ip"; then
+            echo "$public_ip"
+            return 0
+        fi
+        log_error "Invalid IPv4 address. Let's Encrypt IP mode currently requires the public IPv4 that reaches this Server A."
+    done
+}
+
+version_ge() {
+    local current="$1"
+    local required="$2"
+    [[ "$current" == "$required" ]] && return 0
+    [[ "$(printf '%s\n%s\n' "$required" "$current" | sort -V | head -n1)" == "$required" ]]
+}
+
+install_certbot_ip_support() {
+    local required_version="5.4"
+    local current_version=""
+
+    if command -v certbot &>/dev/null; then
+        current_version="$(certbot --version 2>/dev/null | awk '{print $2}')"
+        if [[ -n "$current_version" ]] && version_ge "$current_version" "$required_version"; then
+            log_info "Certbot is already installed: ${current_version}"
+            return 0
+        fi
+        log_warn "Certbot ${current_version:-unknown} does not provide the required IP-certificate webroot support. Need ${required_version}+."
+    fi
+
+    local method="${BIFROST_CERTBOT_INSTALL_METHOD:-snap}"
+    case "$method" in
+        snap)
+            log_info "Installing Certbot ${required_version}+ via snap..."
+            if ! command -v snap &>/dev/null; then
+                if [[ "$(detect_os_family)" != "debian" ]]; then
+                    log_error "snap is not installed and automatic snapd installation is only supported on Debian/Ubuntu hosts."
+                    return 1
+                fi
+                apt-get update -qq
+                apt-get install -y -qq snapd
+            fi
+            snap install core 2>/dev/null || snap refresh core
+            if snap list certbot &>/dev/null; then
+                snap refresh certbot
+            else
+                snap install --classic certbot
+            fi
+            ln -sf /snap/bin/certbot /usr/bin/certbot
+            ;;
+        apt)
+            log_warn "Installing Certbot via apt. Ubuntu 22.04 default repositories may lag behind the required ${required_version}+ release."
+            apt-get update -qq
+            apt-get install -y -qq certbot
+            ;;
+        none)
+            log_error "BIFROST_CERTBOT_INSTALL_METHOD=none requires a preinstalled certbot ${required_version}+."
+            return 1
+            ;;
+        *)
+            log_error "Invalid BIFROST_CERTBOT_INSTALL_METHOD='${method}'. Use snap, apt, or none."
+            return 1
+            ;;
+    esac
+
+    if ! command -v certbot &>/dev/null; then
+        log_error "Certbot installation failed."
+        return 1
+    fi
+
+    current_version="$(certbot --version 2>/dev/null | awk '{print $2}')"
+    if [[ -z "$current_version" ]] || ! version_ge "$current_version" "$required_version"; then
+        log_error "Certbot ${current_version:-unknown} is still below ${required_version}; cannot request Let's Encrypt IP certificates."
+        return 1
+    fi
+    log_success "Certbot ${current_version} installed with IP-certificate support."
+}
+
+configure_ip_certificate_renewal() {
+    local public_ip="$1"
+    local certbot_bin
+    certbot_bin="$(command -v certbot)"
+
+    mkdir -p "$LETSENCRYPT_RENEWAL_HOOK_DIR" "$SYSTEMD_SYSTEM_DIR"
+    cat > "${LETSENCRYPT_RENEWAL_HOOK_DIR}/bifrost-reload-caddy.sh" <<'HOOKEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet caddy; then
+    systemctl reload caddy || systemctl restart caddy
+fi
+HOOKEOF
+    chmod 755 "${LETSENCRYPT_RENEWAL_HOOK_DIR}/bifrost-reload-caddy.sh"
+
+    cat > "${SYSTEMD_SYSTEM_DIR}/bifrost-certbot-renew.service" <<SERVICEEOF
+[Unit]
+Description=Renew Bifrost Let's Encrypt IP certificates
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${certbot_bin} renew --quiet --cert-name ${public_ip}
+SERVICEEOF
+
+    cat > "${SYSTEMD_SYSTEM_DIR}/bifrost-certbot-renew.timer" <<'TIMEREOF'
+[Unit]
+Description=Run Bifrost Certbot renewal frequently for short-lived IP certificates
+
+[Timer]
+OnCalendar=*-*-* 00/8:17:00
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TIMEREOF
+
+    systemctl daemon-reload
+    systemctl enable --now bifrost-certbot-renew.timer
+    log_success "Configured Bifrost Certbot renewal timer for short-lived IP certificate: ${public_ip}"
+}
+
+bootstrap_ip_certificate() {
+    local public_ip="$1"
+    local cert_file="${LETSENCRYPT_LIVE_DIR}/${public_ip}/fullchain.pem"
+    local key_file="${LETSENCRYPT_LIVE_DIR}/${public_ip}/privkey.pem"
+
+    install_certbot_ip_support || return 1
+
+    mkdir -p "$ACME_WEBROOT" "$(dirname "$CADDY_CONFIG")"
+    chown -R caddy:caddy "$ACME_WEBROOT" 2>/dev/null || true
+
+    log_info "Starting temporary HTTP challenge site for Let's Encrypt IP certificate..."
+    cat > "$CADDY_CONFIG" <<CADDYEOF
+# Temporary Caddy configuration for Bifrost IP certificate bootstrap
+:80 {
+    handle /.well-known/acme-challenge/* {
+        root * ${ACME_WEBROOT}
+        file_server
+    }
+    handle {
+        respond "Bifrost ACME bootstrap for ${public_ip}" 200
+    }
+}
+CADDYEOF
+
+    if ! caddy validate --config "$CADDY_CONFIG" --adapter caddyfile 2>/dev/null; then
+        log_error "Temporary Caddy ACME bootstrap configuration validation failed."
+        caddy validate --config "$CADDY_CONFIG" --adapter caddyfile
+        return 1
+    fi
+    systemctl enable caddy
+    systemctl restart caddy
+    sleep 2
+    if ! systemctl is-active --quiet caddy; then
+        log_error "Caddy failed to serve the HTTP-01 challenge bootstrap site."
+        journalctl -u caddy --no-pager -n 20
+        return 1
+    fi
+
+    local email="${BIFROST_ACME_EMAIL:-}"
+    local email_args=()
+    if [[ -z "$email" ]]; then
+        read -rp "$(echo -e "${CYAN}Enter email for Let's Encrypt notices (optional): ${NC}")" email
+    fi
+    if [[ -n "$email" ]]; then
+        email_args=(--email "$email")
+    else
+        email_args=(--register-unsafely-without-email)
+    fi
+
+    local staging_args=()
+    if [[ "${BIFROST_LETSENCRYPT_STAGING:-0}" == "1" ]]; then
+        staging_args=(--staging)
+        log_warn "Using Let's Encrypt staging for IP certificate request. The resulting certificate will not be publicly trusted."
+    fi
+
+    log_info "Requesting Let's Encrypt short-lived IP certificate for ${public_ip}..."
+    if ! certbot certonly \
+        --non-interactive \
+        --agree-tos \
+        "${email_args[@]}" \
+        "${staging_args[@]}" \
+        --cert-name "$public_ip" \
+        --preferred-profile shortlived \
+        --webroot \
+        --webroot-path "$ACME_WEBROOT" \
+        --ip-address "$public_ip"; then
+        log_error "Failed to request Let's Encrypt IP certificate for ${public_ip}."
+        log_error "Confirm TCP/80 reaches this server's public IP and retry after fixing cloud firewall/security group rules."
+        return 1
+    fi
+
+    if [[ ! -s "$cert_file" || ! -s "$key_file" ]]; then
+        log_error "Certbot completed but expected certificate files were not found:"
+        log_error "  ${cert_file}"
+        log_error "  ${key_file}"
+        return 1
+    fi
+
+    configure_ip_certificate_renewal "$public_ip" || return 1
+    log_success "Let's Encrypt IP certificate ready: ${cert_file}"
+}
+
+server_a_caddy_tls_block() {
+    local tls_mode="$1"
+    local endpoint_host="$2"
+    if [[ "$tls_mode" == "ip" ]]; then
+        cat <<TLSEOF
+    tls ${LETSENCRYPT_LIVE_DIR}/${endpoint_host}/fullchain.pem ${LETSENCRYPT_LIVE_DIR}/${endpoint_host}/privkey.pem {
+        protocols tls1.2 tls1.3
+        ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+    }
+TLSEOF
+    else
+        cat <<'TLSEOF'
+    tls {
+        protocols tls1.2 tls1.3
+        ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+    }
+TLSEOF
+    fi
+}
+
+server_a_ip_http_challenge_block() {
+    local public_ip="$1"
+    if [[ -z "$public_ip" ]]; then
+        return 0
+    fi
+    cat <<HTTPEOF
+
+http://${public_ip} {
+    handle /.well-known/acme-challenge/* {
+        root * ${ACME_WEBROOT}
+        file_server
+    }
+    handle {
+        redir https://${public_ip}{uri} permanent
+    }
+}
+HTTPEOF
 }
 
 validate_uuid() {
@@ -1005,7 +1319,7 @@ COMPOSEEOF
 # 4. setup_caddy_a
 # ---------------------------------------------------------------------------
 # Installs Caddy, configures it as a TLS-terminating reverse proxy in front
-# of New API, and serves the decoy website on the domain root.
+# of New API, and serves the decoy website on the endpoint root.
 # ---------------------------------------------------------------------------
 setup_caddy_a() {
     log_info "============================================"
@@ -1034,19 +1348,33 @@ setup_caddy_a() {
     # --- Install Caddy ---
     _install_caddy
 
-    # --- Collect domain name ---
+    # --- Collect public endpoint and certificate mode ---
+    local tls_mode
+    if ! tls_mode="$(server_a_tls_mode)"; then
+        return 1
+    fi
     local domain=""
-    while true; do
-        read -rp "$(echo -e "${CYAN}Enter your domain name (must be ICP-registered): ${NC}")" domain
-        if [[ -n "$domain" && "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$ ]]; then
-            break
-        fi
-        log_error "Invalid domain name. Please enter a valid FQDN (e.g. api.yourcompany.com)."
-    done
+    local public_ip=""
+    local endpoint_host=""
+    local site_address=""
 
-    log_info "Domain: ${domain}"
-    log_warn "Ensure this domain's DNS A record points to THIS server's public IP."
-    log_warn "Ensure this domain has a valid ICP registration (required for China hosting)."
+    if [[ "$tls_mode" == "ip" ]]; then
+        log_warn "Server A TLS mode: IP certificate. This is intended for no-ICP-domain bootstrap on Tencent/domestic hosts."
+        log_warn "Let's Encrypt IP certificates are short-lived. TCP/80 must stay reachable for renewal."
+        if ! public_ip="$(collect_server_a_public_ip)"; then
+            return 1
+        fi
+        endpoint_host="$public_ip"
+        site_address="https://${public_ip}"
+        bootstrap_ip_certificate "$public_ip" || return 1
+    else
+        domain="$(collect_server_a_domain)"
+        endpoint_host="$domain"
+        site_address="$domain"
+        log_info "Domain: ${domain}"
+        log_warn "Ensure this domain's DNS A record points to THIS server's public IP."
+        log_warn "Ensure this domain has a valid ICP registration (required for China hosting)."
+    fi
 
     # --- Create log directory ---
     mkdir -p "$CADDY_LOG_DIR"
@@ -1055,11 +1383,12 @@ setup_caddy_a() {
     log_info "Generating Caddy configuration..."
     cat > "$CADDY_CONFIG" <<CADDYEOF
 # Caddy configuration for Server A
-# Domain: ${domain}
+# Endpoint: ${endpoint_host}
+# TLS mode: ${tls_mode}
 # Exposure profile: ${exposure_profile}
 # Generated on $(date '+%Y-%m-%d %H:%M:%S')
 
-${domain} {
+${site_address} {
     # ===== Normal Website (Disguise) =====
     # Serves a legitimate-looking business website at the root path.
     handle / {
@@ -1266,10 +1595,7 @@ PROFILE_BLOCK
 fi)
 
     # ===== TLS Configuration =====
-    tls {
-        protocols tls1.2 tls1.3
-        ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
-    }
+$(server_a_caddy_tls_block "${tls_mode}" "${endpoint_host}")
 
     # ===== Security Headers =====
     header {
@@ -1290,6 +1616,7 @@ fi)
         format json
     }
 }
+$(server_a_ip_http_challenge_block "${public_ip}")
 CADDYEOF
 
     chmod 644 "$CADDY_CONFIG"
@@ -1317,22 +1644,32 @@ CADDYEOF
         return 1
     fi
 
-    # Save domain for later use
-    echo "DOMAIN=${domain}" > /root/server-a-domain.conf
-    echo "BIFROST_EXPOSURE_PROFILE=${exposure_profile}" >> /root/server-a-domain.conf
+    # Save endpoint for later use. Keep the historical file path for compatibility.
+    {
+        echo "ENDPOINT_MODE=${tls_mode}"
+        echo "BIFROST_SERVER_A_TLS_MODE=${tls_mode}"
+        echo "DOMAIN=${domain}"
+        echo "SERVER_A_PUBLIC_IP=${public_ip}"
+        echo "SERVER_A_ENDPOINT_HOST=${endpoint_host}"
+        echo "SERVER_A_BASE_URL=https://${endpoint_host}"
+        echo "BIFROST_EXPOSURE_PROFILE=${exposure_profile}"
+    } > /root/server-a-domain.conf
     chmod 600 /root/server-a-domain.conf
-    export DEPLOY_DOMAIN="$domain"
+    export DEPLOY_DOMAIN="$endpoint_host"
+    export DEPLOY_ENDPOINT_HOST="$endpoint_host"
+    export DEPLOY_BASE_URL="https://${endpoint_host}"
 
-    log_success "Caddy configured for domain: ${domain}"
+    log_success "Caddy configured for endpoint: ${endpoint_host}"
+    log_info "  TLS mode: ${tls_mode}"
     log_info "  Exposure profile: ${exposure_profile}"
-    log_info "  HTTPS: https://${domain}"
-    log_info "  API:   https://${domain}/v1/"
+    log_info "  HTTPS: https://${endpoint_host}"
+    log_info "  API:   https://${endpoint_host}/v1/"
     if [[ "${exposure_profile}" == "vpn-first" ]]; then
-        log_info "  Panel: https://${domain}/dashboard/ (VPN/private allowlist only)"
-        log_info "  Manage: https://${domain}/manage/docs (VPN/private allowlist only)"
+        log_info "  Panel: https://${endpoint_host}/dashboard/ (VPN/private allowlist only)"
+        log_info "  Manage: https://${endpoint_host}/manage/docs (VPN/private allowlist only)"
     else
-        log_warn "  Panel: https://${domain}/dashboard/ (${exposure_profile}; protect with strong auth/WAF/allowlists)"
-        log_warn "  Manage: https://${domain}/manage/docs (${exposure_profile}; protect with strong auth/WAF/allowlists)"
+        log_warn "  Panel: https://${endpoint_host}/dashboard/ (${exposure_profile}; protect with strong auth/WAF/allowlists)"
+        log_warn "  Manage: https://${endpoint_host}/manage/docs (${exposure_profile}; protect with strong auth/WAF/allowlists)"
     fi
 
     return 0
@@ -2148,23 +2485,28 @@ test_connectivity() {
         failed=$((failed + 1))
     fi
 
-    # --- Test 3: Caddy HTTPS (if domain configured) ---
+    # --- Test 3: Caddy HTTPS (if endpoint configured) ---
     total=$((total + 1))
-    local domain=""
-    if [[ -n "${DEPLOY_DOMAIN:-}" ]]; then
-        domain="$DEPLOY_DOMAIN"
+    local endpoint_base_url=""
+    if [[ -n "${DEPLOY_BASE_URL:-}" ]]; then
+        endpoint_base_url="$DEPLOY_BASE_URL"
+    elif [[ -n "${DEPLOY_DOMAIN:-}" ]]; then
+        endpoint_base_url="https://${DEPLOY_DOMAIN}"
     elif [[ -f /root/server-a-domain.conf ]]; then
         # shellcheck source=/dev/null
         source /root/server-a-domain.conf
-        domain="${DOMAIN:-}"
+        endpoint_base_url="${SERVER_A_BASE_URL:-}"
+        if [[ -z "$endpoint_base_url" && -n "${DOMAIN:-}" ]]; then
+            endpoint_base_url="https://${DOMAIN}"
+        fi
     fi
 
-    if [[ -n "$domain" ]]; then
-        log_info "[3/8] Caddy HTTPS -> https://${domain}/"
+    if [[ -n "$endpoint_base_url" ]]; then
+        log_info "[3/8] Caddy HTTPS -> ${endpoint_base_url}/"
         local caddy_result
         caddy_result=$(curl -s -o /dev/null -w "%{http_code}" \
             --connect-timeout 10 --max-time 15 \
-            "https://${domain}/" 2>/dev/null) || true
+            "${endpoint_base_url}/" 2>/dev/null) || true
         if [[ "$caddy_result" =~ ^(200|301|302)$ ]]; then
             log_success "  PASS - Caddy serving HTTPS (HTTP ${caddy_result})"
             passed=$((passed + 1))
@@ -2175,11 +2517,11 @@ test_connectivity() {
 
         # --- Test 4: API through Caddy ---
         total=$((total + 1))
-        log_info "[4/8] API via Caddy -> https://${domain}/v1/models"
+        log_info "[4/8] API via Caddy -> ${endpoint_base_url}/v1/models"
         local caddy_api_result
         caddy_api_result=$(curl -s -o /dev/null -w "%{http_code}" \
             --connect-timeout 15 --max-time 30 \
-            "https://${domain}/v1/models" 2>/dev/null) || true
+            "${endpoint_base_url}/v1/models" 2>/dev/null) || true
         if [[ "$caddy_api_result" =~ ^(200|401|403)$ ]]; then
             log_success "  PASS - API via Caddy working (HTTP ${caddy_api_result})"
             passed=$((passed + 1))
@@ -2188,7 +2530,7 @@ test_connectivity() {
             failed=$((failed + 1))
         fi
     else
-        log_warn "  SKIP - No domain configured"
+        log_warn "  SKIP - No HTTPS endpoint configured"
         skipped=$((skipped + 2))
         total=$((total + 1))
     fi
@@ -2584,7 +2926,7 @@ _LOGROTATE_MINIMAL
         log_warn "Common causes:"
         log_warn "  - Server B is not yet running or unreachable"
         log_warn "  - Firewall blocking required ports"
-        log_warn "  - DNS not yet propagated for the domain"
+        log_warn "  - DNS not yet propagated for domain mode, or TCP/80/443 not reachable for IP HTTPS mode"
         log_warn "Re-run tests later: bash scripts/server-a.sh test"
         log_warn "============================================================================"
         failed_steps+=("Connectivity Tests")
@@ -2599,12 +2941,17 @@ _LOGROTATE_MINIMAL
     local seconds=$(( elapsed % 60 ))
 
     # --- Deployment Summary ---
-    local domain="${DEPLOY_DOMAIN:-}"
-    if [[ -z "$domain" && -f /root/server-a-domain.conf ]]; then
+    local endpoint_host="${DEPLOY_ENDPOINT_HOST:-${DEPLOY_DOMAIN:-}}"
+    local endpoint_base_url="${DEPLOY_BASE_URL:-}"
+    local endpoint_mode="${BIFROST_SERVER_A_TLS_MODE:-domain}"
+    if [[ -z "$endpoint_host" && -f /root/server-a-domain.conf ]]; then
         # shellcheck source=/dev/null
         source /root/server-a-domain.conf
-        domain="${DOMAIN:-<your-domain>}"
+        endpoint_host="${SERVER_A_ENDPOINT_HOST:-${DOMAIN:-<your-domain-or-ip>}}"
+        endpoint_base_url="${SERVER_A_BASE_URL:-}"
+        endpoint_mode="${ENDPOINT_MODE:-${BIFROST_SERVER_A_TLS_MODE:-domain}}"
     fi
+    endpoint_base_url="${endpoint_base_url:-https://${endpoint_host}}"
     local exposure_profile
     exposure_profile="$(bifrost_exposure_profile)"
 
@@ -2628,16 +2975,17 @@ _LOGROTATE_MINIMAL
     log_info "==================== Service URLs ===================="
     log_info ""
     log_info "  Exposure Profile  : ${exposure_profile}"
-    log_info "  API Endpoint      : https://${domain}/v1"
-    log_info "  Decoy Website     : https://${domain}/"
+    log_info "  TLS Mode          : ${endpoint_mode}"
+    log_info "  API Endpoint      : ${endpoint_base_url}/v1"
+    log_info "  Decoy Website     : ${endpoint_base_url}/"
     if [[ "${exposure_profile}" == "vpn-first" ]]; then
-        log_info "  New API Dashboard : https://${domain}/dashboard (VPN/private allowlist only)"
-        log_info "  New API Login     : https://${domain}/login (VPN/private allowlist only)"
-        log_info "  Bifrost Manage    : https://${domain}/manage/docs (VPN/private allowlist only)"
+        log_info "  New API Dashboard : ${endpoint_base_url}/dashboard (VPN/private allowlist only)"
+        log_info "  New API Login     : ${endpoint_base_url}/login (VPN/private allowlist only)"
+        log_info "  Bifrost Manage    : ${endpoint_base_url}/manage/docs (VPN/private allowlist only)"
     else
-        log_warn "  New API Dashboard : https://${domain}/dashboard (${exposure_profile}; public management enabled)"
-        log_warn "  New API Login     : https://${domain}/login (${exposure_profile}; public management enabled)"
-        log_warn "  Bifrost Manage    : https://${domain}/manage/docs (${exposure_profile}; public management enabled)"
+        log_warn "  New API Dashboard : ${endpoint_base_url}/dashboard (${exposure_profile}; public management enabled)"
+        log_warn "  New API Login     : ${endpoint_base_url}/login (${exposure_profile}; public management enabled)"
+        log_warn "  Bifrost Manage    : ${endpoint_base_url}/manage/docs (${exposure_profile}; public management enabled)"
     fi
     log_info ""
     log_info "==================== New API Initialization =========="
@@ -2658,18 +3006,18 @@ _LOGROTATE_MINIMAL
     log_info "==================== Client Configuration ============"
     log_info ""
     log_info "  ---- Claude Code ----"
-    log_info "  export ANTHROPIC_BASE_URL=https://${domain}"
+    log_info "  export ANTHROPIC_BASE_URL=${endpoint_base_url}"
     log_info "  export ANTHROPIC_API_KEY=sk-xxx  # Get from New API dashboard"
     log_info ""
     log_info "  Or add to ~/.claude/settings.json:"
-    log_info '  {"env":{"ANTHROPIC_BASE_URL":"https://'"${domain}"'","ANTHROPIC_API_KEY":"sk-xxx"}}'
+    log_info '  {"env":{"ANTHROPIC_BASE_URL":"'"${endpoint_base_url}"'","ANTHROPIC_API_KEY":"sk-xxx"}}'
     log_info ""
     log_info "  ---- Codex CLI ----"
-    log_info "  export OPENAI_BASE_URL=https://${domain}/v1"
+    log_info "  export OPENAI_BASE_URL=${endpoint_base_url}/v1"
     log_info "  export OPENAI_API_KEY=sk-xxx  # Get from New API dashboard"
     log_info ""
     log_info "  ---- OpenCode / Other OpenAI-Compatible Tools ----"
-    log_info "  export OPENAI_BASE_URL=https://${domain}/v1"
+    log_info "  export OPENAI_BASE_URL=${endpoint_base_url}/v1"
     log_info "  export OPENAI_API_KEY=sk-xxx"
     log_info ""
     log_info "==================== Monitoring ======================"
