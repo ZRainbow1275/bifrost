@@ -7,6 +7,7 @@ Rate-limited by daily count to prevent abuse.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import secrets
@@ -39,6 +40,9 @@ _state_lock = asyncio.Lock()
 # Jinja2 template renderer -- resolve relative to this file's package
 _TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATE_DIR))
+_TEMPLATE_RESPONSE_ACCEPTS_REQUEST_KW = (
+    "request" in inspect.signature(templates.TemplateResponse).parameters
+)
 
 
 def _today() -> str:
@@ -78,6 +82,22 @@ def _get_request_path_prefix(request: Request) -> str:
 
     root_path = request.scope.get("root_path")
     return _normalize_path_prefix(root_path if isinstance(root_path, str) else None)
+
+
+def _template_response(
+    request: Request,
+    name: str,
+    context: dict[str, object],
+) -> HTMLResponse:
+    """Render templates across Starlette TemplateResponse signature variants."""
+    template_context = {"request": request, **context}
+    if _TEMPLATE_RESPONSE_ACCEPTS_REQUEST_KW:
+        return templates.TemplateResponse(
+            request=request,
+            name=name,
+            context=template_context,
+        )
+    return templates.TemplateResponse(name, template_context)
 
 
 def _get_public_gateway_base_url(settings: Settings) -> str:
@@ -330,11 +350,10 @@ async def register_status(
 @page_router.get("/register", response_class=HTMLResponse)
 async def register_page(request: Request) -> HTMLResponse:
     """Serve the web-based registration form."""
-    return templates.TemplateResponse(
-        request=request,
-        name="register.html",
-        context={
-            "request": request,
+    return _template_response(
+        request,
+        "register.html",
+        {
             "api_prefix": _get_request_path_prefix(request),
         },
     )
