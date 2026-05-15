@@ -13,7 +13,7 @@ sudo bash scripts/health-check.sh --verbose
 当前健康检查会同时写出 `/var/log/bifrost/health.json`，重点包含：
 - `bifrost_api`: 本地 `/health`、缺失管理密钥 `401`、错误管理密钥 `403`
 - `caddy`: 反向代理/TLS 入口服务状态
-- `public_manage`: `https://<DOMAIN>/manage/health`、`/manage/register`、`/manage/docs` 与 `/manage/openapi.json` 前缀契约
+- `public_manage`: `https://<DOMAIN>/manage/*` 的暴露面 profile、HTTP 状态、`/manage/register`、`/manage/docs` 与 `/manage/openapi.json` 前缀契约；`vpn-first` 下公网 `403` 表示管理面已被保护
 
 ### 深度诊断 (v2.0)
 

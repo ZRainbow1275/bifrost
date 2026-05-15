@@ -597,6 +597,12 @@ install_3xui() {
     log_info " Installing 3x-ui Panel"
     log_info "=========================================="
 
+    local exposure_profile
+    if ! exposure_profile="$(bifrost_exposure_profile)"; then
+        return 1
+    fi
+    log_info "Exposure profile: ${exposure_profile}"
+
     install_packages curl
 
     # ---- Check if 3x-ui is already installed ----
@@ -666,16 +672,23 @@ install_3xui() {
     local server_ip
     server_ip=$(_get_public_ip)
 
-    # ---- Open firewall port ----
-    # NOTE: This opens the panel port externally. Once Caddy is configured as
-    # a reverse proxy for the panel, consider closing this port and accessing
-    # the panel only through Caddy (HTTPS) for better security.
-    _open_firewall_port "${panel_port}" "tcp" "3x-ui panel"
+    # ---- Firewall policy ----
+    local direct_port_open="no"
+    if [[ "${exposure_profile}" == "lab" ]]; then
+        _open_firewall_port "${panel_port}" "tcp" "3x-ui panel (lab profile only)"
+        direct_port_open="yes"
+        log_warn "3x-ui direct panel port opened because exposure profile is lab. Do not use this profile in production."
+    else
+        log_info "3x-ui direct panel port is not opened in ${exposure_profile} profile."
+        log_info "Access it through the Caddy /xui-panel/ route after Caddy is configured."
+    fi
 
     # ---- Save state ----
     _save_deploy_state "THREE_X_UI_PORT" "${panel_port}"
     _save_deploy_state "THREE_X_UI_USER" "${admin_user}"
     _save_deploy_state "THREE_X_UI_PASS" "${admin_pass}"
+    _save_deploy_state "THREE_X_UI_DIRECT_PORT_OPEN" "${direct_port_open}"
+    _save_deploy_state "BIFROST_EXPOSURE_PROFILE" "${exposure_profile}"
 
     # ---- Print access info ----
     # NOTE: Print credentials ONLY to stdout (not to log file)
@@ -684,12 +697,23 @@ install_3xui() {
     echo -e "${COLOR_INFO}  3X-UI PANEL DEPLOYMENT COMPLETE${COLOR_RESET}"
     echo -e "${COLOR_INFO}============================================================${COLOR_RESET}"
     echo ""
-    echo -e "  Access URL:  http://${server_ip}:${panel_port}"
+    if [[ "${direct_port_open}" == "yes" ]]; then
+        echo -e "  Direct URL:  http://${server_ip}:${panel_port}"
+    else
+        echo -e "  Direct URL:  not opened by firewall in ${exposure_profile} profile"
+        echo -e "  Caddy Path:  /xui-panel/ after Caddy setup"
+    fi
     echo -e "  Username:    ${admin_user}"
     echo -e "  Password:    ${admin_pass}"
     echo ""
     echo -e "  ${COLOR_WARN}IMPORTANT: Change these credentials after first login!${COLOR_RESET}"
-    echo -e "  ${COLOR_WARN}Consider setting up HTTPS via Caddy reverse proxy.${COLOR_RESET}"
+    if [[ "${exposure_profile}" == "vpn-first" ]]; then
+        echo -e "  ${COLOR_WARN}3x-ui should be reachable only from VPN/private allowlisted clients.${COLOR_RESET}"
+    elif [[ "${exposure_profile}" == "public-managed" ]]; then
+        echo -e "  ${COLOR_WARN}Protect public /xui-panel/ access with WAF/source allowlists and strong credentials.${COLOR_RESET}"
+    else
+        echo -e "  ${COLOR_WARN}Lab direct-port exposure is not safe for production.${COLOR_RESET}"
+    fi
     echo ""
     echo -e "${COLOR_INFO}============================================================${COLOR_RESET}"
     echo ""
@@ -729,13 +753,24 @@ _open_firewall_port() {
     local description="${3:-}"
 
     if command -v ufw &>/dev/null; then
-        ufw allow "${port}/${protocol}" comment "${description}" 2>/dev/null || true
+        if ! ufw allow "${port}/${protocol}" comment "${description}" 2>/dev/null; then
+            log_error "Failed to open firewall port ${port}/${protocol} via ufw."
+            return 1
+        fi
     elif command -v firewall-cmd &>/dev/null; then
-        firewall-cmd --permanent --add-port="${port}/${protocol}" 2>/dev/null || true
-        firewall-cmd --reload 2>/dev/null || true
+        if ! firewall-cmd --permanent --add-port="${port}/${protocol}" 2>/dev/null; then
+            log_error "Failed to add firewall port ${port}/${protocol} via firewalld."
+            return 1
+        fi
+        if ! firewall-cmd --reload 2>/dev/null; then
+            log_error "Failed to reload firewalld after adding port ${port}/${protocol}."
+            return 1
+        fi
     else
         log_warn "No firewall tool found. Please manually open port ${port}/${protocol}."
     fi
+
+    return 0
 }
 
 # ==============================================================================
@@ -1065,6 +1100,21 @@ setup_caddy_b() {
     log_info " Setting Up Caddy (Server B)"
     log_info "=========================================="
 
+    local exposure_profile
+    if ! exposure_profile="$(bifrost_exposure_profile)"; then
+        return 1
+    fi
+    local admin_allowed_ranges
+    admin_allowed_ranges="$(bifrost_admin_allowed_ranges)"
+    log_info "Exposure profile: ${exposure_profile}"
+    if [[ "${exposure_profile}" == "vpn-first" ]]; then
+        log_info "  3x-ui /xui-panel/ route will require VPN/private allowlist: ${admin_allowed_ranges}"
+    elif [[ "${exposure_profile}" == "public-managed" ]]; then
+        log_warn "  /xui-panel/ will be public through HTTPS. Protect it with WAF/source allowlists and strong credentials."
+    else
+        log_warn "  lab profile permits broad management access and is not safe for production."
+    fi
+
     # ---- Ask for domain (optional for Caddy) ----
     local caddy_domain=""
     while true; do
@@ -1111,7 +1161,8 @@ setup_caddy_b() {
         cat > "${CADDY_CONFIG_DIR}/Caddyfile" <<CADDY_EOF
 # ==============================================================================
 # Caddy Configuration - Server B (Overseas)
-# AI Gateway Bridge - Decoy Website + Reverse Proxy
+# Bifrost - Decoy Website + Reverse Proxy
+# Exposure profile: ${exposure_profile}
 # ==============================================================================
 
 ${caddy_domain} {
@@ -1140,9 +1191,42 @@ ${caddy_domain} {
         }
     }
 
-$(if [[ -n "${xui_port}" ]]; then
+$(if [[ -n "${xui_port}" && "${exposure_profile}" == "vpn-first" ]]; then
 cat <<PROXY_BLOCK
-    # 3x-ui panel reverse proxy (behind auth path)
+    # 3x-ui panel reverse proxy - private allowlist only
+    @xui_private_root {
+        path /xui-panel
+        remote_ip ${admin_allowed_ranges}
+    }
+    handle @xui_private_root {
+        redir /xui-panel/ 308
+    }
+    @xui_private {
+        path /xui-panel/*
+        remote_ip ${admin_allowed_ranges}
+    }
+    handle @xui_private {
+        uri strip_prefix /xui-panel
+        reverse_proxy 127.0.0.1:${xui_port} {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+    handle /xui-panel {
+        respond "3x-ui requires VPN/private access in vpn-first profile" 403
+    }
+    handle /xui-panel/* {
+        respond "3x-ui requires VPN/private access in vpn-first profile" 403
+    }
+PROXY_BLOCK
+elif [[ -n "${xui_port}" ]]; then
+cat <<PROXY_BLOCK
+    # 3x-ui panel reverse proxy (${exposure_profile})
+    handle /xui-panel {
+        redir /xui-panel/ 308
+    }
     handle_path /xui-panel/* {
         reverse_proxy 127.0.0.1:${xui_port} {
             header_up Host {host}
@@ -1163,7 +1247,8 @@ CADDY_EOF
         cat > "${CADDY_CONFIG_DIR}/Caddyfile" <<CADDY_EOF
 # ==============================================================================
 # Caddy Configuration - Server B (Overseas) - IP Access Mode
-# AI Gateway Bridge - Decoy Website + Reverse Proxy
+# Bifrost - Decoy Website + Reverse Proxy
+# Exposure profile: ${exposure_profile}
 # ==============================================================================
 
 :80 {
@@ -1191,9 +1276,42 @@ CADDY_EOF
         }
     }
 
-$(if [[ -n "${xui_port}" ]]; then
+$(if [[ -n "${xui_port}" && "${exposure_profile}" == "vpn-first" ]]; then
 cat <<PROXY_BLOCK
-    # 3x-ui panel reverse proxy
+    # 3x-ui panel reverse proxy - private allowlist only
+    @xui_private_root {
+        path /xui-panel
+        remote_ip ${admin_allowed_ranges}
+    }
+    handle @xui_private_root {
+        redir /xui-panel/ 308
+    }
+    @xui_private {
+        path /xui-panel/*
+        remote_ip ${admin_allowed_ranges}
+    }
+    handle @xui_private {
+        uri strip_prefix /xui-panel
+        reverse_proxy 127.0.0.1:${xui_port} {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+    handle /xui-panel {
+        respond "3x-ui requires VPN/private access in vpn-first profile" 403
+    }
+    handle /xui-panel/* {
+        respond "3x-ui requires VPN/private access in vpn-first profile" 403
+    }
+PROXY_BLOCK
+elif [[ -n "${xui_port}" ]]; then
+cat <<PROXY_BLOCK
+    # 3x-ui panel reverse proxy (${exposure_profile})
+    handle /xui-panel {
+        redir /xui-panel/ 308
+    }
     handle_path /xui-panel/* {
         reverse_proxy 127.0.0.1:${xui_port} {
             header_up Host {host}
@@ -1216,8 +1334,9 @@ CADDY_EOF
     if caddy validate --config "${CADDY_CONFIG_DIR}/Caddyfile" --adapter caddyfile &>/dev/null; then
         log_success "Caddy configuration is valid."
     else
-        log_warn "Caddy configuration validation failed. Attempting to fix..."
+        log_error "Caddy configuration validation failed."
         caddy validate --config "${CADDY_CONFIG_DIR}/Caddyfile" --adapter caddyfile 2>&1 || true
+        return 1
     fi
 
     # ---- Create/ensure systemd service ----
@@ -1265,6 +1384,7 @@ CADDYSVC_EOF
     else
         log_error "Caddy service failed to start. Check logs:"
         journalctl -u caddy --no-pager -n 20 2>/dev/null || true
+        return 1
     fi
 
     # ---- Open firewall ports ----
@@ -1273,22 +1393,32 @@ CADDYSVC_EOF
 
     # ---- Save state ----
     _save_deploy_state "CADDY_B_DOMAIN" "${caddy_domain}"
+    _save_deploy_state "BIFROST_EXPOSURE_PROFILE" "${exposure_profile}"
 
     echo ""
     log_info "============================================================"
     log_info "  CADDY (SERVER B) DEPLOYMENT COMPLETE"
     log_info "============================================================"
+    log_info "  Exposure profile: ${exposure_profile}"
     if [[ -n "${caddy_domain}" ]]; then
         log_info "  URL:    https://${caddy_domain}"
         if [[ -n "${xui_port}" ]]; then
-            log_info "  3x-ui:  https://${caddy_domain}/xui-panel/"
+            if [[ "${exposure_profile}" == "vpn-first" ]]; then
+                log_info "  3x-ui:  https://${caddy_domain}/xui-panel/ (VPN/private allowlist only)"
+            else
+                log_warn "  3x-ui:  https://${caddy_domain}/xui-panel/ (${exposure_profile}; public management enabled)"
+            fi
         fi
     else
         local server_ip
         server_ip=$(_get_public_ip)
         log_info "  URL:    http://${server_ip}"
         if [[ -n "${xui_port}" ]]; then
-            log_info "  3x-ui:  http://${server_ip}/xui-panel/"
+            if [[ "${exposure_profile}" == "vpn-first" ]]; then
+                log_info "  3x-ui:  http://${server_ip}/xui-panel/ (VPN/private allowlist only)"
+            else
+                log_warn "  3x-ui:  http://${server_ip}/xui-panel/ (${exposure_profile}; public management enabled)"
+            fi
         fi
     fi
     log_info "============================================================"
@@ -2016,8 +2146,8 @@ deploy_server_b() {
     deploy_start_time=$(date +%s)
     local failed_steps=()
 
-    # ---- Step 0: Pre-Deploy Check (Cloud Agent Cleanup) ----
-    log_info "[Step 0/14] Pre-deploy check (cloud agent cleanup)..."
+    # ---- Step 0: Pre-Deploy Check (Cloud Readiness Review) ----
+    log_info "[Step 0/14] Pre-deploy check (cloud readiness review)..."
     local _sb_script_dir
     _sb_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     if [[ -f "${_sb_script_dir}/dd-reinstall.sh" ]]; then
@@ -2028,9 +2158,13 @@ deploy_server_b() {
                 log_error "Pre-deploy check failed. Cannot continue with Server B deployment."
                 return 1
             fi
+            if declare -f cloud_review_blocks_deployment >/dev/null 2>&1 && cloud_review_blocks_deployment; then
+                log_error "${CLOUD_REVIEW_DEPLOYMENT_BLOCK_REASON:-Pre-deploy check requested operator follow-up before deployment.}"
+                return 1
+            fi
         fi
     else
-        log_warn "dd-reinstall.sh not found. Skipping cloud agent cleanup."
+        log_warn "dd-reinstall.sh not found. Skipping cloud readiness review."
     fi
     echo ""
 
@@ -2258,6 +2392,8 @@ _print_deployment_summary() {
 
     local server_ip
     server_ip=$(_get_public_ip)
+    local exposure_profile
+    exposure_profile="$(bifrost_exposure_profile)"
 
     echo ""
     echo ""
@@ -2276,6 +2412,8 @@ _print_deployment_summary() {
     fi
     log_info ""
     log_info "   Deployment time: ${minutes}m ${seconds}s"
+    log_info ""
+    log_info "   Exposure profile: ${exposure_profile}"
     log_info ""
 
     # Service status
@@ -2327,6 +2465,9 @@ _print_deployment_summary() {
         xui_port=$(grep '^THREE_X_UI_PORT=' "${DEPLOY_STATE_DIR}/state.env" 2>/dev/null | tail -1 | cut -d= -f2) || true
         xui_user=$(grep '^THREE_X_UI_USER=' "${DEPLOY_STATE_DIR}/state.env" 2>/dev/null | tail -1 | cut -d= -f2) || true
         xui_pass=$(grep '^THREE_X_UI_PASS=' "${DEPLOY_STATE_DIR}/state.env" 2>/dev/null | tail -1 | cut -d= -f2) || true
+        local xui_direct_open caddy_domain
+        xui_direct_open=$(grep '^THREE_X_UI_DIRECT_PORT_OPEN=' "${DEPLOY_STATE_DIR}/state.env" 2>/dev/null | tail -1 | cut -d= -f2) || true
+        caddy_domain=$(grep '^CADDY_B_DOMAIN=' "${DEPLOY_STATE_DIR}/state.env" 2>/dev/null | tail -1 | cut -d= -f2) || true
         local hy2_port hy2_domain hy2_pass
         hy2_port=$(grep '^HYSTERIA2_PORT=' "${DEPLOY_STATE_DIR}/state.env" 2>/dev/null | tail -1 | cut -d= -f2) || true
         hy2_domain=$(grep '^HYSTERIA2_DOMAIN=' "${DEPLOY_STATE_DIR}/state.env" 2>/dev/null | tail -1 | cut -d= -f2) || true
@@ -2347,9 +2488,25 @@ _print_deployment_summary() {
 
         if [[ -n "${xui_port}" ]]; then
             echo -e "   3X-UI PANEL:"
-            echo -e "     URL:       http://${server_ip}:${xui_port}"
+            if [[ "${xui_direct_open}" == "yes" ]]; then
+                echo -e "     Direct URL: http://${server_ip}:${xui_port} (lab profile only)"
+            else
+                echo -e "     Direct URL: not opened by firewall in ${exposure_profile} profile"
+            fi
+            if [[ -n "${caddy_domain}" ]]; then
+                echo -e "     Caddy URL:  https://${caddy_domain}/xui-panel/"
+            else
+                echo -e "     Caddy URL:  http://${server_ip}/xui-panel/"
+            fi
             echo -e "     Username:  ${xui_user}"
             echo -e "     Password:  ${xui_pass}"
+            if [[ "${exposure_profile}" == "vpn-first" ]]; then
+                echo -e "     Access:    VPN/private allowlist only"
+            elif [[ "${exposure_profile}" == "public-managed" ]]; then
+                echo -e "     Access:    public-managed; protect with WAF/source allowlists"
+            else
+                echo -e "     Access:    lab; not safe for production"
+            fi
             echo ""
         fi
 
@@ -2386,6 +2543,7 @@ _print_deployment_summary() {
     log_info "     1. Copy the connection info above to Server A"
     log_info "     2. Run the install script on Server A and select 'Server A'"
     log_info "     3. Enter the connection parameters when prompted"
+    log_info "     4. Verify exposure profile '${exposure_profile}' before production use"
     echo ""
     log_info "=================================================================="
     echo ""

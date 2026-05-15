@@ -84,14 +84,14 @@ fi
 # =============================================================================
 # Constants
 # =============================================================================
-# Guarded — may already be defined by server-a.sh or mihomo.sh
-[[ -v USER_REGISTRY_DIR ]]         || readonly USER_REGISTRY_DIR="/etc/bifrost/users"
-[[ -v USER_REGISTRY_FILE ]]        || readonly USER_REGISTRY_FILE="/etc/bifrost/users/registry.conf"
-[[ -v USER_GUIDES_DIR ]]           || readonly USER_GUIDES_DIR="/etc/bifrost/users/guides"
+# Guarded: callers and tests may override these before or after sourcing.
+USER_REGISTRY_DIR="${USER_REGISTRY_DIR:-/etc/bifrost/users}"
+USER_REGISTRY_FILE="${USER_REGISTRY_FILE:-/etc/bifrost/users/registry.conf}"
+USER_GUIDES_DIR="${USER_GUIDES_DIR:-/etc/bifrost/users/guides}"
 
-[[ -v XRAY_CONFIG ]]               || readonly XRAY_CONFIG="/usr/local/etc/xray/config.json"
-[[ -v NEW_API_BASE_URL ]]          || readonly NEW_API_BASE_URL="http://127.0.0.1:3000"
-[[ -v NEW_API_ADMIN_TOKEN_FILE ]]  || readonly NEW_API_ADMIN_TOKEN_FILE="/etc/bifrost/.new-api-admin-token"
+XRAY_CONFIG="${XRAY_CONFIG:-/usr/local/etc/xray/config.json}"
+NEW_API_BASE_URL="${NEW_API_BASE_URL:-http://127.0.0.1:3000}"
+NEW_API_ADMIN_TOKEN_FILE="${NEW_API_ADMIN_TOKEN_FILE:-/etc/bifrost/.new-api-admin-token}"
 
 # Default quota (in USD) for new users -- maps to New API quota system
 DEFAULT_QUOTA="${BIFROST_DEFAULT_QUOTA:-100}"

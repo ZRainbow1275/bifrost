@@ -820,6 +820,16 @@ install_new_api() {
     # --- Generate secrets ---
     local session_secret
     session_secret=$(generate_random_password 32)
+    local exposure_profile
+    if ! exposure_profile="$(bifrost_exposure_profile)"; then
+        return 1
+    fi
+    local new_api_image="${BIFROST_NEW_API_IMAGE:-calciumion/new-api:latest}"
+    if [[ "${new_api_image}" == *":latest" && "${exposure_profile}" != "lab" && "${BIFROST_ALLOW_UNPINNED:-0}" != "1" ]]; then
+        log_error "Refusing mutable New API image '${new_api_image}' in ${exposure_profile} profile."
+        log_error "Set BIFROST_NEW_API_IMAGE to an immutable tag or digest, or set BIFROST_ALLOW_UNPINNED=1 for a temporary non-production override."
+        return 1
+    fi
 
     # --- Create directory structure ---
     mkdir -p "${NEW_API_DIR}/data"
@@ -882,10 +892,11 @@ install_new_api() {
     cat > "${NEW_API_DIR}/docker-compose.yml" <<COMPOSEEOF
 # Docker Compose configuration for New API
 # version field is omitted (obsolete in Compose V2+)
+# image: ${new_api_image}
 
 services:
   new-api:
-    image: calciumion/new-api:latest
+    image: ${new_api_image}
     container_name: new-api
     restart: always
     ports:
@@ -1001,6 +1012,25 @@ setup_caddy_a() {
     log_info "  Setting Up Caddy (Reverse Proxy + TLS)"
     log_info "============================================"
 
+    local exposure_profile
+    if ! exposure_profile="$(bifrost_exposure_profile)"; then
+        return 1
+    fi
+    local admin_allowed_ranges
+    admin_allowed_ranges="$(bifrost_admin_allowed_ranges)"
+    local exposure_description
+    exposure_description="$(bifrost_exposure_profile_description "${exposure_profile}")"
+
+    log_info "Exposure profile: ${exposure_profile}"
+    log_info "  ${exposure_description}"
+    if [[ "${exposure_profile}" == "vpn-first" ]]; then
+        log_info "  Admin allowlist: ${admin_allowed_ranges}"
+    elif [[ "${exposure_profile}" == "public-managed" ]]; then
+        log_warn "  public-managed exposes dashboard/manage through public HTTPS. Use WAF/source allowlists and strong admin auth."
+    else
+        log_warn "  lab profile is not safe for production."
+    fi
+
     # --- Install Caddy ---
     _install_caddy
 
@@ -1026,12 +1056,12 @@ setup_caddy_a() {
     cat > "$CADDY_CONFIG" <<CADDYEOF
 # Caddy configuration for Server A
 # Domain: ${domain}
+# Exposure profile: ${exposure_profile}
 # Generated on $(date '+%Y-%m-%d %H:%M:%S')
 
 ${domain} {
     # ===== Normal Website (Disguise) =====
     # Serves a legitimate-looking business website at the root path.
-    # This is what censors and manual inspectors will see.
     handle / {
         root * ${DECOY_WEBROOT}
         file_server
@@ -1089,7 +1119,11 @@ ${domain} {
             }
         }
     }
-    handle /api/* {
+
+$(if [[ "${exposure_profile}" == "vpn-first" ]]; then
+cat <<PROFILE_BLOCK
+    # ===== Public readiness endpoint only =====
+    handle /api/status {
         reverse_proxy localhost:3000 {
             header_up X-Real-IP {remote_host}
             header_up X-Forwarded-For {remote_host}
@@ -1097,7 +1131,104 @@ ${domain} {
         }
     }
 
-    # ===== New API Dashboard =====
+    # ===== Private New API management surface =====
+    @newapi_private {
+        path /api/* /static/* /logo.png /dashboard /dashboard/* /login /panel /token /user/* /admin/*
+        remote_ip ${admin_allowed_ranges}
+    }
+    handle @newapi_private {
+        reverse_proxy localhost:3000 {
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+    handle /api/* {
+        respond "Bifrost admin API requires VPN/private access in vpn-first profile" 403
+    }
+    handle /static/* {
+        respond "New API static assets require VPN/private access in vpn-first profile" 403
+    }
+    handle /logo.png {
+        respond "New API static assets require VPN/private access in vpn-first profile" 403
+    }
+    handle /dashboard {
+        respond "New API dashboard requires VPN/private access in vpn-first profile" 403
+    }
+    handle /dashboard/* {
+        respond "New API dashboard requires VPN/private access in vpn-first profile" 403
+    }
+    handle /login {
+        respond "New API login requires VPN/private access in vpn-first profile" 403
+    }
+
+    # ===== Private Bifrost Management Platform =====
+    @manage_private_root {
+        path /manage
+        remote_ip ${admin_allowed_ranges}
+    }
+    handle @manage_private_root {
+        redir /manage/ 308
+    }
+    @manage_private {
+        path /manage/*
+        remote_ip ${admin_allowed_ranges}
+    }
+    handle @manage_private {
+        uri strip_prefix /manage
+        reverse_proxy 127.0.0.1:8000 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            header_up X-Forwarded-Prefix /manage
+        }
+    }
+    handle /manage {
+        respond "Bifrost management requires VPN/private access in vpn-first profile" 403
+    }
+    handle /manage/* {
+        respond "Bifrost management requires VPN/private access in vpn-first profile" 403
+    }
+
+    # ===== Default: decoy site for unmatched paths =====
+    handle {
+        root * ${DECOY_WEBROOT}
+        file_server
+        try_files {path} /index.html
+    }
+PROFILE_BLOCK
+else
+cat <<PROFILE_BLOCK
+    # ===== New API Gateway API and Dashboard =====
+    handle /api/* {
+        reverse_proxy localhost:3000 {
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+    handle /static/* {
+        reverse_proxy localhost:3000 {
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+    handle /logo.png {
+        reverse_proxy localhost:3000 {
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+    handle /dashboard {
+        reverse_proxy localhost:3000 {
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
     handle /dashboard/* {
         reverse_proxy localhost:3000 {
             header_up X-Real-IP {remote_host}
@@ -1108,7 +1239,10 @@ ${domain} {
 
     # ===== Bifrost Management Platform =====
     # Exposes the FastAPI admin/register interface under /manage/*
-    handle /manage* {
+    handle /manage {
+        redir /manage/ 308
+    }
+    handle /manage/* {
         uri strip_prefix /manage
         reverse_proxy 127.0.0.1:8000 {
             header_up Host {host}
@@ -1128,6 +1262,8 @@ ${domain} {
             header_up X-Forwarded-Proto {scheme}
         }
     }
+PROFILE_BLOCK
+fi)
 
     # ===== TLS Configuration =====
     tls {
@@ -1183,14 +1319,21 @@ CADDYEOF
 
     # Save domain for later use
     echo "DOMAIN=${domain}" > /root/server-a-domain.conf
+    echo "BIFROST_EXPOSURE_PROFILE=${exposure_profile}" >> /root/server-a-domain.conf
     chmod 600 /root/server-a-domain.conf
     export DEPLOY_DOMAIN="$domain"
 
     log_success "Caddy configured for domain: ${domain}"
+    log_info "  Exposure profile: ${exposure_profile}"
     log_info "  HTTPS: https://${domain}"
     log_info "  API:   https://${domain}/v1/"
-    log_info "  Panel: https://${domain}/dashboard/"
-    log_info "  Manage: https://${domain}/manage/docs"
+    if [[ "${exposure_profile}" == "vpn-first" ]]; then
+        log_info "  Panel: https://${domain}/dashboard/ (VPN/private allowlist only)"
+        log_info "  Manage: https://${domain}/manage/docs (VPN/private allowlist only)"
+    else
+        log_warn "  Panel: https://${domain}/dashboard/ (${exposure_profile}; protect with strong auth/WAF/allowlists)"
+        log_warn "  Manage: https://${domain}/manage/docs (${exposure_profile}; protect with strong auth/WAF/allowlists)"
+    fi
 
     return 0
 }
@@ -2173,8 +2316,8 @@ deploy_server_a() {
     log_info "######################################################"
     echo ""
 
-    # --- Step 0: Pre-Deploy Check (Cloud Agent Cleanup) ---
-    log_info "[Step 0/14] Pre-deploy check (cloud agent cleanup)..."
+    # --- Step 0: Pre-Deploy Check (Cloud Readiness Review) ---
+    log_info "[Step 0/14] Pre-deploy check (cloud readiness review)..."
     local _script_dir
     _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     if [[ -f "${_script_dir}/dd-reinstall.sh" ]]; then
@@ -2185,9 +2328,13 @@ deploy_server_a() {
                 log_error "Pre-deploy check failed. Cannot continue with Server A deployment."
                 return 1
             fi
+            if declare -f cloud_review_blocks_deployment >/dev/null 2>&1 && cloud_review_blocks_deployment; then
+                log_error "${CLOUD_REVIEW_DEPLOYMENT_BLOCK_REASON:-Pre-deploy check requested operator follow-up before deployment.}"
+                return 1
+            fi
         fi
     else
-        log_warn "dd-reinstall.sh not found. Skipping cloud agent cleanup."
+        log_warn "dd-reinstall.sh not found. Skipping cloud readiness review."
     fi
     echo ""
 
@@ -2458,6 +2605,8 @@ _LOGROTATE_MINIMAL
         source /root/server-a-domain.conf
         domain="${DOMAIN:-<your-domain>}"
     fi
+    local exposure_profile
+    exposure_profile="$(bifrost_exposure_profile)"
 
     echo ""
     if [[ ${#failed_steps[@]} -eq 0 ]]; then
@@ -2478,16 +2627,24 @@ _LOGROTATE_MINIMAL
     echo ""
     log_info "==================== Service URLs ===================="
     log_info ""
-    log_info "  New API Dashboard : https://${domain}/dashboard"
-    log_info "  New API Login     : https://${domain}/login"
+    log_info "  Exposure Profile  : ${exposure_profile}"
     log_info "  API Endpoint      : https://${domain}/v1"
     log_info "  Decoy Website     : https://${domain}/"
+    if [[ "${exposure_profile}" == "vpn-first" ]]; then
+        log_info "  New API Dashboard : https://${domain}/dashboard (VPN/private allowlist only)"
+        log_info "  New API Login     : https://${domain}/login (VPN/private allowlist only)"
+        log_info "  Bifrost Manage    : https://${domain}/manage/docs (VPN/private allowlist only)"
+    else
+        log_warn "  New API Dashboard : https://${domain}/dashboard (${exposure_profile}; public management enabled)"
+        log_warn "  New API Login     : https://${domain}/login (${exposure_profile}; public management enabled)"
+        log_warn "  Bifrost Manage    : https://${domain}/manage/docs (${exposure_profile}; public management enabled)"
+    fi
     log_info ""
-    log_info "==================== Default Credentials ============="
+    log_info "==================== New API Initialization =========="
     log_info ""
-    log_info "  New API Admin User : root"
-    log_info "  New API Admin Pass : 123456"
-    log_warn "  >> CHANGE THIS PASSWORD IMMEDIATELY AFTER FIRST LOGIN <<"
+    log_info "  First Visit       : Complete the New API initialization page"
+    log_info "  Admin Credential  : Created by you during first-run setup"
+    log_warn "  Do not use or document any shared default admin password."
     log_info ""
     log_info "==================== Tunnel Status ==================="
     log_info ""
@@ -2538,8 +2695,9 @@ _LOGROTATE_MINIMAL
     log_warn "  1. Complete the New API initialization page and set a strong admin password NOW"
     log_warn "  2. Add API keys for upstream AI providers in New API dashboard"
     log_warn "  3. Create user accounts and distribute per-user API keys"
-    log_warn "  4. Review firewall rules: ufw status / firewall-cmd --list-all"
-    log_warn "  5. Back up ${SERVER_B_CONF} and ${NEW_API_DIR}/data/"
+    log_warn "  4. Verify exposure profile '${exposure_profile}' matches your deployment policy"
+    log_warn "  5. Review firewall rules: ufw status / firewall-cmd --list-all"
+    log_warn "  6. Back up ${SERVER_B_CONF} and ${NEW_API_DIR}/data/"
     log_info ""
     if [[ ${#failed_steps[@]} -gt 0 ]]; then
         log_error "==================== Failed Steps ===================="

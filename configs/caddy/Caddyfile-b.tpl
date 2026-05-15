@@ -13,8 +13,9 @@
 #   (for example IP-only mode), so panel routes/headers here must stay in sync.
 #
 # Template variables:
-#   {{DOMAIN}}      - Your overseas domain name (e.g., panel.example.com)
-#   {{PANEL_PORT}}  - 3x-ui panel port (default: 2053)
+#   {{DOMAIN}}               - Your overseas domain name (e.g., panel.example.com)
+#   {{PANEL_PORT}}           - 3x-ui panel port (default: 2053)
+#   {{ADMIN_ALLOWED_RANGES}} - VPN/private/admin CIDR allowlist for vpn-first
 #
 # Place the rendered file at: /etc/caddy/Caddyfile
 # =============================================================================
@@ -88,16 +89,23 @@
 
 	# --------------------------------------------------
 	# 3x-ui Panel - Reverse Proxy
-	# The panel path is configurable in 3x-ui settings.
-	# Default: accessible at root or /xui/
+	# vpn-first fixture: /xui-panel/ is protected by VPN/private/admin allowlist.
 	# --------------------------------------------------
 
 	# 3x-ui panel routes
-	handle /xui-panel/* {
-		# IP whitelist for panel access (restrict to admin IPs)
-		# Uncomment and modify to restrict access:
-		# @allowed remote_ip 你的管理IP/32
-		# handle @allowed {
+	@xui_private_root {
+		path /xui-panel
+		remote_ip {{ADMIN_ALLOWED_RANGES}}
+	}
+	handle @xui_private_root {
+		redir /xui-panel/ 308
+	}
+	@xui_private {
+		path /xui-panel/*
+		remote_ip {{ADMIN_ALLOWED_RANGES}}
+	}
+	handle @xui_private {
+		uri strip_prefix /xui-panel
 		reverse_proxy localhost:{{PANEL_PORT}} {
 			header_up X-Real-IP {remote_host}
 			header_up X-Forwarded-For {remote_host}
@@ -109,50 +117,12 @@
 				response_header_timeout 30s
 			}
 		}
-		# }
-		# respond "404 Not Found" 404
 	}
-
-	# 3x-ui API endpoints
-	handle /server/* {
-		reverse_proxy localhost:{{PANEL_PORT}} {
-			header_up X-Real-IP {remote_host}
-			header_up X-Forwarded-For {remote_host}
-			header_up X-Forwarded-Proto {scheme}
-			header_up Host {host}
-		}
+	handle /xui-panel {
+		respond "3x-ui requires VPN/private access in vpn-first profile" 403
 	}
-
-	# 3x-ui login page
-	handle /login {
-		reverse_proxy localhost:{{PANEL_PORT}} {
-			header_up X-Real-IP {remote_host}
-			header_up X-Forwarded-For {remote_host}
-			header_up X-Forwarded-Proto {scheme}
-			header_up Host {host}
-		}
-	}
-
-	# 3x-ui WebSocket support (for real-time updates)
-	handle /ws/* {
-		reverse_proxy localhost:{{PANEL_PORT}} {
-			header_up X-Real-IP {remote_host}
-			header_up X-Forwarded-For {remote_host}
-			header_up X-Forwarded-Proto {scheme}
-			header_up Host {host}
-			header_up Connection {>Connection}
-			header_up Upgrade {>Upgrade}
-		}
-	}
-
-	# 3x-ui static assets
-	handle /assets/* {
-		reverse_proxy localhost:{{PANEL_PORT}} {
-			header_up X-Real-IP {remote_host}
-			header_up X-Forwarded-For {remote_host}
-			header_up X-Forwarded-Proto {scheme}
-			header_up Host {host}
-		}
+	handle /xui-panel/* {
+		respond "3x-ui requires VPN/private access in vpn-first profile" 403
 	}
 
 	# --------------------------------------------------

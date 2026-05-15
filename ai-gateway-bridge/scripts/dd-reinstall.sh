@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
-# AI Gateway Bridge - Cloud Agent Cleanup & DD Reinstall Module
+# AI Gateway Bridge - Cloud Readiness & DD Reinstall Preflight Module
 # =============================================================================
-# Description : Detects cloud provider, identifies and removes pre-installed
-#               monitoring agents / security daemons / telemetry, and
-#               optionally performs a full DD reinstall using bin456789/reinstall.
+# Description : Detects cloud provider integrations, reports platform agents
+#               and dependencies for operator review, and optionally performs
+#               a full DD reinstall using bin456789/reinstall.
 #
 # Usage       : source "$(dirname "${BASH_SOURCE[0]}")/dd-reinstall.sh"
 #               pre_deploy_check      # Call at the start of deployment
@@ -45,6 +45,415 @@ declare -a DETECTED_AGENTS_PROCESSES=()
 declare -a DETECTED_AGENTS_PACKAGES=()
 declare -a DETECTED_AGENTS_PATHS=()
 declare -a DETECTED_AGENTS_CRONS=()
+
+CLOUD_REVIEW_MODE_EFFECTIVE="interactive"
+CLOUD_REVIEW_REPORT_ONLY_COMPLETED=0
+CLOUD_REVIEW_DEPLOYMENT_BLOCK_REASON=""
+CLOUD_REVIEW_REPORT_DIR_EFFECTIVE=""
+CLOUD_REVIEW_TEXT_REPORT=""
+CLOUD_REVIEW_JSON_REPORT=""
+CLOUD_REVIEW_FILESTAMP=""
+CLOUD_REVIEW_TIMESTAMP=""
+CLOUD_REVIEW_INTEGRATIONS_FOUND=0
+CLOUD_REVIEW_REVIEW_ACKNOWLEDGED=0
+CLOUD_REVIEW_VERIFICATION_OK=0
+CLOUD_REVIEW_VERIFICATION_WARNING_COUNT=0
+CLOUD_REVIEW_KERNEL_VERSION="unknown"
+CLOUD_REVIEW_KERNEL_PROFILE_STATUS="ok"
+CLOUD_REVIEW_BBR_AVAILABLE="unknown"
+CLOUD_REVIEW_BBR_ACTIVE="unknown"
+CLOUD_REVIEW_CURRENT_CC="unknown"
+CLOUD_REVIEW_AVAILABLE_CC="unknown"
+CLOUD_REVIEW_CLOUD_INIT_ACTIVE="unknown"
+CLOUD_REVIEW_MENU_PRESENTED=0
+CLOUD_REVIEW_CONFIRMATION_PROMPTED=0
+CLOUD_REVIEW_DD_REINSTALL_SELECTED=0
+declare -a CLOUD_REVIEW_PROVIDER_REPOS=()
+declare -a CLOUD_REVIEW_TRUST_FILES=()
+declare -a CLOUD_REVIEW_PROVIDER_LISTENERS=()
+declare -a CLOUD_REVIEW_WARNINGS=()
+
+# =============================================================================
+# Cloud Review Helpers
+# =============================================================================
+
+_cloud_review_reset_state() {
+    DETECTED_PROVIDER="unknown"
+    DETECTED_AGENTS_SERVICES=()
+    DETECTED_AGENTS_PROCESSES=()
+    DETECTED_AGENTS_PACKAGES=()
+    DETECTED_AGENTS_PATHS=()
+    DETECTED_AGENTS_CRONS=()
+
+    CLOUD_REVIEW_MODE_EFFECTIVE="interactive"
+    CLOUD_REVIEW_REPORT_ONLY_COMPLETED=0
+    CLOUD_REVIEW_DEPLOYMENT_BLOCK_REASON=""
+    CLOUD_REVIEW_REPORT_DIR_EFFECTIVE=""
+    CLOUD_REVIEW_TEXT_REPORT=""
+    CLOUD_REVIEW_JSON_REPORT=""
+    CLOUD_REVIEW_FILESTAMP="$(date '+%Y%m%d_%H%M%S')"
+    CLOUD_REVIEW_TIMESTAMP="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    CLOUD_REVIEW_INTEGRATIONS_FOUND=0
+    CLOUD_REVIEW_REVIEW_ACKNOWLEDGED=0
+    CLOUD_REVIEW_VERIFICATION_OK=0
+    CLOUD_REVIEW_VERIFICATION_WARNING_COUNT=0
+    CLOUD_REVIEW_KERNEL_VERSION="unknown"
+    CLOUD_REVIEW_KERNEL_PROFILE_STATUS="ok"
+    CLOUD_REVIEW_BBR_AVAILABLE="unknown"
+    CLOUD_REVIEW_BBR_ACTIVE="unknown"
+    CLOUD_REVIEW_CURRENT_CC="unknown"
+    CLOUD_REVIEW_AVAILABLE_CC="unknown"
+    CLOUD_REVIEW_CLOUD_INIT_ACTIVE="unknown"
+    CLOUD_REVIEW_MENU_PRESENTED=0
+    CLOUD_REVIEW_CONFIRMATION_PROMPTED=0
+    CLOUD_REVIEW_DD_REINSTALL_SELECTED=0
+    CLOUD_REVIEW_PROVIDER_REPOS=()
+    CLOUD_REVIEW_TRUST_FILES=()
+    CLOUD_REVIEW_PROVIDER_LISTENERS=()
+    CLOUD_REVIEW_WARNINGS=()
+}
+
+cloud_review_is_report_only() {
+    [[ "${CLOUD_REVIEW_REPORT_ONLY_COMPLETED:-0}" -eq 1 ]]
+}
+
+cloud_review_blocks_deployment() {
+    [[ -n "${CLOUD_REVIEW_DEPLOYMENT_BLOCK_REASON:-}" ]]
+}
+
+_cloud_review_resolve_mode() {
+    local cli_mode=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --report-only)
+                cli_mode="report-only"
+                ;;
+            --interactive)
+                cli_mode="interactive"
+                ;;
+            *)
+                log_error "Unknown pre_deploy_check option: $1"
+                return 1
+                ;;
+        esac
+        shift
+    done
+
+    local mode="${cli_mode:-${BIFROST_CLOUD_REVIEW_MODE:-interactive}}"
+    mode="${mode,,}"
+    mode="${mode//_/-}"
+
+    case "${mode}" in
+        ""|interactive)
+            printf '%s' "interactive"
+            ;;
+        report|report-only)
+            printf '%s' "report-only"
+            ;;
+        *)
+            log_error "Invalid BIFROST_CLOUD_REVIEW_MODE='${mode}'. Expected: interactive, report, or report-only."
+            return 1
+            ;;
+    esac
+}
+
+_cloud_review_provider_label() {
+    if [[ "${DETECTED_PROVIDER}" != "unknown" && -n "${DETECTED_PROVIDER}" ]]; then
+        printf '%s' "${DETECTED_PROVIDER}"
+    else
+        printf '%s' "Unknown / Bare Metal"
+    fi
+}
+
+_cloud_review_json_escape() {
+    local value="${1-}"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    value="${value//$'\r'/\\r}"
+    value="${value//$'\t'/\\t}"
+    printf '%s' "${value}"
+}
+
+_cloud_review_json_array() {
+    local arr_name="${1:?}"
+    local -n arr_ref="${arr_name}"
+    local json="["
+    local first=1
+    local item
+
+    for item in "${arr_ref[@]+"${arr_ref[@]}"}"; do
+        if [[ ${first} -eq 0 ]]; then
+            json+=","
+        fi
+        first=0
+        json+="\"$(_cloud_review_json_escape "${item}")\""
+    done
+
+    json+="]"
+    printf '%s' "${json}"
+}
+
+_cloud_review_write_json_payload() {
+    local json_payload="${1:?}"
+    local report_file="${2:?}"
+
+    if check_command jq; then
+        if ! printf '%s\n' "${json_payload}" | jq '.' > "${report_file}" 2>/dev/null; then
+            log_error "Failed to validate rendered cloud review JSON."
+            return 1
+        fi
+    else
+        if ! printf '%s\n' "${json_payload}" > "${report_file}"; then
+            log_error "Failed to write cloud review JSON report to ${report_file}."
+            return 1
+        fi
+    fi
+
+    if [[ ! -s "${report_file}" ]]; then
+        log_error "Cloud review JSON report was not written correctly: ${report_file}"
+        return 1
+    fi
+}
+
+_cloud_review_append_warning() {
+    local message="${1:?}"
+    CLOUD_REVIEW_WARNINGS+=("${message}")
+}
+
+_cloud_review_resolve_report_file() {
+    local extension="${1:?}"
+    local explicit_path="${2:-}"
+    local default_dir="${BIFROST_CLOUD_REVIEW_REPORT_DIR:-$(dirname "${LOG_FILE}")}"
+    local fallback_dir="${TMPDIR:-/tmp}/$(basename "$(dirname "${LOG_FILE}")")"
+    local target=""
+
+    if [[ -n "${explicit_path}" ]]; then
+        target="${explicit_path}"
+    else
+        target="${default_dir}/cloud-readiness-review-${CLOUD_REVIEW_FILESTAMP}.${extension}"
+    fi
+
+    local target_dir
+    target_dir="$(dirname "${target}")"
+    if mkdir -p "${target_dir}" 2>/dev/null; then
+        printf '%s' "${target}"
+        return 0
+    fi
+
+    if [[ -n "${explicit_path}" || -n "${BIFROST_CLOUD_REVIEW_REPORT_DIR:-}" ]]; then
+        log_error "Cloud review report path is not writable: ${target_dir}"
+        return 1
+    fi
+
+    mkdir -p "${fallback_dir}"
+    printf '%s' "${fallback_dir}/cloud-readiness-review-${CLOUD_REVIEW_FILESTAMP}.${extension}"
+}
+
+_cloud_review_overall_status() {
+    if cloud_review_is_report_only; then
+        printf '%s' "report-only"
+    elif [[ ${CLOUD_REVIEW_REVIEW_ACKNOWLEDGED} -ne 1 ]]; then
+        printf '%s' "review-required"
+    elif [[ ${CLOUD_REVIEW_VERIFICATION_OK} -ne 1 ]]; then
+        printf '%s' "verification-failed"
+    elif [[ ${CLOUD_REVIEW_VERIFICATION_WARNING_COUNT} -gt 0 ]]; then
+        printf '%s' "review-with-warnings"
+    else
+        printf '%s' "ready"
+    fi
+}
+
+_cloud_review_write_text_report() {
+    local report_file="${1:?}"
+    local json_file="${2:?}"
+    local overall_status
+    local deployment_ready="no"
+    overall_status="$(_cloud_review_overall_status)"
+    if [[ ${CLOUD_REVIEW_REVIEW_ACKNOWLEDGED} -eq 1 && ${CLOUD_REVIEW_VERIFICATION_OK} -eq 1 && ${CLOUD_REVIEW_REPORT_ONLY_COMPLETED} -ne 1 ]]; then
+        deployment_ready="yes"
+    fi
+
+    {
+        echo "Bifrost Cloud Readiness Review"
+        echo "Generated At (UTC): ${CLOUD_REVIEW_TIMESTAMP}"
+        echo "Mode: ${CLOUD_REVIEW_MODE_EFFECTIVE}"
+        echo "Overall Status: ${overall_status}"
+        echo "Deployment Ready: ${deployment_ready}"
+        echo "Cloud Provider: $(_cloud_review_provider_label)"
+        echo "Integrations Found: ${CLOUD_REVIEW_INTEGRATIONS_FOUND}"
+        echo "Review Acknowledged: ${CLOUD_REVIEW_REVIEW_ACKNOWLEDGED}"
+        echo "Verification OK: ${CLOUD_REVIEW_VERIFICATION_OK}"
+        echo "Verification Warning Count: ${CLOUD_REVIEW_VERIFICATION_WARNING_COUNT}"
+        echo "Report Only Completed: ${CLOUD_REVIEW_REPORT_ONLY_COMPLETED}"
+        echo "Menu Presented: ${CLOUD_REVIEW_MENU_PRESENTED}"
+        echo "Confirmation Prompted: ${CLOUD_REVIEW_CONFIRMATION_PROMPTED}"
+        echo "DD Reinstall Selected: ${CLOUD_REVIEW_DD_REINSTALL_SELECTED}"
+        echo "Text Report: ${report_file}"
+        echo "JSON Report: ${json_file}"
+        echo ""
+        echo "Review Boundary"
+        echo "- Report-only: inventory plus report export only; no DD menu, no confirmation prompt, no provider-managed component changes."
+        echo "- Review & acknowledge: inventory plus operator acknowledgement; still no provider-managed component changes."
+        echo "- Full DD Reinstall: separate destructive path that wipes the OS after explicit operator confirmation."
+        echo ""
+        echo "Detected Cloud Integrations"
+        if (( ${#DETECTED_AGENTS_SERVICES[@]} == 0 && ${#DETECTED_AGENTS_PROCESSES[@]} == 0 && ${#DETECTED_AGENTS_PACKAGES[@]} == 0 && ${#DETECTED_AGENTS_PATHS[@]} == 0 && ${#DETECTED_AGENTS_CRONS[@]} == 0 )); then
+            echo "- none"
+        else
+            local item
+            for item in "${DETECTED_AGENTS_SERVICES[@]+"${DETECTED_AGENTS_SERVICES[@]}"}"; do
+                echo "- service: ${item}"
+            done
+            for item in "${DETECTED_AGENTS_PROCESSES[@]+"${DETECTED_AGENTS_PROCESSES[@]}"}"; do
+                echo "- process: ${item}"
+            done
+            for item in "${DETECTED_AGENTS_PACKAGES[@]+"${DETECTED_AGENTS_PACKAGES[@]}"}"; do
+                echo "- package: ${item}"
+            done
+            for item in "${DETECTED_AGENTS_PATHS[@]+"${DETECTED_AGENTS_PATHS[@]}"}"; do
+                echo "- path: ${item}"
+            done
+            for item in "${DETECTED_AGENTS_CRONS[@]+"${DETECTED_AGENTS_CRONS[@]}"}"; do
+                echo "- cron: ${item}"
+            done
+        fi
+        echo ""
+        echo "Provider Repositories / Trust Material"
+        if (( ${#CLOUD_REVIEW_PROVIDER_REPOS[@]} == 0 && ${#CLOUD_REVIEW_TRUST_FILES[@]} == 0 )); then
+            echo "- none"
+        else
+            local repo_entry
+            for repo_entry in "${CLOUD_REVIEW_PROVIDER_REPOS[@]+"${CLOUD_REVIEW_PROVIDER_REPOS[@]}"}"; do
+                echo "- repo: ${repo_entry}"
+            done
+            for repo_entry in "${CLOUD_REVIEW_TRUST_FILES[@]+"${CLOUD_REVIEW_TRUST_FILES[@]}"}"; do
+                echo "- trust-file: ${repo_entry}"
+            done
+        fi
+        echo ""
+        echo "Verification Signals"
+        echo "- kernel_version: ${CLOUD_REVIEW_KERNEL_VERSION}"
+        echo "- kernel_profile_status: ${CLOUD_REVIEW_KERNEL_PROFILE_STATUS}"
+        echo "- bbr_available: ${CLOUD_REVIEW_BBR_AVAILABLE}"
+        echo "- bbr_active: ${CLOUD_REVIEW_BBR_ACTIVE}"
+        echo "- current_congestion_control: ${CLOUD_REVIEW_CURRENT_CC}"
+        echo "- available_congestion_controls: ${CLOUD_REVIEW_AVAILABLE_CC}"
+        echo "- cloud_init_active: ${CLOUD_REVIEW_CLOUD_INIT_ACTIVE}"
+        if (( ${#CLOUD_REVIEW_PROVIDER_LISTENERS[@]} > 0 )); then
+            local listener
+            for listener in "${CLOUD_REVIEW_PROVIDER_LISTENERS[@]+"${CLOUD_REVIEW_PROVIDER_LISTENERS[@]}"}"; do
+                echo "- provider_listener: ${listener}"
+            done
+        fi
+        if (( ${#CLOUD_REVIEW_WARNINGS[@]} > 0 )); then
+            echo ""
+            echo "Warnings"
+            local warning
+            for warning in "${CLOUD_REVIEW_WARNINGS[@]+"${CLOUD_REVIEW_WARNINGS[@]}"}"; do
+                echo "- ${warning}"
+            done
+        fi
+        echo ""
+        echo "Next Steps"
+        if cloud_review_is_report_only; then
+            echo "- Review this report against cloud console metadata, cloud-init, SSH key recovery, security groups, monitoring, audit, and backup dependencies."
+            echo "- Rerun the gate without report-only mode before any deployment or DD reinstall."
+        elif [[ ${CLOUD_REVIEW_INTEGRATIONS_FOUND} -eq 1 && ${CLOUD_REVIEW_REVIEW_ACKNOWLEDGED} -ne 1 ]]; then
+            echo "- Complete the interactive review and acknowledgement step before deployment."
+        fi
+        echo "- Use Full DD Reinstall only on disposable or first-build hosts after confirming console access, rollback path, and backup integrity."
+    } > "${report_file}"
+
+    if [[ ! -s "${report_file}" ]]; then
+        log_error "Cloud review text report was not written correctly: ${report_file}"
+        return 1
+    fi
+}
+
+_cloud_review_write_json_report() {
+    local report_file="${1:?}"
+    local text_file="${2:?}"
+    local overall_status
+    local deployment_ready_json="false"
+    local integrations_found_json="false"
+    local review_ack_json="false"
+    local verification_ok_json="false"
+    local report_only_json="false"
+    local menu_presented_json="false"
+    local confirmation_json="false"
+    local dd_selected_json="false"
+    local cloud_init_json="false"
+
+    overall_status="$(_cloud_review_overall_status)"
+    if [[ ${CLOUD_REVIEW_REVIEW_ACKNOWLEDGED} -eq 1 && ${CLOUD_REVIEW_VERIFICATION_OK} -eq 1 && ${CLOUD_REVIEW_REPORT_ONLY_COMPLETED} -ne 1 ]]; then
+        deployment_ready_json="true"
+    fi
+    if [[ ${CLOUD_REVIEW_INTEGRATIONS_FOUND} -eq 1 ]]; then
+        integrations_found_json="true"
+    fi
+    if [[ ${CLOUD_REVIEW_REVIEW_ACKNOWLEDGED} -eq 1 ]]; then
+        review_ack_json="true"
+    fi
+    if [[ ${CLOUD_REVIEW_VERIFICATION_OK} -eq 1 ]]; then
+        verification_ok_json="true"
+    fi
+    if [[ ${CLOUD_REVIEW_REPORT_ONLY_COMPLETED} -eq 1 ]]; then
+        report_only_json="true"
+    fi
+    if [[ ${CLOUD_REVIEW_MENU_PRESENTED} -eq 1 ]]; then
+        menu_presented_json="true"
+    fi
+    if [[ ${CLOUD_REVIEW_CONFIRMATION_PROMPTED} -eq 1 ]]; then
+        confirmation_json="true"
+    fi
+    if [[ ${CLOUD_REVIEW_DD_REINSTALL_SELECTED} -eq 1 ]]; then
+        dd_selected_json="true"
+    fi
+    if [[ "${CLOUD_REVIEW_CLOUD_INIT_ACTIVE}" == "true" ]]; then
+        cloud_init_json="true"
+    fi
+
+    local json="{"
+    json+="\"timestamp\":\"$(_cloud_review_json_escape "${CLOUD_REVIEW_TIMESTAMP}")\","
+    json+="\"mode\":\"$(_cloud_review_json_escape "${CLOUD_REVIEW_MODE_EFFECTIVE}")\","
+    json+="\"overall_status\":\"$(_cloud_review_json_escape "${overall_status}")\","
+    json+="\"deployment_ready\":${deployment_ready_json},"
+    json+="\"report_only\":${report_only_json},"
+    json+="\"provider\":{\"id\":\"$(_cloud_review_json_escape "${DETECTED_PROVIDER}")\",\"label\":\"$(_cloud_review_json_escape "$(_cloud_review_provider_label)")\"},"
+    json+="\"review_gate\":{\"integrations_found\":${integrations_found_json},\"review_acknowledged\":${review_ack_json},\"verification_ok\":${verification_ok_json},\"menu_presented\":${menu_presented_json},\"confirmation_prompted\":${confirmation_json},\"dd_reinstall_selected\":${dd_selected_json},\"deployment_block_reason\":\"$(_cloud_review_json_escape "${CLOUD_REVIEW_DEPLOYMENT_BLOCK_REASON}")\"},"
+    json+="\"integrations\":{\"services\":$(_cloud_review_json_array DETECTED_AGENTS_SERVICES),\"processes\":$(_cloud_review_json_array DETECTED_AGENTS_PROCESSES),\"packages\":$(_cloud_review_json_array DETECTED_AGENTS_PACKAGES),\"paths\":$(_cloud_review_json_array DETECTED_AGENTS_PATHS),\"crons\":$(_cloud_review_json_array DETECTED_AGENTS_CRONS)},"
+    json+="\"provider_repositories\":$(_cloud_review_json_array CLOUD_REVIEW_PROVIDER_REPOS),"
+    json+="\"trust_files\":$(_cloud_review_json_array CLOUD_REVIEW_TRUST_FILES),"
+    json+="\"verification\":{\"warning_count\":${CLOUD_REVIEW_VERIFICATION_WARNING_COUNT},\"kernel_version\":\"$(_cloud_review_json_escape "${CLOUD_REVIEW_KERNEL_VERSION}")\",\"kernel_profile_status\":\"$(_cloud_review_json_escape "${CLOUD_REVIEW_KERNEL_PROFILE_STATUS}")\",\"bbr_available\":\"$(_cloud_review_json_escape "${CLOUD_REVIEW_BBR_AVAILABLE}")\",\"bbr_active\":\"$(_cloud_review_json_escape "${CLOUD_REVIEW_BBR_ACTIVE}")\",\"current_congestion_control\":\"$(_cloud_review_json_escape "${CLOUD_REVIEW_CURRENT_CC}")\",\"available_congestion_controls\":\"$(_cloud_review_json_escape "${CLOUD_REVIEW_AVAILABLE_CC}")\",\"cloud_init_active\":${cloud_init_json},\"provider_listeners\":$(_cloud_review_json_array CLOUD_REVIEW_PROVIDER_LISTENERS),\"warnings\":$(_cloud_review_json_array CLOUD_REVIEW_WARNINGS)},"
+    json+="\"reports\":{\"text\":\"$(_cloud_review_json_escape "${text_file}")\",\"json\":\"$(_cloud_review_json_escape "${report_file}")\"},"
+    json+="\"boundaries\":{\"review_only\":\"Inventory plus report export only; no DD menu, no confirmation prompt, no provider-managed component changes.\",\"review_acknowledge\":\"Operator acknowledgement clears the deployment gate without changing provider-managed components.\",\"full_dd_reinstall\":\"Separate destructive OS wipe path that requires explicit operator confirmation.\"}"
+    json+="}"
+
+    _cloud_review_write_json_payload "${json}" "${report_file}"
+}
+
+_cloud_review_write_reports() {
+    local text_file json_file
+    text_file="$(_cloud_review_resolve_report_file "txt" "${BIFROST_CLOUD_REVIEW_REPORT_PATH:-}")" || return 1
+    json_file="$(_cloud_review_resolve_report_file "json" "${BIFROST_CLOUD_REVIEW_REPORT_JSON_PATH:-}")" || return 1
+
+    CLOUD_REVIEW_REPORT_DIR_EFFECTIVE="$(dirname "${text_file}")"
+    CLOUD_REVIEW_TEXT_REPORT="${text_file}"
+    CLOUD_REVIEW_JSON_REPORT="${json_file}"
+
+    _cloud_review_write_text_report "${text_file}" "${json_file}" || return 1
+    _cloud_review_write_json_report "${json_file}" "${text_file}" || return 1
+    chmod 600 "${text_file}" "${json_file}" 2>/dev/null || true
+
+    if [[ -z "${BIFROST_CLOUD_REVIEW_REPORT_PATH:-}" ]]; then
+        ln -sf "$(basename "${text_file}")" "${CLOUD_REVIEW_REPORT_DIR_EFFECTIVE}/cloud-readiness-review.txt" 2>/dev/null || cp -f "${text_file}" "${CLOUD_REVIEW_REPORT_DIR_EFFECTIVE}/cloud-readiness-review.txt" 2>/dev/null || true
+    fi
+    if [[ -z "${BIFROST_CLOUD_REVIEW_REPORT_JSON_PATH:-}" ]]; then
+        ln -sf "$(basename "${json_file}")" "${CLOUD_REVIEW_REPORT_DIR_EFFECTIVE}/cloud-readiness-review.json" 2>/dev/null || cp -f "${json_file}" "${CLOUD_REVIEW_REPORT_DIR_EFFECTIVE}/cloud-readiness-review.json" 2>/dev/null || true
+    fi
+}
 
 # =============================================================================
 # Section 1 : Cloud Provider Detection
@@ -534,7 +943,8 @@ detect_preinstalled_agents() {
     _report_detected_agents
 
     if (( ${#DETECTED_AGENTS_SERVICES[@]} + ${#DETECTED_AGENTS_PROCESSES[@]} + \
-          ${#DETECTED_AGENTS_PACKAGES[@]} + ${#DETECTED_AGENTS_PATHS[@]} == 0 )); then
+          ${#DETECTED_AGENTS_PACKAGES[@]} + ${#DETECTED_AGENTS_PATHS[@]} + \
+          ${#DETECTED_AGENTS_CRONS[@]} == 0 )); then
         log_success "No known cloud agents detected. System appears clean."
         return 1
     fi
@@ -679,7 +1089,7 @@ _report_detected_agents() {
         return 0
     fi
 
-    print_section "Detected Cloud Agents (${total} items)"
+    print_section "Detected Cloud Integrations (${total} items)"
 
     if (( ${#DETECTED_AGENTS_SERVICES[@]} > 0 )); then
         echo -e "  ${COLOR_BOLD}Services:${COLOR_RESET}"
@@ -719,27 +1129,19 @@ _report_detected_agents() {
     fi
 
     echo ""
-    log_warn "These agents may: report system activity to the cloud provider, consume " \
-             "resources, interfere with custom deployments, or re-enable themselves after removal."
+    log_warn "These components may provide cloud console monitoring, security, audit, SSH key, " \
+             "metadata, backup, or recovery functions."
+    log_warn "Bifrost inventories them for manual review only. Provider-managed services, files, packages, and trust material remain unchanged."
 }
 
 # =============================================================================
-# Section 3 : Cloud Agent Removal
+# Section 3 : Cloud Integration Review
 # =============================================================================
 
 # -----------------------------------------------------------------------------
 # remove_cloud_agents:
-#   Stop, disable, and remove all detected cloud agents.
-#   Operates on the arrays populated by detect_preinstalled_agents().
-#
-#   Steps:
-#     1. Stop & disable systemd services
-#     2. Kill remaining processes
-#     3. Remove packages (apt/yum/dnf)
-#     4. Remove files and directories
-#     5. Remove cron entries
-#     6. Remove provider-specific apt/yum repositories
-#     7. Clean package manager cache
+#   Backward-compatible, non-destructive review entry point.
+#   It reports detected cloud integrations and requires manual policy review.
 #
 #   Returns: 0 on success
 # -----------------------------------------------------------------------------
@@ -749,133 +1151,67 @@ remove_cloud_agents() {
                     ${#DETECTED_AGENTS_CRONS[@]} ))
 
     if (( total == 0 )); then
-        log_info "No agents to remove."
+        log_info "No cloud provider integration components were detected."
         return 0
     fi
 
-    log_info "Removing ${total} detected cloud agent components..."
+    print_section "Cloud Integration Manual Review Required"
+    log_warn "${total} cloud-provider integration component(s) were detected."
+    log_warn "This run is inventory and review only. Provider-managed services, packages, files, and trust material remain unchanged."
+    log_warn "Review cloud console dependencies, security groups, SSH key injection, monitoring alerts, backups, and compliance policy before any manual change."
+    echo ""
 
-    # --- Step 1: Stop and disable services ---
     if (( ${#DETECTED_AGENTS_SERVICES[@]} > 0 )); then
-        print_step 1 "Stopping and disabling services..."
+        echo -e "  ${COLOR_BOLD}Services requiring review:${COLOR_RESET}"
         for svc in ${DETECTED_AGENTS_SERVICES[@]+"${DETECTED_AGENTS_SERVICES[@]}"}; do
-            log_info "  Stopping: ${svc}"
-            systemctl stop "${svc}" 2>/dev/null || true
-            systemctl disable "${svc}" 2>/dev/null || true
-            # Mask to prevent re-enablement
-            systemctl mask "${svc}" 2>/dev/null || true
-            log_success "  Stopped & masked: ${svc}"
+            local status
+            status="$(systemctl is-active "${svc}" 2>/dev/null || echo 'unknown')"
+            echo -e "    - ${COLOR_YELLOW}${svc}${COLOR_RESET} [${status}]"
         done
     fi
 
-    # --- Step 2: Kill remaining processes ---
     if (( ${#DETECTED_AGENTS_PROCESSES[@]} > 0 )); then
-        print_step 2 "Killing remaining agent processes..."
+        echo -e "  ${COLOR_BOLD}Processes requiring review:${COLOR_RESET}"
         for proc in ${DETECTED_AGENTS_PROCESSES[@]+"${DETECTED_AGENTS_PROCESSES[@]}"}; do
-            if pgrep -x "${proc}" &>/dev/null || pgrep -f "${proc}" &>/dev/null; then
-                log_info "  Killing: ${proc}"
-                pkill -9 -x "${proc}" 2>/dev/null || true
-                pkill -9 -f "${proc}" 2>/dev/null || true
-                # Wait briefly for processes to die
-                sleep 1
-                if pgrep -x "${proc}" &>/dev/null; then
-                    log_warn "  Process '${proc}' still alive after SIGKILL — may need reboot."
-                else
-                    log_success "  Killed: ${proc}"
-                fi
-            fi
+            echo -e "    - ${COLOR_YELLOW}${proc}${COLOR_RESET}"
         done
     fi
 
-    # --- Step 3: Remove packages ---
     if (( ${#DETECTED_AGENTS_PACKAGES[@]} > 0 )); then
-        print_step 3 "Removing packages..."
+        echo -e "  ${COLOR_BOLD}Packages requiring review:${COLOR_RESET}"
         for pkg in ${DETECTED_AGENTS_PACKAGES[@]+"${DETECTED_AGENTS_PACKAGES[@]}"}; do
-            log_info "  Removing package: ${pkg}"
-            case "${PKG_MGR}" in
-                apt)
-                    DEBIAN_FRONTEND=noninteractive apt-get purge -y "${pkg}" 2>/dev/null || true
-                    ;;
-                dnf)
-                    dnf remove -y "${pkg}" 2>/dev/null || true
-                    ;;
-                yum)
-                    yum remove -y "${pkg}" 2>/dev/null || true
-                    ;;
-            esac
+            echo -e "    - ${COLOR_YELLOW}${pkg}${COLOR_RESET}"
         done
     fi
 
-    # --- Step 4: Remove files and directories ---
     if (( ${#DETECTED_AGENTS_PATHS[@]} > 0 )); then
-        print_step 4 "Removing agent files and directories..."
+        echo -e "  ${COLOR_BOLD}Paths requiring review:${COLOR_RESET}"
         for agent_path in ${DETECTED_AGENTS_PATHS[@]+"${DETECTED_AGENTS_PATHS[@]}"}; do
-            if [[ -e "${agent_path}" ]]; then
-                log_info "  Removing: ${agent_path}"
-                rm -rf "${agent_path}"
-                log_success "  Removed: ${agent_path}"
-            fi
+            echo -e "    - ${COLOR_YELLOW}${agent_path}${COLOR_RESET}"
         done
     fi
 
-    # --- Step 5: Remove cron entries ---
     if (( ${#DETECTED_AGENTS_CRONS[@]} > 0 )); then
-        print_step 5 "Removing cron entries..."
+        echo -e "  ${COLOR_BOLD}Cron entries requiring review:${COLOR_RESET}"
         for cron_pattern in ${DETECTED_AGENTS_CRONS[@]+"${DETECTED_AGENTS_CRONS[@]}"}; do
-            # Remove from user crontab
-            local current_crontab=""
-            local updated_crontab=""
-            current_crontab="$(crontab -l 2>/dev/null)" || current_crontab=""
-            if grep -qF "${cron_pattern}" <<<"${current_crontab}"; then
-                updated_crontab="$(printf '%s\n' "${current_crontab}" | grep -vF "${cron_pattern}" || true)"
-                printf '%s\n' "${updated_crontab}" | crontab - 2>/dev/null || true
-                log_info "  Removed from user crontab: ${cron_pattern}"
-            fi
-            # Remove from system crontabs
-            local cron_file
-            for cron_file in /etc/cron.d/* /etc/cron.daily/* /etc/cron.hourly/*; do
-                if [[ -f "${cron_file}" ]] && grep -qF "${cron_pattern}" "${cron_file}" 2>/dev/null; then
-                    rm -f "${cron_file}"
-                    log_info "  Removed cron file: ${cron_file}"
-                fi
-            done
+            echo -e "    - ${COLOR_YELLOW}${cron_pattern}${COLOR_RESET}"
         done
     fi
 
-    # --- Step 6: Remove provider-specific repositories ---
+    echo ""
     _remove_provider_repos
 
-    # --- Step 7: Clean package manager cache ---
-    print_step 6 "Cleaning package manager cache..."
-    case "${PKG_MGR}" in
-        apt)
-            apt-get autoremove -y 2>/dev/null || true
-            apt-get autoclean 2>/dev/null || true
-            ;;
-        dnf)
-            dnf autoremove -y 2>/dev/null || true
-            dnf clean all 2>/dev/null || true
-            ;;
-        yum)
-            yum autoremove -y 2>/dev/null || true
-            yum clean all 2>/dev/null || true
-            ;;
-    esac
-
-    # --- Step 8: Reload systemd ---
-    systemctl daemon-reload 2>/dev/null || true
-
-    log_success "Cloud agent removal complete."
+    log_success "Cloud integration review report complete. No provider component was modified."
     return 0
 }
 
 # -----------------------------------------------------------------------------
 # _remove_provider_repos:
-#   Remove cloud-provider-specific APT/YUM repositories to prevent
-#   agents from being reinstalled via package updates.
+#   Report cloud-provider-specific APT/YUM repositories and trust material.
 # -----------------------------------------------------------------------------
 _remove_provider_repos() {
-    print_step 5 "Removing provider package repositories..."
+    print_step 5 "Reviewing provider package repositories..."
+    local repo_found=0
 
     # APT repositories
     if [[ -d /etc/apt/sources.list.d ]]; then
@@ -893,8 +1229,9 @@ _remove_provider_repos() {
             local found_file
             for found_file in /etc/apt/sources.list.d/${pattern}; do
                 if [[ -f "${found_file}" ]]; then
-                    rm -f "${found_file}"
-                    log_info "  Removed APT repo: ${found_file}"
+                    repo_found=1
+                    _add_unique CLOUD_REVIEW_PROVIDER_REPOS "${found_file}"
+                    log_warn "  APT repo requires manual review: ${found_file}"
                 fi
             done
         done
@@ -916,8 +1253,9 @@ _remove_provider_repos() {
             local found_file
             for found_file in /etc/yum.repos.d/${pattern}; do
                 if [[ -f "${found_file}" ]]; then
-                    rm -f "${found_file}"
-                    log_info "  Removed YUM repo: ${found_file}"
+                    repo_found=1
+                    _add_unique CLOUD_REVIEW_PROVIDER_REPOS "${found_file}"
+                    log_warn "  YUM repo requires manual review: ${found_file}"
                 fi
             done
         done
@@ -928,10 +1266,17 @@ _remove_provider_repos() {
         for key_file in /etc/apt/trusted.gpg.d/*alibaba* /etc/apt/trusted.gpg.d/*tencent* \
                         /etc/apt/trusted.gpg.d/*huawei*; do
             if [[ -f "${key_file}" ]]; then
-                rm -f "${key_file}"
-                log_info "  Removed GPG key: ${key_file}"
+                repo_found=1
+                _add_unique CLOUD_REVIEW_TRUST_FILES "${key_file}"
+                log_warn "  GPG key requires manual review: ${key_file}"
             fi
         done
+    fi
+
+    if [[ ${repo_found} -eq 0 ]]; then
+        log_success "  No provider package repositories or trust files detected."
+    else
+        log_warn "  Provider repositories and trust files were not changed automatically."
     fi
 }
 
@@ -941,28 +1286,30 @@ _remove_provider_repos() {
 
 # -----------------------------------------------------------------------------
 # offer_dd_reinstall:
-#   Present the user with a menu to choose cleanup level:
-#     1. Light clean  — remove agents only (no OS reinstall)
-#     2. Full DD reinstall — wipe and reinstall OS via bin456789/reinstall
-#     3. Skip — do nothing
+#   Present the user with a menu to choose preflight handling:
+#     1. Review detected cloud integrations and acknowledge dependencies
+#     2. Full DD reinstall - wipe and reinstall OS via bin456789/reinstall
+#     3. Skip - keep current system as-is
 #
 #   The DD reinstall uses the cnb.cool mirror for faster downloads in China.
 #
 #   Returns: 0 on success, 1 if skipped
 # -----------------------------------------------------------------------------
 offer_dd_reinstall() {
-    print_section "Cloud Agent Cleanup Options"
+    print_section "Cloud Readiness Review Options"
+    CLOUD_REVIEW_MENU_PRESENTED=1
     echo ""
-    echo -e "  ${COLOR_DIM}Your server has pre-installed cloud provider agents.${COLOR_RESET}"
-    echo -e "  ${COLOR_DIM}These may monitor your traffic, consume resources, or interfere with deployment.${COLOR_RESET}"
+    echo -e "  ${COLOR_DIM}Your server has cloud provider integrations that need operator review.${COLOR_RESET}"
+    echo -e "  ${COLOR_DIM}Review & Acknowledge keeps the current system unchanged and only clears the deployment gate after operator review.${COLOR_RESET}"
+    echo -e "  ${COLOR_DIM}Full DD Reinstall is the separate destructive path for first-build or disposable-host scenarios only.${COLOR_RESET}"
     echo ""
 
     local options=(
-        "Light Clean — Remove detected agents only (safe, no reboot)"
-        "Full DD Reinstall — Wipe & reinstall clean OS (bin456789/reinstall, requires reboot)"
-        "Skip — Keep current system as-is"
+        "Review & Acknowledge - inventory cloud integrations, write report, no system changes"
+        "Full DD Reinstall - destructive OS wipe & reinstall (requires reboot)"
+        "Stop Here - keep current system as-is"
     )
-    show_menu "Choose cleanup level" options
+    show_menu "Choose preflight action" options
 
     case "${MENU_RESULT}" in
         1)
@@ -978,7 +1325,7 @@ offer_dd_reinstall() {
             return 1
             ;;
         3)
-            log_info "Skipping cleanup. Proceeding with current system."
+            log_info "Stopping after cloud integration review. Current system remains unchanged."
             return 1
             ;;
     esac
@@ -986,26 +1333,22 @@ offer_dd_reinstall() {
 
 # -----------------------------------------------------------------------------
 # _do_light_clean:
-#   Execute the light cleanup path: remove agents, verify, continue.
+#   Execute the non-destructive cloud integration review path.
 # -----------------------------------------------------------------------------
 _do_light_clean() {
-    print_section "Light Clean Mode"
+    print_section "Interactive Review & Acknowledge"
 
-    if ! confirm_action "Remove all detected cloud agents? Services will be stopped and masked." "y"; then
-        log_info "Cleanup cancelled."
+    remove_cloud_agents
+    echo ""
+
+    CLOUD_REVIEW_CONFIRMATION_PROMPTED=1
+    if ! confirm_action "I have reviewed cloud console, SSH key, security group, monitoring, audit, backup, cloud-init, and metadata dependencies. Continue?" "n"; then
+        log_info "Cloud integration review was not acknowledged."
         return 1
     fi
 
-    remove_cloud_agents
-
-    # Re-scan to verify
-    log_info "Verifying cleanup..."
-    if detect_preinstalled_agents 2>/dev/null; then
-        log_warn "Some agents may still be present. A reboot may help complete removal."
-        log_warn "You can re-run this script after reboot to verify."
-    else
-        log_success "All detected agents have been removed."
-    fi
+    log_success "Cloud integration review acknowledged. No provider component was modified."
+    return 0
 }
 
 # -----------------------------------------------------------------------------
@@ -1019,6 +1362,7 @@ _do_light_clean() {
 # -----------------------------------------------------------------------------
 _do_dd_reinstall() {
     print_section "Full DD Reinstall"
+    CLOUD_REVIEW_DD_REINSTALL_SELECTED=1
 
     echo ""
     log_warn "============================================================"
@@ -1028,6 +1372,7 @@ _do_dd_reinstall() {
     log_warn "============================================================"
     echo ""
 
+    CLOUD_REVIEW_CONFIRMATION_PROMPTED=1
     if ! confirm_action "Are you ABSOLUTELY sure you want to DD reinstall?" "n"; then
         log_info "DD reinstall cancelled."
         return 1
@@ -1145,20 +1490,20 @@ _do_dd_reinstall() {
 
 # -----------------------------------------------------------------------------
 # verify_clean_system:
-#   Post-cleanup verification to ensure:
-#     1. No known cloud agents are running
-#     2. The kernel is standard (not cloud-provider-modified)
-#     3. BBR congestion control is available
-#     4. No suspicious listening ports from agent processes
+#   Cloud readiness and integration-state review:
+#     1. Report known cloud-provider processes without treating them as failures
+#     2. Report cloud-provider kernel variants
+#     3. Report BBR congestion-control availability
+#     4. Report cloud-init and metadata dependency implications
 #
-#   Returns: 0 if system is clean, 1 if issues found
+#   Returns: 0 when review completes
 # -----------------------------------------------------------------------------
 verify_clean_system() {
-    log_info "Verifying system cleanliness..."
-    local issues=0
+    log_info "Verifying cloud readiness and integration state..."
+    local warnings=0
 
-    # --- Check 1: No known agent processes ---
-    print_step 1 "Checking for remaining agent processes..."
+    # --- Check 1: Known provider integration processes ---
+    print_step 1 "Reviewing known provider integration processes..."
     local -a known_agent_processes=(
         # Tencent
         "tat_agent" "sgagent" "barad_agent" "YDService" "YDLive" "YDEdr"
@@ -1191,41 +1536,50 @@ verify_clean_system() {
     local proc_found=0
     for proc in ${known_agent_processes[@]+"${known_agent_processes[@]}"}; do
         if pgrep -x "${proc}" &>/dev/null; then
-            log_warn "  Agent process still running: ${proc} (PID: $(pgrep -x "${proc}" | head -1))"
+            local process_message="Provider integration process detected: ${proc} (PID: $(pgrep -x "${proc}" | head -1))"
+            log_warn "  ${process_message}"
+            _cloud_review_append_warning "${process_message}"
             proc_found=1
-            (( issues++ )) || true
+            (( warnings++ )) || true
         fi
     done
 
     if [[ ${proc_found} -eq 0 ]]; then
-        log_success "  No known agent processes detected."
+        log_success "  No known provider integration processes detected."
     fi
 
-    # --- Check 2: Kernel integrity ---
-    print_step 2 "Checking kernel..."
+    # --- Check 2: Kernel profile ---
+    print_step 2 "Checking kernel profile..."
     local kernel_version
     kernel_version="$(uname -r)"
+    CLOUD_REVIEW_KERNEL_VERSION="${kernel_version}"
 
-    # Check for cloud-provider-patched kernels
     local kernel_ok=1
     if [[ "${kernel_version}" == *"tlinux"* ]] || [[ "${kernel_version}" == *"tencent"* ]]; then
         log_warn "  Tencent TLinux kernel detected: ${kernel_version}"
-        log_warn "  Consider DD reinstall for a standard kernel."
+        log_warn "  Review compatibility with BBR, Docker networking, and cloud console recovery before DD reinstall."
+        _cloud_review_append_warning "Tencent TLinux kernel detected: ${kernel_version}"
         kernel_ok=0
-        (( issues++ )) || true
+        CLOUD_REVIEW_KERNEL_PROFILE_STATUS="tencent-kernel"
+        (( warnings++ )) || true
     elif [[ "${kernel_version}" == *"aliyun"* ]] || [[ "${kernel_version}" == *"alinux"* ]]; then
         log_warn "  Alibaba Alinux kernel detected: ${kernel_version}"
-        log_warn "  Consider DD reinstall for a standard kernel."
+        log_warn "  Review compatibility with BBR, Docker networking, and cloud console recovery before DD reinstall."
+        _cloud_review_append_warning "Alibaba Alinux kernel detected: ${kernel_version}"
         kernel_ok=0
-        (( issues++ )) || true
+        CLOUD_REVIEW_KERNEL_PROFILE_STATUS="alibaba-kernel"
+        (( warnings++ )) || true
     elif [[ "${kernel_version}" == *"hwcloud"* ]] || [[ "${kernel_version}" == *"huawei"* ]]; then
         log_warn "  Huawei Cloud kernel detected: ${kernel_version}"
+        _cloud_review_append_warning "Huawei Cloud kernel detected: ${kernel_version}"
         kernel_ok=0
-        (( issues++ )) || true
+        CLOUD_REVIEW_KERNEL_PROFILE_STATUS="huawei-kernel"
+        (( warnings++ )) || true
     fi
 
     if [[ ${kernel_ok} -eq 1 ]]; then
-        log_success "  Standard kernel: ${kernel_version}"
+        CLOUD_REVIEW_KERNEL_PROFILE_STATUS="ok"
+        log_success "  Kernel profile: ${kernel_version}"
     fi
 
     # --- Check 3: BBR availability ---
@@ -1238,75 +1592,90 @@ verify_clean_system() {
     elif modprobe tcp_bbr 2>/dev/null; then
         bbr_available=1
     fi
+    if [[ ${bbr_available} -eq 1 ]]; then
+        CLOUD_REVIEW_BBR_AVAILABLE="true"
+    else
+        CLOUD_REVIEW_BBR_AVAILABLE="false"
+    fi
 
     # Check current congestion control
     local current_cc
     current_cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo 'unknown')"
+    CLOUD_REVIEW_CURRENT_CC="${current_cc}"
 
     if [[ ${bbr_available} -eq 1 ]]; then
         if [[ "${current_cc}" == "bbr" ]]; then
+            CLOUD_REVIEW_BBR_ACTIVE="true"
             log_success "  BBR is active: ${current_cc}"
         else
+            CLOUD_REVIEW_BBR_ACTIVE="false"
             log_warn "  BBR is available but not active (current: ${current_cc})"
             log_info "  Will be enabled during deployment via sysctl configuration."
         fi
     else
+        CLOUD_REVIEW_BBR_ACTIVE="false"
         log_warn "  BBR is NOT available on this kernel."
         log_warn "  Kernel version: ${kernel_version}"
-        log_warn "  BBR requires kernel >= 4.9. Consider upgrading the kernel or DD reinstall."
-        (( issues++ )) || true
+        log_warn "  BBR requires kernel >= 4.9. Deployment can continue, but throughput may be lower."
+        _cloud_review_append_warning "BBR is not available on kernel ${kernel_version}"
+        (( warnings++ )) || true
     fi
 
     # --- Check 4: Available congestion control algorithms ---
     local available_cc
     available_cc="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo 'unknown')"
+    CLOUD_REVIEW_AVAILABLE_CC="${available_cc}"
     log_info "  Available algorithms: ${available_cc}"
 
-    # --- Check 5: Suspicious listening ports ---
-    print_step 4 "Checking for suspicious listening ports..."
-    local suspicious_ports=0
+    # --- Check 5: Provider integration listeners ---
+    print_step 4 "Reviewing provider integration listeners..."
+    local provider_listeners=0
 
     if check_command ss; then
-        # Look for processes listening on non-standard ports that match known agent names
-        local -a suspicious_listeners
         while IFS= read -r line; do
             local listen_proc
             listen_proc="$(echo "${line}" | awk '{print $NF}')"
             for proc in ${known_agent_processes[@]+"${known_agent_processes[@]}"}; do
                 if [[ "${listen_proc}" == *"${proc}"* ]]; then
-                    log_warn "  Suspicious listener: ${line}"
-                    suspicious_ports=1
-                    (( issues++ )) || true
+                    local listener_message="Provider integration listener: ${line}"
+                    log_warn "  ${listener_message}"
+                    _add_unique CLOUD_REVIEW_PROVIDER_LISTENERS "${line}"
+                    _cloud_review_append_warning "${listener_message}"
+                    provider_listeners=1
+                    (( warnings++ )) || true
                     break
                 fi
             done
         done < <(ss -tlnp 2>/dev/null | tail -n +2)
     fi
 
-    if [[ ${suspicious_ports} -eq 0 ]]; then
-        log_success "  No suspicious agent listeners found."
+    if [[ ${provider_listeners} -eq 0 ]]; then
+        log_success "  No provider integration listeners found."
     fi
 
     # --- Check 6: cloud-init status ---
     print_step 5 "Checking cloud-init status..."
     if systemctl is-active cloud-init &>/dev/null 2>&1; then
-        log_warn "  cloud-init is still active. It may re-install agents on reboot."
-        log_info "  Consider masking: systemctl mask cloud-init cloud-config cloud-final"
-        (( issues++ )) || true
+        CLOUD_REVIEW_CLOUD_INIT_ACTIVE="true"
+        log_warn "  cloud-init is active. It may manage SSH keys, hostname, routes, metadata, and bootstrap tasks."
+        log_warn "  Verify DD/reinstall plans preserve console access, SSH key recovery, and required vendor-data behavior."
+        _cloud_review_append_warning "cloud-init is active and may manage SSH keys, metadata, routes, and bootstrap tasks."
+        (( warnings++ )) || true
     else
-        log_success "  cloud-init is not active."
+        CLOUD_REVIEW_CLOUD_INIT_ACTIVE="false"
+        log_info "  cloud-init is not active or not installed."
     fi
 
     # --- Summary ---
     echo ""
-    if (( issues == 0 )); then
-        log_success "System verification passed: no issues found."
-        return 0
+    CLOUD_REVIEW_VERIFICATION_WARNING_COUNT="${warnings}"
+    if (( warnings == 0 )); then
+        log_success "Cloud readiness review passed: no warnings found."
     else
-        log_warn "System verification found ${issues} issue(s)."
-        log_warn "The system may still work for deployment, but consider addressing the above."
-        return 1
+        log_warn "Cloud readiness review found ${warnings} warning(s)."
+        log_warn "Deployment can continue after operator review; Bifrost did not modify provider components."
     fi
+    return 0
 }
 
 # =============================================================================
@@ -1316,20 +1685,27 @@ verify_clean_system() {
 # -----------------------------------------------------------------------------
 # pre_deploy_check:
 #   Main orchestration function to be called at the start of deployment.
-#   Runs the full detection-and-cleanup pipeline:
+#   Runs the full cloud-readiness review pipeline:
 #     1. Detect cloud provider
-#     2. Scan for pre-installed agents
-#     3. If agents found, offer cleanup/DD reinstall menu
-#     4. Verify system cleanliness
+#     2. Scan for provider integrations
+#     3. If integrations are found, either export a report-only review or require review acknowledgment / DD reinstall confirmation
+#     4. Verify cloud readiness state
 #
 #   Designed to be called from install.sh before deploying any components.
 #
-#   Returns: 0 (always — issues are warned, not fatal)
+#   Returns: 0 when the requested review completed. Interactive mode returns
+#            nonzero if the deployment gate is not cleared.
 # -----------------------------------------------------------------------------
 pre_deploy_check() {
+    local review_mode
+    review_mode="$(_cloud_review_resolve_mode "$@")" || return 1
+    _cloud_review_reset_state
+    CLOUD_REVIEW_MODE_EFFECTIVE="${review_mode}"
+
     print_section "Pre-Deployment System Check"
     echo ""
-    log_info "Checking for cloud provider agents and system readiness..."
+    log_info "Checking cloud provider integrations and system readiness..."
+    print_kv "Review Mode" "${CLOUD_REVIEW_MODE_EFFECTIVE}"
     echo ""
 
     # Ensure we have system detection data
@@ -1350,36 +1726,72 @@ pre_deploy_check() {
     fi
     echo ""
 
-    # Step 2: Scan for agents
-    local agents_found=0
-    local cleanup_completed=1
+    # Step 2: Scan for cloud integrations
+    local integrations_found=0
+    local review_acknowledged=1
     local verification_ok=0
     if detect_preinstalled_agents; then
-        agents_found=1
+        integrations_found=1
     fi
+    CLOUD_REVIEW_INTEGRATIONS_FOUND="${integrations_found}"
 
-    # Step 3: Offer cleanup if agents found
-    if [[ ${agents_found} -eq 1 ]]; then
+    # Step 3: Require review acknowledgment if cloud integrations were found
+    if [[ ${integrations_found} -eq 1 ]]; then
         echo ""
-        if ! offer_dd_reinstall; then
-            cleanup_completed=0
-            log_error "Cloud agent cleanup was skipped, cancelled, or failed. Deployment must stop."
+        if [[ "${CLOUD_REVIEW_MODE_EFFECTIVE}" == "report-only" ]]; then
+            log_info "Report-only mode selected: inventory and readiness verification will run without the DD menu or operator confirmation."
+            if ! remove_cloud_agents; then
+                log_error "Cloud integration review report could not be generated."
+                return 1
+            fi
+            review_acknowledged=0
+        else
+            if ! offer_dd_reinstall; then
+                review_acknowledged=0
+                log_error "Cloud integration review was not acknowledged. Deployment must stop."
+            fi
         fi
         echo ""
     else
-        log_success "No cloud agents detected. System is ready for deployment."
+        log_success "No cloud provider integrations detected. System is ready for deployment."
     fi
+    CLOUD_REVIEW_REVIEW_ACKNOWLEDGED="${review_acknowledged}"
 
-    # Step 4: Verify system
+    # Step 4: Verify readiness state
     echo ""
     if verify_clean_system; then
         verification_ok=1
     else
-        log_error "System verification detected unresolved issues. Deployment must stop."
+        log_error "Cloud readiness verification detected unresolved issues. Deployment must stop."
+    fi
+    CLOUD_REVIEW_VERIFICATION_OK="${verification_ok}"
+
+    if [[ "${CLOUD_REVIEW_MODE_EFFECTIVE}" == "report-only" ]]; then
+        CLOUD_REVIEW_REPORT_ONLY_COMPLETED=1
+        CLOUD_REVIEW_DEPLOYMENT_BLOCK_REASON="Report-only cloud readiness review completed. Inspect the generated report and rerun without report-only mode before deployment or DD reinstall."
+    fi
+
+    if ! _cloud_review_write_reports; then
+        log_error "Failed to persist cloud readiness review reports."
+        return 1
+    fi
+
+    print_kv "Review Report" "${CLOUD_REVIEW_TEXT_REPORT}"
+    print_kv "Review JSON" "${CLOUD_REVIEW_JSON_REPORT}"
+    local default_report_dir="${BIFROST_CLOUD_REVIEW_REPORT_DIR:-$(dirname "${LOG_FILE}")}"
+    if [[ "${CLOUD_REVIEW_REPORT_DIR_EFFECTIVE}" != "${default_report_dir}" && -z "${BIFROST_CLOUD_REVIEW_REPORT_PATH:-}" && -z "${BIFROST_CLOUD_REVIEW_REPORT_JSON_PATH:-}" ]]; then
+        log_warn "Default report directory ${default_report_dir} was not writable; used fallback ${CLOUD_REVIEW_REPORT_DIR_EFFECTIVE}"
+    fi
+    echo ""
+
+    if cloud_review_is_report_only; then
+        log_warn "Report-only review complete. Deployment remains blocked until an operator reviews the report and reruns the gate without report-only mode."
+        echo ""
+        return 0
     fi
 
     echo ""
-    if [[ ${cleanup_completed} -ne 1 || ${verification_ok} -ne 1 ]]; then
+    if [[ ${review_acknowledged} -ne 1 || ${verification_ok} -ne 1 ]]; then
         log_error "Pre-deployment check failed. Resolve the issues above before deployment."
         echo ""
         return 1

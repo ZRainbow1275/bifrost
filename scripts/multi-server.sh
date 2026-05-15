@@ -84,12 +84,12 @@ fi
 # =============================================================================
 # Constants
 # =============================================================================
-# Guarded — may already be defined by server-a.sh or mihomo.sh
-[[ -v SERVER_REGISTRY_DIR ]]       || readonly SERVER_REGISTRY_DIR="/etc/bifrost"
-[[ -v SERVER_REGISTRY_FILE ]]      || readonly SERVER_REGISTRY_FILE="${SERVER_REGISTRY_DIR}/servers.conf"
-[[ -v MIHOMO_CONFIG ]]             || readonly MIHOMO_CONFIG="/etc/mihomo/config.yaml"
-[[ -v MIHOMO_FALLBACK_CONFIG ]]    || readonly MIHOMO_FALLBACK_CONFIG="/etc/clash/config.yaml"
-[[ -v XRAY_CLIENT_CONFIG ]]        || readonly XRAY_CLIENT_CONFIG="/usr/local/etc/xray/config.json"
+# Guarded: callers and tests may override these before or after sourcing.
+SERVER_REGISTRY_DIR="${SERVER_REGISTRY_DIR:-/etc/bifrost}"
+SERVER_REGISTRY_FILE="${SERVER_REGISTRY_FILE:-${SERVER_REGISTRY_DIR}/servers.conf}"
+MIHOMO_CONFIG="${MIHOMO_CONFIG:-/etc/mihomo/config.yaml}"
+MIHOMO_FALLBACK_CONFIG="${MIHOMO_FALLBACK_CONFIG:-/etc/clash/config.yaml}"
+XRAY_CLIENT_CONFIG="${XRAY_CLIENT_CONFIG:-/usr/local/etc/xray/config.json}"
 
 # =============================================================================
 # Internal helpers

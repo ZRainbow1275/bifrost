@@ -8,8 +8,9 @@
 #   4. Security headers and access logging
 #
 # Template variables:
-#   {{DOMAIN}}        - Your domain name (e.g., gateway.example.com)
-#   {{NEW_API_PORT}}  - New API container port (default: 3000)
+#   {{DOMAIN}}               - Your domain name (e.g., gateway.example.com)
+#   {{NEW_API_PORT}}         - New API container port (default: 3000)
+#   {{ADMIN_ALLOWED_RANGES}} - VPN/private/admin CIDR allowlist for vpn-first
 #
 # Place the rendered file at: /etc/caddy/Caddyfile
 # =============================================================================
@@ -84,7 +85,7 @@
 
 	# --------------------------------------------------
 	# API Routes - Reverse Proxy to New API
-	# New API handles: /v1/*, /api/*, /dashboard, etc.
+	# vpn-first fixture: public /v1/* and /api/status only; management is allowlisted.
 	# --------------------------------------------------
 
 	# OpenAI-compatible API endpoints
@@ -111,8 +112,8 @@
 		}
 	}
 
-	# New API management interface and other API routes
-	handle /api/* {
+	# Public readiness endpoint
+	handle /api/status {
 		reverse_proxy localhost:{{NEW_API_PORT}} {
 			header_up X-Real-IP {remote_host}
 			header_up X-Forwarded-For {remote_host}
@@ -126,8 +127,12 @@
 		}
 	}
 
-	# New API Web Dashboard (management UI)
-	handle /dashboard* {
+	# New API management interface and dashboard (VPN/private/admin allowlist only)
+	@newapi_private {
+		path /api/* /static/* /logo.png /dashboard /dashboard/* /login /panel /token /user/* /admin/*
+		remote_ip {{ADMIN_ALLOWED_RANGES}}
+	}
+	handle @newapi_private {
 		reverse_proxy localhost:{{NEW_API_PORT}} {
 			header_up X-Real-IP {remote_host}
 			header_up X-Forwarded-For {remote_host}
@@ -135,45 +140,42 @@
 			header_up Host {host}
 		}
 	}
-
-	# New API login and authentication
-	handle /user/* {
-		reverse_proxy localhost:{{NEW_API_PORT}} {
-			header_up X-Real-IP {remote_host}
-			header_up X-Forwarded-For {remote_host}
-			header_up X-Forwarded-Proto {scheme}
-			header_up Host {host}
-		}
+	handle /api/* {
+		respond "Bifrost admin API requires VPN/private access in vpn-first profile" 403
 	}
-
-	# New API static assets
 	handle /static/* {
-		reverse_proxy localhost:{{NEW_API_PORT}} {
-			header_up X-Real-IP {remote_host}
-			header_up X-Forwarded-For {remote_host}
-			header_up X-Forwarded-Proto {scheme}
-			header_up Host {host}
-		}
+		respond "New API static assets require VPN/private access in vpn-first profile" 403
 	}
-
-	# Root path - proxy to New API (serves the web UI)
-	handle / {
-		reverse_proxy localhost:{{NEW_API_PORT}} {
-			header_up X-Real-IP {remote_host}
-			header_up X-Forwarded-For {remote_host}
-			header_up X-Forwarded-Proto {scheme}
-			header_up Host {host}
-		}
+	handle /logo.png {
+		respond "New API static assets require VPN/private access in vpn-first profile" 403
+	}
+	handle /dashboard {
+		respond "New API dashboard requires VPN/private access in vpn-first profile" 403
+	}
+	handle /dashboard/* {
+		respond "New API dashboard requires VPN/private access in vpn-first profile" 403
+	}
+	handle /login {
+		respond "New API login requires VPN/private access in vpn-first profile" 403
 	}
 
 	# --------------------------------------------------
 	# Bifrost Management API
-	# Proxies /manage/* to the Bifrost API service (port 8000)
-	# Accessible at: https://{{DOMAIN}}/manage/api/v1/...
-	#                 https://{{DOMAIN}}/manage/register
-	#                 https://{{DOMAIN}}/manage/docs
+	# Proxies /manage/* to the Bifrost API service (port 8000).
+	# vpn-first requires VPN/private/admin allowlist access.
 	# --------------------------------------------------
-	handle /manage/* {
+	@manage_private_root {
+		path /manage
+		remote_ip {{ADMIN_ALLOWED_RANGES}}
+	}
+	handle @manage_private_root {
+		redir /manage/ 308
+	}
+	@manage_private {
+		path /manage/*
+		remote_ip {{ADMIN_ALLOWED_RANGES}}
+	}
+	handle @manage_private {
 		uri strip_prefix /manage
 		reverse_proxy 127.0.0.1:8000 {
 			header_up Host {host}
@@ -187,6 +189,12 @@
 				response_header_timeout 60s
 			}
 		}
+	}
+	handle /manage {
+		respond "Bifrost management requires VPN/private access in vpn-first profile" 403
+	}
+	handle /manage/* {
+		respond "Bifrost management requires VPN/private access in vpn-first profile" 403
 	}
 
 	# --------------------------------------------------

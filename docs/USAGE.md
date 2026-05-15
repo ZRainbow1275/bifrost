@@ -5,7 +5,7 @@
 Bifrost v2.0 采用双服务器 + VPN 网关架构，推荐按以下顺序部署：
 
 ```
-Step 0: (可选) DD 系统重装 — 移除云厂商预装 Agent，获得干净环境
+Step 0: (可选) DD 系统重装 — 云环境就绪检查与全新部署前置准备
          ↓
 Step 1: 部署 Server B (海外服务器) — Xray 服务端 + DPI 防护
          ↓ 获取连接信息
@@ -40,27 +40,27 @@ Step 4: 员工入职 — 安装 WireGuard → 连 VPN → 配置 AI 工具
 - Server A 能访问 Server B 的 443 端口
 - Server A 的 80/443 端口对用户开放
 - Server A 的 51820/UDP 端口对 VPN 客户端开放（部署 VPN 时需要）
-- 两台服务器都是全新安装的干净系统（推荐，或先运行 DD 清理）
+- 两台服务器最好是全新安装的系统（推荐；如需 DD 重装，仅在首次部署前且完成备份/云依赖审查后使用）
 
 ---
 
 ## Step 0: (可选) DD 系统重装
 
-如果你的服务器是从云厂商购买的（腾讯云、阿里云、AWS、Vultr 等），服务器上通常预装了监控 Agent、安全守护进程和遥测服务。建议在正式部署前清理这些组件。
+如果你的服务器是从云厂商购买的（腾讯云、阿里云、AWS、Vultr 等），在决定是否执行 DD 前，先完成云环境一致性/备份/确认检查：`cloud metadata`、`cloud-init`、SSH key 注入方式、安全组/防火墙、控制台监控告警、审计/安全代理、自动化恢复链路，以及任何云厂商合规依赖。DD 会擦除整盘，只适合**全新部署前**的前置准备；不要在已部署业务或依赖云厂商安全/审计组件的环境中直接执行。
 
 ```bash
 sudo ./install.sh
-# 选择「8. DD 系统重装 (预部署环境清理)」
+# 选择「8. DD 系统重装 (云环境就绪检查 / 全新部署前置准备)」
 ```
 
-脚本将自动完成：
+脚本将执行交互式前置检查：
 
 1. **云厂商检测** — 通过 DMI/SMBIOS/ACPI/网络元数据自动识别厂商
-2. **Agent 扫描** — 检测 systemd 服务、运行进程、已安装包、文件路径、cron 任务
-3. **Agent 清理** — 停止服务、卸载包、删除残留文件（可选逐项确认）
-4. **DD 重装** — (可选) 使用 bin456789/reinstall 进行全盘重装
+2. **集成项扫描** — 检测 systemd 服务、运行进程、已安装包、文件路径、cron 任务，以及与云厂商相关的仓库/信任材料
+3. **就绪审查** — 输出 `cloud metadata` / `cloud-init` / SSH keys / 安全组 / 控制台监控告警 / 审计代理 / 回滚备份的人工核查清单，不会自动停用、删除或修改云厂商安全代理、监控代理或审计组件
+4. **DD 重装** — (可选) 使用 `bin456789/reinstall` 在确认后进行全盘重装
 
-> **注意**: DD 重装会清除所有数据并重启。仅在全新部署前使用，不要在已部署的生产环境中执行。
+> **注意**: DD 重装会清除所有数据并重启。仅在全新部署前使用；执行前必须确认备份、控制台访问、SSH key 恢复方式、安全组回滚路径，以及监控/审计依赖是否允许重装。
 
 ---
 
@@ -398,7 +398,7 @@ export OPENAI_API_KEY=sk-xxxxx  # 管理员提供
 bash scripts/health-check.sh --verbose
 ```
 
-当前健康检查除了 `xray` / 隧道 / NewAPI 之外，还会校验 `bifrost-api` 本地 `/health` 与管理员鉴权 `401/403` 语义、`caddy` 服务状态，以及公网 `https://<DOMAIN>/manage/health`、`/manage/register`、`/manage/docs` 的可达性和前缀契约。结果会落到 `/var/log/bifrost/health.json`，适合作为真实部署后的第一道验收门。
+当前健康检查除了 `xray` / 隧道 / NewAPI 之外，还会校验 `bifrost-api` 本地 `/health` 与管理员鉴权 `401/403` 语义、`caddy` 服务状态，以及 `https://<DOMAIN>/manage/*` 的 profile-aware 暴露面状态。`vpn-first` 下，公网探测返回 `403` 属于受保护状态；如果检查来源位于 VPN/私网/白名单内并返回 `200`，脚本会继续校验 `/manage/register`、`/manage/docs` 前缀契约并提示仍需从非白名单公网来源验证拒绝访问。结果会落到 `/var/log/bifrost/health.json`，适合作为真实部署后的第一道验收门。
 
 ### 深度诊断
 
@@ -477,6 +477,35 @@ bash scripts/update.sh mihomo       # 更新 Mihomo
 bash scripts/update.sh new-api      # 更新 New API
 bash scripts/update.sh geoip        # 更新 GeoIP 数据库
 bash scripts/update.sh all          # 更新所有组件
+```
+
+---
+
+## 暴露面 Profile
+
+Bifrost 现在通过 `BIFROST_EXPOSURE_PROFILE` 明确区分部署暴露面，避免把管理面默认暴露到公网。
+
+| Profile | 用途 | 管理面策略 |
+|---------|------|------------|
+| `vpn-first` | 生产推荐默认值 | `/dashboard`、New API 前端静态资源、`/manage`、Server B `/xui-panel/` 仅允许 VPN/私网/来源白名单访问 |
+| `public-managed` | 兼容需要公网管理入口的部署 | 管理面经 HTTPS 暴露，必须额外配置强密码、WAF、来源白名单、审计与限速 |
+| `lab` | 临时实验环境 | 允许更宽松暴露，仅用于非生产测试 |
+
+示例：
+
+```bash
+# 生产推荐：不设置也默认 vpn-first
+export BIFROST_EXPOSURE_PROFILE=vpn-first
+export BIFROST_ADMIN_ALLOWED_RANGES="127.0.0.1,10.8.0.0/24,172.16.0.0/24"
+
+# 兼容模式：明确选择 public-managed，并在云防火墙/WAF 中收紧来源
+export BIFROST_EXPOSURE_PROFILE=public-managed
+```
+
+生产环境还会拒绝未显式允许的 `New API` 可变镜像标签。请设置 `BIFROST_NEW_API_IMAGE` 为固定版本或 digest；临时实验才使用 `BIFROST_ALLOW_UNPINNED=1`。
+
+```bash
+export BIFROST_NEW_API_IMAGE="calciumion/new-api:<fixed-version-or-digest>"
 ```
 
 ---

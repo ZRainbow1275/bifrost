@@ -33,6 +33,8 @@ readonly PROJECT_ROOT="$(cd "${_COMMON_SCRIPT_DIR}/.." && pwd)"
 
 readonly LOG_FILE="/var/log/ai-gateway-bridge/ai-gateway-bridge.log"
 readonly BACKUP_DIR="/var/backups/ai-gateway-bridge"
+readonly BIFROST_EXPOSURE_PROFILE_DEFAULT="vpn-first"
+readonly BIFROST_ADMIN_ALLOWED_RANGES_DEFAULT="127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,fd00::/8"
 
 # Ensure the log file is actually appendable; fall back to /tmp if not writable.
 _LOG_FILE_FALLBACK="${LOG_FILE}"
@@ -42,6 +44,49 @@ if ! mkdir -p "$(dirname "${LOG_FILE}")" 2>/dev/null || ! touch "${LOG_FILE}" 2>
     touch "${_LOG_FILE_FALLBACK}" 2>/dev/null || true
 fi
 readonly EFFECTIVE_LOG_FILE="${_LOG_FILE_FALLBACK}"
+
+# Deployment exposure profiles are shared by Server A and Server B so
+# management-plane policy stays consistent across generated configs.
+bifrost_exposure_profile() {
+    local profile="${BIFROST_EXPOSURE_PROFILE:-${BIFROST_EXPOSURE:-${BIFROST_EXPOSURE_PROFILE_DEFAULT}}}"
+    profile="${profile,,}"
+    profile="${profile//_/-}"
+
+    case "${profile}" in
+        vpn-first|public-managed|lab)
+            printf '%s\n' "${profile}"
+            ;;
+        *)
+            log_error "Invalid BIFROST_EXPOSURE_PROFILE='${profile}'. Expected: vpn-first, public-managed, or lab."
+            return 1
+            ;;
+    esac
+}
+
+bifrost_admin_allowed_ranges() {
+    local ranges="${BIFROST_ADMIN_ALLOWED_RANGES:-${BIFROST_ADMIN_ALLOWED_CIDRS:-${BIFROST_ADMIN_ALLOWED_RANGES_DEFAULT}}}"
+    ranges="${ranges//,/ }"
+    printf '%s\n' "${ranges}"
+}
+
+bifrost_exposure_profile_description() {
+    local profile="$1"
+    case "${profile}" in
+        vpn-first)
+            printf '%s\n' "Production default: admin surfaces require VPN/private/source-allowlisted access."
+            ;;
+        public-managed)
+            printf '%s\n' "Explicit compatibility mode: management is exposed through public HTTPS and must be protected by strong auth/WAF/allowlists."
+            ;;
+        lab)
+            printf '%s\n' "Non-production lab mode: permissive exposure for testing only."
+            ;;
+        *)
+            printf '%s\n' "Unknown exposure profile."
+            return 1
+            ;;
+    esac
+}
 
 # =============================================================================
 # Section 2 : Color & Formatting
@@ -407,6 +452,45 @@ install_if_missing() {
 # Section 8 : Docker Helpers
 # =============================================================================
 
+# Retrieve the Docker server version in normalized form.
+# Returns the version via stdout, or "unknown" if it cannot be determined.
+docker_server_version() {
+    local docker_ver
+    docker_ver="$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo 'unknown')"
+    docker_ver="${docker_ver%%[-+~]*}"
+    echo "${docker_ver:-unknown}"
+}
+
+# Compare two dotted versions.
+# Returns 0 when current_version >= minimum_version.
+version_gte() {
+    local current_version="${1:?version_gte requires a current version}"
+    local minimum_version="${2:?version_gte requires a minimum version}"
+
+    [[ "$(printf '%s\n%s\n' "${minimum_version}" "${current_version}" | LC_ALL=C sort -V | head -n1)" == "${minimum_version}" ]]
+}
+
+# Require a minimum Docker server version for a specific feature.
+# Returns 0 when the requirement is met, 1 otherwise.
+require_docker_server_version() {
+    local minimum_version="${1:?require_docker_server_version requires a minimum version}"
+    local feature_name="${2:-this feature}"
+    local docker_ver
+    docker_ver="$(docker_server_version)"
+
+    if [[ -z "${docker_ver}" || "${docker_ver}" == "unknown" ]]; then
+        log_error "Unable to determine Docker server version. Cannot validate support for ${feature_name}."
+        return 1
+    fi
+
+    if ! version_gte "${docker_ver}" "${minimum_version}"; then
+        log_error "Docker ${minimum_version}+ is required for ${feature_name}. Current server version: ${docker_ver}."
+        return 1
+    fi
+
+    return 0
+}
+
 # Check if Docker Engine is installed and the daemon is running.
 # Returns 0 if healthy, 1 otherwise.
 check_docker() {
@@ -421,7 +505,7 @@ check_docker() {
     fi
 
     local docker_ver
-    docker_ver="$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo 'unknown')"
+    docker_ver="$(docker_server_version)"
     log_info "Docker version: ${docker_ver}"
     return 0
 }

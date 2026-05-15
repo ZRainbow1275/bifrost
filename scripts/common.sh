@@ -33,6 +33,8 @@ readonly PROJECT_ROOT="$(cd "${_COMMON_SCRIPT_DIR}/.." && pwd)"
 
 readonly LOG_FILE="/var/log/bifrost/bifrost.log"
 readonly BACKUP_DIR="/var/backups/bifrost"
+readonly BIFROST_EXPOSURE_PROFILE_DEFAULT="vpn-first"
+readonly BIFROST_ADMIN_ALLOWED_RANGES_DEFAULT="127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,fd00::/8"
 
 # Ensure the log file is actually appendable; fall back to /tmp if not writable.
 _LOG_FILE_FALLBACK="${LOG_FILE}"
@@ -42,6 +44,49 @@ if ! mkdir -p "$(dirname "${LOG_FILE}")" 2>/dev/null || ! touch "${LOG_FILE}" 2>
     touch "${_LOG_FILE_FALLBACK}" 2>/dev/null || true
 fi
 readonly EFFECTIVE_LOG_FILE="${_LOG_FILE_FALLBACK}"
+
+# Deployment exposure profiles are shared by Server A and Server B so
+# management-plane policy stays consistent across generated configs.
+bifrost_exposure_profile() {
+    local profile="${BIFROST_EXPOSURE_PROFILE:-${BIFROST_EXPOSURE:-${BIFROST_EXPOSURE_PROFILE_DEFAULT}}}"
+    profile="${profile,,}"
+    profile="${profile//_/-}"
+
+    case "${profile}" in
+        vpn-first|public-managed|lab)
+            printf '%s\n' "${profile}"
+            ;;
+        *)
+            log_error "Invalid BIFROST_EXPOSURE_PROFILE='${profile}'. Expected: vpn-first, public-managed, or lab."
+            return 1
+            ;;
+    esac
+}
+
+bifrost_admin_allowed_ranges() {
+    local ranges="${BIFROST_ADMIN_ALLOWED_RANGES:-${BIFROST_ADMIN_ALLOWED_CIDRS:-${BIFROST_ADMIN_ALLOWED_RANGES_DEFAULT}}}"
+    ranges="${ranges//,/ }"
+    printf '%s\n' "${ranges}"
+}
+
+bifrost_exposure_profile_description() {
+    local profile="$1"
+    case "${profile}" in
+        vpn-first)
+            printf '%s\n' "Production default: admin surfaces require VPN/private/source-allowlisted access."
+            ;;
+        public-managed)
+            printf '%s\n' "Explicit compatibility mode: management is exposed through public HTTPS and must be protected by strong auth/WAF/allowlists."
+            ;;
+        lab)
+            printf '%s\n' "Non-production lab mode: permissive exposure for testing only."
+            ;;
+        *)
+            printf '%s\n' "Unknown exposure profile."
+            return 1
+            ;;
+    esac
+}
 
 # =============================================================================
 # Section 2 : Color & Formatting

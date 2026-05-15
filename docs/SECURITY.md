@@ -77,6 +77,23 @@
 
 ## 安全最佳实践
 
+### 暴露面 Profile
+
+Bifrost 支持三种暴露面 profile，并默认采用 `vpn-first`：
+
+| Profile | 适用场景 | 安全要求 |
+|---------|----------|----------|
+| `vpn-first` | 生产默认 | 管理面只允许 VPN、私网或来源白名单访问；公网仅保留业务 API 与伪装站 |
+| `public-managed` | 兼容需要公网管理入口的部署 | 必须配合强认证、WAF/来源白名单、限速、审计日志和云防火墙 |
+| `lab` | 临时测试 | 可放宽限制，但不得用于生产 |
+
+生产部署应验证以下暴露面：
+
+1. `/v1/*` 可以作为 OpenAI-compatible API 公网入口。
+2. `/dashboard`、`/login`、New API 前端静态资源（如 `/static/*`、`/logo.png`）以及 `/manage/*` 在 `vpn-first` 下必须从公网返回拒绝访问；白名单/VPN 来源访问管理 UI 时，这些静态资源必须同样反代到 New API，避免入口页面可达但 JS/CSS 不可用。
+3. Server B 的 3x-ui 直接端口默认不得开放；`/xui-panel/` 在 `vpn-first` 下必须受 VPN/私网/来源白名单保护。
+4. `New API` 镜像应使用固定版本或 digest；`latest` 只能在 `lab` 或显式 `BIFROST_ALLOW_UNPINNED=1` 时临时使用。
+
 ### 定期操作清单
 
 | 频率 | 操作 | 命令 |

@@ -66,7 +66,7 @@ show_main_menu() {
         "白名单管理"
         "系统健康检查"
         "查看连接信息"
-        "DD 系统重装 (预部署环境清理)"
+        "DD 系统重装 (云环境就绪审查)"
         "企业 VPN 部署 (WireGuard/OpenVPN)"
         "DPI 防护部署 (反深包检测)"
         "Mihomo 智能路由部署"
@@ -114,7 +114,7 @@ deploy_server_b_flow() {
     print_banner "部署海外服务器 (Server B)"
     echo ""
     log_info "Server B 将部署以下组件："
-    echo "  1. 云 Agent 清理 (预部署检查)"
+    echo "  1. 云环境就绪审查 (预部署检查)"
     echo "  2. 系统安全加固 (防火墙/SSH/fail2ban/内核加固)"
     echo "  3. Xray 服务端 (VLESS+Reality)"
     echo "  4. 3x-ui 管理面板 (可选)"
@@ -168,7 +168,7 @@ deploy_server_a_flow() {
     print_banner "部署国内服务器 (Server A)"
     echo ""
     log_info "Server A 将部署以下组件："
-    echo "  1. 云 Agent 清理 (预部署检查)"
+    echo "  1. 云环境就绪审查 (预部署检查)"
     echo "  2. 系统安全加固 (防火墙/SSH/fail2ban/内核加固)"
     echo "  3. Xray 客户端 (VLESS+Reality → 连接 Server B)"
     echo "  4. Mihomo 智能路由引擎"
@@ -373,14 +373,23 @@ show_connection_info() {
 
 # --- Flow: DD Reinstall ---
 dd_reinstall_flow() {
-    print_banner "DD 系统重装 / 云 Agent 清理"
+    print_banner "DD 系统重装 / 云环境就绪审查"
     require_root
 
     # shellcheck source=scripts/dd-reinstall.sh
     source "${SCRIPT_DIR}/scripts/dd-reinstall.sh"
 
     if ! pre_deploy_check; then
-        log_error "预部署环境清理未完成，请先处理上方错误。"
+        log_error "预部署云环境审查未完成，请先处理上方错误。"
+        return 1
+    fi
+
+    if declare -f cloud_review_blocks_deployment >/dev/null 2>&1 && cloud_review_blocks_deployment; then
+        if declare -f cloud_review_is_report_only >/dev/null 2>&1 && cloud_review_is_report_only; then
+            log_success "云环境 report-only 审查已完成；请先审阅报告，再用交互模式继续部署或选择 Full DD Reinstall。"
+            return 0
+        fi
+        log_error "${CLOUD_REVIEW_DEPLOYMENT_BLOCK_REASON:-预部署云环境审查未完成，请先处理上方错误。}"
         return 1
     fi
 }
@@ -639,10 +648,23 @@ parse_args() {
                 source "${SCRIPT_DIR}/scripts/diagnostics.sh"
                 run_cli_command "深度诊断执行失败，请先处理上方错误。" manage_diagnostics
                 ;;
-            --dd-reinstall)
+            --dd-reinstall|--cloud-review)
                 require_root
                 source "${SCRIPT_DIR}/scripts/dd-reinstall.sh"
-                run_cli_command "预部署环境清理未完成，请先处理上方错误。" pre_deploy_check
+                local review_args=()
+                if [[ "$1" == "--cloud-review" ]]; then
+                    review_args+=(--report-only)
+                fi
+                if [[ "${2:-}" == "--report-only" ]]; then
+                    review_args+=(--report-only)
+                    shift
+                fi
+                run_cli_command "预部署云环境审查未完成，请先处理上方错误。" pre_deploy_check "${review_args[@]+"${review_args[@]}"}"
+                ;;
+            --report-only)
+                log_error "--report-only 只能与 --dd-reinstall 或 --cloud-review 一起使用。"
+                show_help
+                exit 1
                 ;;
             --version)
                 echo "${PROJECT_NAME} v${SCRIPT_VERSION}"
@@ -674,7 +696,9 @@ Bifrost v2.0 - 一键部署脚本
   ./install.sh --server-b     非交互式部署海外服务器
   ./install.sh --server-a     非交互式部署国内服务器
   ./install.sh --security     仅执行安全加固
-  ./install.sh --dd-reinstall DD 系统重装 / 云 Agent 清理
+  ./install.sh --dd-reinstall [--report-only]
+                            DD 系统重装 / 云环境就绪审查
+  ./install.sh --cloud-review 无交互首轮云环境审查（只检测、导出报告、不进入 DD 菜单）
 
 v2.0 模块部署:
   ./install.sh --vpn          部署企业 VPN (WireGuard/Firezone/Headscale)
@@ -698,7 +722,9 @@ v2.0 模块部署:
   ./install.sh --help         显示帮助
 
 推荐部署顺序:
-  0. (可选) DD 系统重装: ./install.sh --dd-reinstall
+  0. (推荐先做) 首轮云审查: ./install.sh --cloud-review
+     或: BIFROST_CLOUD_REVIEW_MODE=report ./install.sh --dd-reinstall
+  0b. (可选) 交互式 DD / 审查: ./install.sh --dd-reinstall
   1. 海外服务器: ./install.sh --server-b + --anti-dpi
   2. 国内服务器: ./install.sh --server-a
   3. 管理平台:   ./install.sh --bifrost-api

@@ -20,7 +20,7 @@
 - **企业 VPN 网关**：WireGuard (Firezone/Headscale) 作为第一道安全门，员工必须先连 VPN 才能访问 AI 服务
 - **Mihomo 智能路由**：基于规则的流量路由引擎（AI 走代理、国内直连、流媒体拒绝），替代 Xray 路由
 - **DPI 防护**：Reality dest 池管理、定时 dest 轮换、uTLS 指纹伪装、Mux+padding 流量混淆
-- **DD 系统重装**：预部署环境清理，自动检测并移除云厂商监控 Agent，可选 DD 全盘重装
+- **DD 系统重装**：预部署云环境就绪审查，自动检测并列出云厂商集成项，需人工确认备份、SSH、监控、审计与回滚依赖后才可选择 DD 全盘重装
 - **连接保活**：TCP keepalive 内核参数、Xray sockopt 优化、心跳探测、服务 Watchdog 自动恢复
 - **网络分流**：Split Tunnel 网络分段，VPN 用户仅路由内部流量，DNS 分流解析
 - **备份与恢复**：加密配置备份、定时自动备份 (cron)、一键恢复、紧急 IP 轮换

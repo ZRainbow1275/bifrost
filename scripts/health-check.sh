@@ -10,7 +10,7 @@
 #   3. New API container status (Server A)
 #   4. Bifrost API container + auth semantics (Server A)
 #   5. Caddy service status
-#   6. Public /manage surface + TLS reachability
+#   6. Profile-aware /manage surface + TLS/security posture
 #   7. 3x-ui service status (Server B)
 #   8. Disk space (alert if < 10% free)
 #   9. Memory usage (alert if > 90%)
@@ -43,6 +43,7 @@ SERVER_A_DOMAIN_FILE="/root/server-a-domain.conf"
 BIFROST_API_CONTAINER="bifrost-api"
 BIFROST_LOCAL_HEALTH_URL="http://127.0.0.1:8000/health"
 BIFROST_LOCAL_AUTH_URL="http://127.0.0.1:8000/api/v1/models/test"
+BIFROST_EXPOSURE_PROFILE_DEFAULT="vpn-first"
 DISK_THRESHOLD=10    # Alert if free disk space < 10%
 MEMORY_THRESHOLD=90  # Alert if memory usage > 90%
 CPU_THRESHOLD=90     # Alert if CPU load > 90% (1-min avg vs core count)
@@ -88,7 +89,7 @@ Checks:
   - NewAPI container health
   - Bifrost API container health + auth semantics
   - Caddy service status
-  - Public /manage register/docs reachability + TLS validation
+  - Profile-aware /manage reachability, prefix contract, and TLS validation
   - 3x-ui / system resource / log drift
 EOF
 }
@@ -148,6 +149,29 @@ resolve_public_domain() {
     fi
 
     return 1
+}
+
+resolve_exposure_profile() {
+    local profile="${BIFROST_EXPOSURE_PROFILE:-}"
+
+    if [[ -z "${profile}" && -f "${SERVER_A_DOMAIN_FILE}" ]]; then
+        # shellcheck source=/dev/null
+        source "${SERVER_A_DOMAIN_FILE}"
+        profile="${BIFROST_EXPOSURE_PROFILE:-}"
+    fi
+
+    profile="${profile:-${BIFROST_EXPOSURE_PROFILE_DEFAULT}}"
+    profile="${profile,,}"
+    profile="${profile//_/-}"
+
+    case "${profile}" in
+        vpn-first|public-managed|lab)
+            printf '%s' "${profile}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 # Check if a systemd service is active
@@ -393,11 +417,13 @@ check_caddy() {
 }
 
 # =============================================================================
-# Check 6: Public /manage Surface + TLS
+# Check 6: Profile-aware /manage Surface + TLS
 # =============================================================================
 check_public_manage_surface() {
     PUBLIC_MANAGE_STATUS="not_applicable"
     PUBLIC_MANAGE_DOMAIN="null"
+    PUBLIC_MANAGE_EXPOSURE_PROFILE="${BIFROST_EXPOSURE_PROFILE_DEFAULT}"
+    PUBLIC_MANAGE_POLICY="private"
     PUBLIC_MANAGE_HEALTH_CODE="null"
     PUBLIC_MANAGE_REGISTER_CODE="null"
     PUBLIC_MANAGE_DOCS_CODE="null"
@@ -415,48 +441,113 @@ check_public_manage_surface() {
     PUBLIC_MANAGE_DOMAIN="${domain}"
     PUBLIC_MANAGE_STATUS="healthy"
 
+    local exposure_profile
+    if ! exposure_profile="$(resolve_exposure_profile)"; then
+        exposure_profile="${BIFROST_EXPOSURE_PROFILE_DEFAULT}"
+        record_alert "WARNING" "public-manage" "Invalid BIFROST_EXPOSURE_PROFILE; falling back to ${exposure_profile} health expectations."
+    fi
+    PUBLIC_MANAGE_EXPOSURE_PROFILE="${exposure_profile}"
+
     local register_tmp docs_tmp
     register_tmp="$(mktemp)"
     docs_tmp="$(mktemp)"
 
     PUBLIC_MANAGE_HEALTH_CODE="$(curl_http_code "https://${domain}/manage/health")"
-    if [[ "${PUBLIC_MANAGE_HEALTH_CODE}" != "200" ]]; then
-        PUBLIC_MANAGE_STATUS="unhealthy"
-        record_alert "CRITICAL" "public-manage" "Public manage health endpoint returned HTTP ${PUBLIC_MANAGE_HEALTH_CODE} for https://${domain}/manage/health."
-    fi
-
     PUBLIC_MANAGE_REGISTER_CODE="$(curl -sS -o "${register_tmp}" -w '%{http_code}' \
         --connect-timeout 10 --max-time 20 "https://${domain}/manage/register" 2>/dev/null)" || PUBLIC_MANAGE_REGISTER_CODE="000"
-    if [[ "${PUBLIC_MANAGE_REGISTER_CODE}" != "200" ]]; then
-        PUBLIC_MANAGE_STATUS="unhealthy"
-        record_alert "CRITICAL" "public-manage" "Registration page returned HTTP ${PUBLIC_MANAGE_REGISTER_CODE} for https://${domain}/manage/register."
-    elif grep -q 'data-api-prefix="/manage"' "${register_tmp}"; then
-        PUBLIC_MANAGE_REGISTER_PREFIX="ok"
-    else
-        PUBLIC_MANAGE_REGISTER_PREFIX="mismatch"
-        record_alert "WARNING" "public-manage" "Registration page does not expose data-api-prefix=\"/manage\"."
-    fi
-
     PUBLIC_MANAGE_DOCS_CODE="$(curl -sS -o "${docs_tmp}" -w '%{http_code}' \
         --connect-timeout 10 --max-time 20 "https://${domain}/manage/docs" 2>/dev/null)" || PUBLIC_MANAGE_DOCS_CODE="000"
-    if [[ "${PUBLIC_MANAGE_DOCS_CODE}" != "200" ]]; then
-        PUBLIC_MANAGE_STATUS="unhealthy"
-        record_alert "CRITICAL" "public-manage" "Docs page returned HTTP ${PUBLIC_MANAGE_DOCS_CODE} for https://${domain}/manage/docs."
-    elif grep -q '/manage/openapi.json' "${docs_tmp}"; then
-        PUBLIC_MANAGE_DOCS_PREFIX="ok"
-    else
-        PUBLIC_MANAGE_DOCS_PREFIX="mismatch"
-        record_alert "WARNING" "public-manage" "Docs page does not reference /manage/openapi.json."
-    fi
-
     PUBLIC_MANAGE_AUTH_MISSING_CODE="$(curl_http_code "https://${domain}/manage/api/v1/models/test")"
-    if [[ "${PUBLIC_MANAGE_AUTH_MISSING_CODE}" != "401" ]]; then
-        record_alert "WARNING" "public-manage" "Public manage endpoint should return 401 without X-Admin-Key, got ${PUBLIC_MANAGE_AUTH_MISSING_CODE}."
-    fi
-
     PUBLIC_MANAGE_AUTH_WRONG_CODE="$(curl_http_code "https://${domain}/manage/api/v1/models/test" -H 'X-Admin-Key: wrong-admin-key')"
-    if [[ "${PUBLIC_MANAGE_AUTH_WRONG_CODE}" != "403" ]]; then
-        record_alert "WARNING" "public-manage" "Public manage endpoint should return 403 for wrong X-Admin-Key, got ${PUBLIC_MANAGE_AUTH_WRONG_CODE}."
+
+    if [[ "${exposure_profile}" == "vpn-first" ]]; then
+        PUBLIC_MANAGE_POLICY="private_admin_surface"
+
+        local allowed_seen=0
+        local protected_seen=0
+        local unexpected_seen=0
+        local code
+        for code in \
+            "${PUBLIC_MANAGE_HEALTH_CODE}" \
+            "${PUBLIC_MANAGE_REGISTER_CODE}" \
+            "${PUBLIC_MANAGE_DOCS_CODE}" \
+            "${PUBLIC_MANAGE_AUTH_MISSING_CODE}" \
+            "${PUBLIC_MANAGE_AUTH_WRONG_CODE}"; do
+            case "${code}" in
+                403)
+                    protected_seen=$((protected_seen + 1))
+                    ;;
+                200|401)
+                    allowed_seen=$((allowed_seen + 1))
+                    ;;
+                *)
+                    unexpected_seen=$((unexpected_seen + 1))
+                    ;;
+            esac
+        done
+
+        if [[ "${PUBLIC_MANAGE_REGISTER_CODE}" == "200" ]]; then
+            if grep -q 'data-api-prefix="/manage"' "${register_tmp}"; then
+                PUBLIC_MANAGE_REGISTER_PREFIX="ok"
+            else
+                PUBLIC_MANAGE_REGISTER_PREFIX="mismatch"
+                record_alert "WARNING" "public-manage" "Registration page is reachable from this origin but does not expose data-api-prefix=\"/manage\"."
+            fi
+        fi
+
+        if [[ "${PUBLIC_MANAGE_DOCS_CODE}" == "200" ]]; then
+            if grep -q '/manage/openapi.json' "${docs_tmp}"; then
+                PUBLIC_MANAGE_DOCS_PREFIX="ok"
+            else
+                PUBLIC_MANAGE_DOCS_PREFIX="mismatch"
+                record_alert "WARNING" "public-manage" "Docs page is reachable from this origin but does not reference /manage/openapi.json."
+            fi
+        fi
+
+        if [[ "${unexpected_seen}" -gt 0 ]]; then
+            PUBLIC_MANAGE_STATUS="unverifiable"
+            record_alert "WARNING" "public-manage" "vpn-first /manage probe returned unexpected HTTP codes: health=${PUBLIC_MANAGE_HEALTH_CODE}, register=${PUBLIC_MANAGE_REGISTER_CODE}, docs=${PUBLIC_MANAGE_DOCS_CODE}, missing=${PUBLIC_MANAGE_AUTH_MISSING_CODE}, wrong=${PUBLIC_MANAGE_AUTH_WRONG_CODE}."
+        elif [[ "${allowed_seen}" -gt 0 ]]; then
+            PUBLIC_MANAGE_STATUS="allowlisted_from_current_origin"
+            record_alert "INFO" "public-manage" "vpn-first /manage is reachable from the current probe origin; verify from a non-allowlisted public origin returns 403."
+        elif [[ "${protected_seen}" -gt 0 ]]; then
+            PUBLIC_MANAGE_STATUS="protected"
+        fi
+    else
+        PUBLIC_MANAGE_POLICY="public_management_enabled"
+
+        if [[ "${PUBLIC_MANAGE_HEALTH_CODE}" != "200" ]]; then
+            PUBLIC_MANAGE_STATUS="unhealthy"
+            record_alert "CRITICAL" "public-manage" "Public manage health endpoint returned HTTP ${PUBLIC_MANAGE_HEALTH_CODE} for https://${domain}/manage/health."
+        fi
+
+        if [[ "${PUBLIC_MANAGE_REGISTER_CODE}" != "200" ]]; then
+            PUBLIC_MANAGE_STATUS="unhealthy"
+            record_alert "CRITICAL" "public-manage" "Registration page returned HTTP ${PUBLIC_MANAGE_REGISTER_CODE} for https://${domain}/manage/register."
+        elif grep -q 'data-api-prefix="/manage"' "${register_tmp}"; then
+            PUBLIC_MANAGE_REGISTER_PREFIX="ok"
+        else
+            PUBLIC_MANAGE_REGISTER_PREFIX="mismatch"
+            record_alert "WARNING" "public-manage" "Registration page does not expose data-api-prefix=\"/manage\"."
+        fi
+
+        if [[ "${PUBLIC_MANAGE_DOCS_CODE}" != "200" ]]; then
+            PUBLIC_MANAGE_STATUS="unhealthy"
+            record_alert "CRITICAL" "public-manage" "Docs page returned HTTP ${PUBLIC_MANAGE_DOCS_CODE} for https://${domain}/manage/docs."
+        elif grep -q '/manage/openapi.json' "${docs_tmp}"; then
+            PUBLIC_MANAGE_DOCS_PREFIX="ok"
+        else
+            PUBLIC_MANAGE_DOCS_PREFIX="mismatch"
+            record_alert "WARNING" "public-manage" "Docs page does not reference /manage/openapi.json."
+        fi
+
+        if [[ "${PUBLIC_MANAGE_AUTH_MISSING_CODE}" != "401" ]]; then
+            record_alert "WARNING" "public-manage" "Public manage endpoint should return 401 without X-Admin-Key, got ${PUBLIC_MANAGE_AUTH_MISSING_CODE}."
+        fi
+
+        if [[ "${PUBLIC_MANAGE_AUTH_WRONG_CODE}" != "403" ]]; then
+            record_alert "WARNING" "public-manage" "Public manage endpoint should return 403 for wrong X-Admin-Key, got ${PUBLIC_MANAGE_AUTH_WRONG_CODE}."
+        fi
     fi
 
     rm -f "${register_tmp}" "${docs_tmp}"
@@ -696,6 +787,8 @@ generate_report() {
     "public_manage": {
       "status": "${PUBLIC_MANAGE_STATUS:-not_applicable}",
       "domain": "${PUBLIC_MANAGE_DOMAIN:-null}",
+      "exposure_profile": "${PUBLIC_MANAGE_EXPOSURE_PROFILE:-vpn-first}",
+      "policy": "${PUBLIC_MANAGE_POLICY:-private}",
       "health_http_code": "${PUBLIC_MANAGE_HEALTH_CODE:-null}",
       "register_http_code": "${PUBLIC_MANAGE_REGISTER_CODE:-null}",
       "docs_http_code": "${PUBLIC_MANAGE_DOCS_CODE:-null}",
@@ -766,7 +859,7 @@ main() {
     generate_report
 
     verbose_log "bifrost_api: status=${BIFROST_STATUS:-not_applicable} health=${BIFROST_HEALTH_CODE:-null} missing=${BIFROST_AUTH_MISSING_CODE:-null} wrong=${BIFROST_AUTH_WRONG_CODE:-null}"
-    verbose_log "public_manage: domain=${PUBLIC_MANAGE_DOMAIN:-null} status=${PUBLIC_MANAGE_STATUS:-not_applicable} health=${PUBLIC_MANAGE_HEALTH_CODE:-null} register=${PUBLIC_MANAGE_REGISTER_CODE:-null}/${PUBLIC_MANAGE_REGISTER_PREFIX:-unknown} docs=${PUBLIC_MANAGE_DOCS_CODE:-null}/${PUBLIC_MANAGE_DOCS_PREFIX:-unknown}"
+    verbose_log "public_manage: domain=${PUBLIC_MANAGE_DOMAIN:-null} profile=${PUBLIC_MANAGE_EXPOSURE_PROFILE:-vpn-first} status=${PUBLIC_MANAGE_STATUS:-not_applicable} health=${PUBLIC_MANAGE_HEALTH_CODE:-null} register=${PUBLIC_MANAGE_REGISTER_CODE:-null}/${PUBLIC_MANAGE_REGISTER_PREFIX:-unknown} docs=${PUBLIC_MANAGE_DOCS_CODE:-null}/${PUBLIC_MANAGE_DOCS_PREFIX:-unknown}"
     verbose_log "caddy: status=${CADDY_STATUS:-unknown}"
     verbose_log "report=${HEALTH_JSON}"
 

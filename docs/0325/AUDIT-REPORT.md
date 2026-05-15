@@ -799,10 +799,10 @@
   - `tests/test-in-docker.sh`
 - **修复内容**:
   - `pre_deploy_check()` 现在把“未知云厂商”与“真实阻断失败”分开处理：`detect_cloud_provider` 仍允许 unknown/bare metal 继续，但只作为信息展示，不再混入后续门禁语义。
-  - `offer_dd_reinstall()` 的 `Light Clean` / `Full DD Reinstall` 分支也已改为透传 `_do_light_clean()` / `_do_dd_reinstall()` 的真实返回码，不再把“确认取消”或底层失败重新包装成成功。
-  - 当检测到预装 agent 且 `offer_dd_reinstall()` 返回非零时，函数现在会记录 `Cloud agent cleanup was skipped, cancelled, or failed. Deployment must stop.`，并以非 0 结束，而不是继续向下部署。
-  - 当 `verify_clean_system()` 发现残留问题时，函数现在会记录 `System verification detected unresolved issues. Deployment must stop.`，并在尾部统一以 `Pre-deployment check failed. Resolve the issues above before deployment.` 做非 0 收口。
-  - 成功路径才允许打印 `Pre-deployment check complete. Proceeding with deployment...`，从而把“信息性 unknown provider”与“真实未清理/未验证通过”的控制语义彻底拆开。
+  - `offer_dd_reinstall()` 的“云集成审查” / `Full DD Reinstall` 分支透传 `_do_light_clean()` / `_do_dd_reinstall()` 的真实返回码，不再把“确认取消”或底层失败重新包装成成功。
+  - 当检测到云厂商集成项且 `offer_dd_reinstall()` 返回非零时，函数现在会记录 `Cloud integration review was not acknowledged. Deployment must stop.`，并以非 0 结束，而不是继续向下部署。
+  - 当 `verify_clean_system()` 发现云就绪校验问题时，函数现在会记录 `Cloud readiness verification detected unresolved issues. Deployment must stop.`，并在尾部统一以 `Pre-deployment check failed. Resolve the issues above before deployment.` 做非 0 收口。
+  - 成功路径才允许打印 `Pre-deployment check complete. Proceeding with deployment...`，从而把“信息性 unknown provider”与“真实未审查/未验证通过”的控制语义彻底拆开。
 - **新增验证**:
   - `tests/test-in-docker.sh` 新增 `dd` 套件，并把 root / bridge 的 `pre_deploy_check` 合同纳入 `deploy` 与 `all`：
     - root `dd-reinstall` 在未知云厂商且系统干净时允许继续部署

@@ -35,8 +35,8 @@ info() { echo -e "${YELLOW}[TEST]${NC} $*"; }
 PASS_COUNT=0
 FAIL_COUNT=0
 
-record_pass() { ((PASS_COUNT++)); pass "$*"; }
-record_fail() { ((FAIL_COUNT++)); fail "$*"; }
+record_pass() { PASS_COUNT=$((PASS_COUNT + 1)); pass "$*"; }
+record_fail() { FAIL_COUNT=$((FAIL_COUNT + 1)); fail "$*"; }
 
 # --- Check Docker ---
 check_docker() {
@@ -78,9 +78,13 @@ test_functions() {
         "scripts/common.sh:log_info"
         "scripts/common.sh:install_packages"
         "scripts/common.sh:check_docker"
+        "scripts/common.sh:require_docker_server_version"
         "scripts/common.sh:generate_uuid"
         "scripts/common.sh:generate_x25519_keypair"
         "scripts/common.sh:template_render"
+        "scripts/common.sh:bifrost_exposure_profile"
+        "scripts/common.sh:bifrost_admin_allowed_ranges"
+        "scripts/common.sh:bifrost_exposure_profile_description"
         "scripts/security.sh:full_security_hardening"
         "scripts/security.sh:harden_ssh"
         "scripts/security.sh:setup_firewall"
@@ -205,20 +209,32 @@ test_ports() {
         record_fail "Mihomo mixed-port 不一致 (模板或 mihomo.sh 未设置 7890)"
     fi
 
-    # Server A management path parity
+    # Server A management path and exposure-profile parity
     if grep -q 'header_up X-Forwarded-Prefix /manage' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
-       grep -q 'header_up X-Forwarded-Prefix /manage' "${SCRIPT_DIR}/scripts/server-a.sh"; then
-        record_pass "Server A /manage 前缀在模板与运行脚本中一致"
+       grep -q 'header_up X-Forwarded-Prefix /manage' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -Fq 'path /api/* /static/* /logo.png /dashboard' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -Fq 'path /api/* /static/* /logo.png /dashboard' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -q '@manage_private' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -q '@manage_private' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -q 'New API static assets require VPN/private access in vpn-first profile' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -q 'New API static assets require VPN/private access in vpn-first profile' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -q 'Bifrost management requires VPN/private access in vpn-first profile' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -q 'Bifrost management requires VPN/private access in vpn-first profile' "${SCRIPT_DIR}/scripts/server-a.sh"; then
+        record_pass "Server A /manage 前缀与 vpn-first 暴露面在模板与运行脚本中一致"
     else
-        record_fail "Server A /manage 前缀在模板与运行脚本中不一致"
+        record_fail "Server A /manage 前缀与 vpn-first 暴露面在模板与运行脚本中不一致"
     fi
 
-    # Server B panel path parity
-    if grep -q 'handle /xui-panel/\*' "${SCRIPT_DIR}/configs/caddy/Caddyfile-b.tpl" && \
-       grep -q 'handle_path /xui-panel/\*' "${SCRIPT_DIR}/scripts/server-b.sh"; then
-        record_pass "Server B 3x-ui 路径在模板与运行脚本中一致"
+    # Server B panel path and exposure-profile parity
+    if grep -q '@xui_private' "${SCRIPT_DIR}/configs/caddy/Caddyfile-b.tpl" && \
+       grep -q '@xui_private' "${SCRIPT_DIR}/scripts/server-b.sh" && \
+       grep -q 'remote_ip' "${SCRIPT_DIR}/configs/caddy/Caddyfile-b.tpl" && \
+       grep -q 'remote_ip' "${SCRIPT_DIR}/scripts/server-b.sh" && \
+       grep -q '3x-ui requires VPN/private access in vpn-first profile' "${SCRIPT_DIR}/configs/caddy/Caddyfile-b.tpl" && \
+       grep -q '3x-ui requires VPN/private access in vpn-first profile' "${SCRIPT_DIR}/scripts/server-b.sh"; then
+        record_pass "Server B 3x-ui 路径与 vpn-first 暴露面在模板与运行脚本中一致"
     else
-        record_fail "Server B 3x-ui 路径在模板与运行脚本中不一致"
+        record_fail "Server B 3x-ui 路径与 vpn-first 暴露面在模板与运行脚本中不一致"
     fi
 
     # VPN subnet 10.8.0.0/24
@@ -228,6 +244,19 @@ test_ports() {
     else
         record_fail "VPN 子网不一致"
     fi
+
+    if grep -q '^require_docker_server_version()' "${SCRIPT_DIR}/scripts/common.sh" && \
+       grep -q 'require_docker_server_version "20.10.0" "New API Docker host-gateway mapping"' "${SCRIPT_DIR}/scripts/server-a.sh"; then
+        record_pass "New API 部署前验证 host-gateway 所需 Docker 版本"
+    else
+        record_fail "New API 部署前缺少 host-gateway Docker 版本门禁"
+    fi
+
+    if grep -Eq 'Default Admin: root|Default Pass : 123456|New API Admin Pass : 123456|root/123456' "${SCRIPT_DIR}/scripts/server-a.sh"; then
+        record_fail "New API 不应继续输出弱默认管理员口令"
+    else
+        record_pass "New API 不再输出弱默认管理员口令"
+    fi
 }
 
 # --- Test: Menu integration ---
@@ -235,6 +264,7 @@ test_menu() {
     info "=== 菜单集成测试 ==="
 
     local install_sh="${SCRIPT_DIR}/install.sh"
+    local help_output=""
 
     # Check all 19 menu flow functions exist
     local flows=(
@@ -275,13 +305,23 @@ test_menu() {
         "--dd-reinstall" "--uninstall" "--version" "--help"
     )
 
+    help_output="$(bash "$install_sh" --help 2>/dev/null || true)"
+    local help_first_line
+    help_first_line="$(printf '%s\n' "$help_output" | sed -n '1p')"
+
     for arg in "${cli_args[@]}"; do
-        if grep -q "\"${arg}\"\\|'${arg}'" "$install_sh"; then
+        if printf '%s\n' "$help_output" | grep -q -- "${arg}"; then
             record_pass "CLI 参数: ${arg}"
         else
             record_fail "CLI 参数缺失: ${arg}"
         fi
     done
+
+    if [[ "${help_first_line}" == "AI Gateway Bridge v2.0 - 一键部署脚本" ]]; then
+        record_pass "CLI 帮助输出首行干净"
+    else
+        record_fail "CLI 帮助输出被启动噪音污染"
+    fi
 }
 
 # --- Test: Documentation ---

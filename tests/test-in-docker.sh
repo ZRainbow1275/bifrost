@@ -241,9 +241,13 @@ test_functions() {
         "scripts/common.sh:log_info"
         "scripts/common.sh:install_packages"
         "scripts/common.sh:check_docker"
+        "scripts/common.sh:require_docker_server_version"
         "scripts/common.sh:generate_uuid"
         "scripts/common.sh:generate_x25519_keypair"
         "scripts/common.sh:template_render"
+        "scripts/common.sh:bifrost_exposure_profile"
+        "scripts/common.sh:bifrost_admin_allowed_ranges"
+        "scripts/common.sh:bifrost_exposure_profile_description"
         "scripts/security.sh:full_security_hardening"
         "scripts/security.sh:harden_ssh"
         "scripts/security.sh:setup_firewall"
@@ -1435,6 +1439,20 @@ test_supply_chain_contracts() {
     else
         record_pass "Server B 下载脚本正文已改为 stdin 执行，避免额外 shell 字符串解释"
     fi
+
+    if grep -q 'BIFROST_NEW_API_IMAGE' scripts/server-a.sh && \
+       grep -q 'Refusing mutable New API image' scripts/server-a.sh && \
+       grep -q 'BIFROST_ALLOW_UNPINNED' scripts/server-a.sh; then
+        record_pass "Server A 生产 profile 会拒绝未显式允许的 New API latest 镜像"
+    else
+        record_fail "Server A 生产 profile 会拒绝未显式允许的 New API latest 镜像"
+    fi
+
+    if grep -Eq 'Default Admin: root|Default Pass : 123456|New API Admin Pass : 123456|root/123456' scripts/server-a.sh; then
+        record_fail "Server A 不应继续输出 New API 弱默认管理员口令"
+    else
+        record_pass "Server A 不再输出 New API 弱默认管理员口令"
+    fi
 }
 
 test_bridge_supply_chain_contracts() {
@@ -1511,6 +1529,27 @@ test_bridge_supply_chain_contracts() {
         record_pass "AI Gateway Bridge Server B 的 Xray 版本解析已收敛到共享 GitHub helper"
     else
         record_fail "AI Gateway Bridge Server B 的 Xray 版本解析已收敛到共享 GitHub helper"
+    fi
+
+    if grep -q 'BIFROST_NEW_API_IMAGE' ai-gateway-bridge/scripts/server-a.sh && \
+       grep -q 'Refusing mutable New API image' ai-gateway-bridge/scripts/server-a.sh && \
+       grep -q 'BIFROST_ALLOW_UNPINNED' ai-gateway-bridge/scripts/server-a.sh; then
+        record_pass "AI Gateway Bridge Server A 生产 profile 会拒绝未显式允许的 New API latest 镜像"
+    else
+        record_fail "AI Gateway Bridge Server A 生产 profile 会拒绝未显式允许的 New API latest 镜像"
+    fi
+
+    if grep -q '^require_docker_server_version()' ai-gateway-bridge/scripts/common.sh && \
+       grep -q 'require_docker_server_version "20.10.0" "New API Docker host-gateway mapping"' ai-gateway-bridge/scripts/server-a.sh; then
+        record_pass "AI Gateway Bridge Server A 部署 New API 前会验证 host-gateway 所需 Docker 版本"
+    else
+        record_fail "AI Gateway Bridge Server A 部署 New API 前缺少 host-gateway Docker 版本门禁"
+    fi
+
+    if grep -Eq 'Default Admin: root|Default Pass : 123456|New API Admin Pass : 123456|root/123456' ai-gateway-bridge/scripts/server-a.sh; then
+        record_fail "AI Gateway Bridge Server A 不应继续输出 New API 弱默认管理员口令"
+    else
+        record_pass "AI Gateway Bridge Server A 不再输出 New API 弱默认管理员口令"
     fi
 }
 
@@ -2007,6 +2046,7 @@ EOF
     if BIFROST_TRACE_COMMON_LOAD=0 \
         PATH="${fakebin}:${PATH}" \
         SERVER_B_SH="${workdir}/server-b.sh" \
+        TMP_ROOT="${temp_root}" \
         bash -c '
             set -euo pipefail
             source "$SERVER_B_SH"
@@ -2018,6 +2058,37 @@ EOF
         record_pass "Root server-b 在 3x-ui CLI/sqlite fallback 同时失败时会显式报错"
     else
         record_fail "Root server-b 在 3x-ui CLI/sqlite fallback 同时失败时会显式报错"
+    fi
+
+    if grep -q 'THREE_X_UI_DIRECT_PORT_OPEN' "${SCRIPT_DIR}/scripts/server-b.sh" && \
+       grep -q '3x-ui direct panel port is not opened in ${exposure_profile} profile' "${SCRIPT_DIR}/scripts/server-b.sh" && \
+       grep -q '3x-ui panel (lab profile only)' "${SCRIPT_DIR}/scripts/server-b.sh" && \
+       grep -q '3x-ui requires VPN/private access in vpn-first profile' "${SCRIPT_DIR}/scripts/server-b.sh"; then
+        record_pass "Root server-b 3x-ui 默认不再直接开放公网面板端口，lab 例外有显式标记"
+    else
+        record_fail "Root server-b 3x-ui 默认不再直接开放公网面板端口，lab 例外有显式标记"
+    fi
+
+    cat > "${fakebin}/ufw" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+    chmod +x "${fakebin}/ufw"
+
+    if BIFROST_TRACE_COMMON_LOAD=0 \
+        PATH="${fakebin}:${PATH}" \
+        SERVER_B_SH="${workdir}/server-b.sh" \
+        bash -c '
+            set -euo pipefail
+            source "$SERVER_B_SH"
+            if _open_firewall_port "23456" "tcp" "test panel"; then
+                exit 1
+            fi
+            exit 0
+        '; then
+        record_pass "Root server-b 防火墙命令失败时不会吞错并继续宣称端口已开放"
+    else
+        record_fail "Root server-b 防火墙命令失败时不会吞错并继续宣称端口已开放"
     fi
 
     rm -rf "${temp_root}"
@@ -2051,6 +2122,7 @@ EOF
     if BIFROST_TRACE_COMMON_LOAD=0 \
         PATH="${fakebin}:${PATH}" \
         SERVER_B_SH="${workdir}/server-b.sh" \
+        TMP_ROOT="${temp_root}" \
         bash -c '
             set -euo pipefail
             source "$SERVER_B_SH"
@@ -2064,7 +2136,211 @@ EOF
         record_fail "AI Gateway Bridge server-b 在 3x-ui CLI/sqlite fallback 同时失败时会显式报错"
     fi
 
+    if grep -q 'THREE_X_UI_DIRECT_PORT_OPEN' "${SCRIPT_DIR}/ai-gateway-bridge/scripts/server-b.sh" && \
+       grep -q '3x-ui direct panel port is not opened in ${exposure_profile} profile' "${SCRIPT_DIR}/ai-gateway-bridge/scripts/server-b.sh" && \
+       grep -q '3x-ui panel (lab profile only)' "${SCRIPT_DIR}/ai-gateway-bridge/scripts/server-b.sh" && \
+       grep -q '3x-ui requires VPN/private access in vpn-first profile' "${SCRIPT_DIR}/ai-gateway-bridge/scripts/server-b.sh"; then
+        record_pass "AI Gateway Bridge server-b 3x-ui 默认不再直接开放公网面板端口，lab 例外有显式标记"
+    else
+        record_fail "AI Gateway Bridge server-b 3x-ui 默认不再直接开放公网面板端口，lab 例外有显式标记"
+    fi
+
+    cat > "${fakebin}/ufw" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+    chmod +x "${fakebin}/ufw"
+
+    if BIFROST_TRACE_COMMON_LOAD=0 \
+        PATH="${fakebin}:${PATH}" \
+        SERVER_B_SH="${workdir}/server-b.sh" \
+        bash -c '
+            set -euo pipefail
+            source "$SERVER_B_SH"
+            if _open_firewall_port "23456" "tcp" "test panel"; then
+                exit 1
+            fi
+            exit 0
+        '; then
+        record_pass "AI Gateway Bridge server-b 防火墙命令失败时不会吞错并继续宣称端口已开放"
+    else
+        record_fail "AI Gateway Bridge server-b 防火墙命令失败时不会吞错并继续宣称端口已开放"
+    fi
+
     rm -rf "${temp_root}"
+}
+
+_check_server_a_caddy_generation() {
+    local label="$1"
+    local source_dir="$2"
+    local temp_root fakebin workdir
+    temp_root="$(mktemp -d)"
+    fakebin="${temp_root}/bin"
+    workdir="${temp_root}/server-a"
+    mkdir -p "${fakebin}" "${workdir}" "${temp_root}/caddy" "${temp_root}/www" "${temp_root}/logs/caddy"
+    cp "${SCRIPT_DIR}/${source_dir}/server-a.sh" "${workdir}/server-a.sh"
+    cp "${SCRIPT_DIR}/${source_dir}/common.sh" "${workdir}/common.sh"
+    sed -i "s|^readonly CADDY_CONFIG=.*$|readonly CADDY_CONFIG=\"${temp_root}/caddy/Caddyfile\"|" "${workdir}/server-a.sh"
+    sed -i "s|^readonly DECOY_WEBROOT=.*$|readonly DECOY_WEBROOT=\"${temp_root}/www\"|" "${workdir}/server-a.sh"
+    sed -i "s|^readonly CADDY_LOG_DIR=.*$|readonly CADDY_LOG_DIR=\"${temp_root}/logs/caddy\"|" "${workdir}/server-a.sh"
+    sed -i "s|/root/server-a-domain.conf|${temp_root}/server-a-domain.conf|g" "${workdir}/server-a.sh"
+
+    cat > "${fakebin}/caddy" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+    validate) exit 0 ;;
+    version) echo "2.8.0"; exit 0 ;;
+    *) exit 0 ;;
+esac
+EOF
+    chmod +x "${fakebin}/caddy"
+
+    cat > "${fakebin}/systemctl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "${fakebin}/systemctl"
+
+    if BIFROST_TRACE_COMMON_LOAD=0 \
+        PATH="${fakebin}:${PATH}" \
+        SERVER_A_SH="${workdir}/server-a.sh" \
+        bash -c '
+            set -euo pipefail
+            source "$SERVER_A_SH"
+            _install_caddy() { return 0; }
+            journalctl() { return 0; }
+
+            BIFROST_EXPOSURE_PROFILE=vpn-first \
+            BIFROST_ADMIN_ALLOWED_RANGES="127.0.0.1" \
+            setup_caddy_a <<< "audit.example.com" >/dev/null
+
+            grep -q "# Exposure profile: vpn-first" "$CADDY_CONFIG"
+            grep -q "@newapi_private" "$CADDY_CONFIG"
+            grep -q "@manage_private_root" "$CADDY_CONFIG"
+            grep -q "remote_ip 127.0.0.1" "$CADDY_CONFIG"
+            grep -Fq "path /api/* /static/* /logo.png /dashboard" "$CADDY_CONFIG"
+            grep -q "handle /api/status" "$CADDY_CONFIG"
+            grep -Fq "handle /static/*" "$CADDY_CONFIG"
+            grep -Fq "handle /logo.png" "$CADDY_CONFIG"
+            grep -q "Bifrost management requires VPN/private access in vpn-first profile" "$CADDY_CONFIG"
+            grep -q "New API static assets require VPN/private access in vpn-first profile" "$CADDY_CONFIG"
+            grep -q "New API dashboard requires VPN/private access in vpn-first profile" "$CADDY_CONFIG"
+
+            BIFROST_EXPOSURE_PROFILE=public-managed \
+            BIFROST_ADMIN_ALLOWED_RANGES="127.0.0.1" \
+            setup_caddy_a <<< "audit.example.net" >/dev/null
+
+            grep -q "# Exposure profile: public-managed" "$CADDY_CONFIG"
+            grep -q "handle /manage {" "$CADDY_CONFIG"
+            grep -q "redir /manage/ 308" "$CADDY_CONFIG"
+            grep -Fq "handle /static/*" "$CADDY_CONFIG"
+            grep -Fq "handle /logo.png" "$CADDY_CONFIG"
+            grep -q "handle /dashboard" "$CADDY_CONFIG"
+            ! grep -q "Bifrost management requires VPN/private access in vpn-first profile" "$CADDY_CONFIG"
+            exit 0
+        '; then
+        record_pass "${label} Server A Caddyfile 生成按 vpn-first/public-managed 区分管理面暴露"
+    else
+        record_fail "${label} Server A Caddyfile 生成按 vpn-first/public-managed 区分管理面暴露"
+    fi
+
+    rm -rf "${temp_root}"
+}
+
+_check_server_b_caddy_generation() {
+    local label="$1"
+    local source_dir="$2"
+    local temp_root fakebin workdir
+    temp_root="$(mktemp -d)"
+    fakebin="${temp_root}/bin"
+    workdir="${temp_root}/server-b"
+    mkdir -p "${fakebin}" "${workdir}" "${temp_root}/state" "${temp_root}/systemd" "${temp_root}/logs/caddy"
+    cp "${SCRIPT_DIR}/${source_dir}/server-b.sh" "${workdir}/server-b.sh"
+    cp "${SCRIPT_DIR}/${source_dir}/common.sh" "${workdir}/common.sh"
+    sed -i "s|^readonly CADDY_CONFIG_DIR=.*$|readonly CADDY_CONFIG_DIR=\"${temp_root}/caddy\"|" "${workdir}/server-b.sh"
+    sed -i "s|^readonly CADDY_DATA_DIR=.*$|readonly CADDY_DATA_DIR=\"${temp_root}/caddy-data\"|" "${workdir}/server-b.sh"
+    sed -i "s|^readonly CADDY_WEB_ROOT=.*$|readonly CADDY_WEB_ROOT=\"${temp_root}/www\"|" "${workdir}/server-b.sh"
+    sed -i "s|^readonly DEPLOY_STATE_DIR=.*$|readonly DEPLOY_STATE_DIR=\"${temp_root}/state\"|" "${workdir}/server-b.sh"
+    sed -i "s|/etc/systemd/system/caddy.service|${temp_root}/systemd/caddy.service|g" "${workdir}/server-b.sh"
+    sed -i "s|/var/log/caddy|${temp_root}/logs/caddy|g" "${workdir}/server-b.sh"
+    printf 'THREE_X_UI_PORT=23456\n' > "${temp_root}/state/state.env"
+
+    cat > "${fakebin}/caddy" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+    validate) exit 0 ;;
+    version) echo "2.8.0"; exit 0 ;;
+    *) exit 0 ;;
+esac
+EOF
+    chmod +x "${fakebin}/caddy"
+
+    cat > "${fakebin}/systemctl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "${fakebin}/systemctl"
+
+    if BIFROST_TRACE_COMMON_LOAD=0 \
+        PATH="${fakebin}:${PATH}" \
+        SERVER_B_SH="${workdir}/server-b.sh" \
+        TMP_ROOT="${temp_root}" \
+        bash -c '
+            set -euo pipefail
+            source "$SERVER_B_SH"
+            _install_caddy() { return 0; }
+            _deploy_decoy_website() { mkdir -p "$CADDY_WEB_ROOT"; : > "${CADDY_WEB_ROOT}/index.html"; }
+            _wait_for_service() { return 0; }
+            _open_firewall_port() { return 0; }
+            _get_public_ip() { echo "203.0.113.20"; }
+            journalctl() { return 0; }
+
+            BIFROST_EXPOSURE_PROFILE=vpn-first \
+            BIFROST_ADMIN_ALLOWED_RANGES="127.0.0.1" \
+            setup_caddy_b <<< "panel.example.com" >/dev/null
+
+            cfg="${CADDY_CONFIG_DIR}/Caddyfile"
+            grep -q "# Exposure profile: vpn-first" "$cfg"
+            grep -q "@xui_private_root" "$cfg"
+            grep -q "@xui_private" "$cfg"
+            grep -q "remote_ip 127.0.0.1" "$cfg"
+            grep -q "3x-ui requires VPN/private access in vpn-first profile" "$cfg"
+            ! grep -q "handle_path /xui-panel/\\*" "$cfg"
+
+            BIFROST_EXPOSURE_PROFILE=public-managed \
+            BIFROST_ADMIN_ALLOWED_RANGES="127.0.0.1" \
+            setup_caddy_b <<< "panel.example.net" >/dev/null
+
+            grep -q "# Exposure profile: public-managed" "$cfg"
+            grep -q "handle /xui-panel {" "$cfg"
+            grep -q "redir /xui-panel/ 308" "$cfg"
+            grep -q "handle_path /xui-panel/\\*" "$cfg"
+            ! grep -q "3x-ui requires VPN/private access in vpn-first profile" "$cfg"
+
+            _wait_for_service() { return 1; }
+            fail_output="${TMP_ROOT}/server-b-caddy-start-failure.log"
+            if BIFROST_EXPOSURE_PROFILE=vpn-first setup_caddy_b <<< "broken.example.org" >"${fail_output}" 2>&1; then
+                exit 1
+            fi
+            grep -q "Caddy service failed to start. Check logs:" "${fail_output}"
+            ! grep -q "CADDY (SERVER B) DEPLOYMENT COMPLETE" "${fail_output}"
+            ! grep -q "broken.example.org" "${DEPLOY_STATE_DIR}/state.env"
+            exit 0
+        '; then
+        record_pass "${label} Server B Caddyfile 生成按 vpn-first/public-managed 区分 3x-ui 暴露"
+    else
+        record_fail "${label} Server B Caddyfile 生成按 vpn-first/public-managed 区分 3x-ui 暴露"
+    fi
+
+    rm -rf "${temp_root}"
+}
+
+test_caddy_exposure_generation_contracts() {
+    info "=== Caddy 暴露面 profile 生成契约 ==="
+    _check_server_a_caddy_generation "Root" "scripts"
+    _check_server_a_caddy_generation "AI Gateway Bridge" "ai-gateway-bridge/scripts"
+    _check_server_b_caddy_generation "Root" "scripts"
+    _check_server_b_caddy_generation "AI Gateway Bridge" "ai-gateway-bridge/scripts"
 }
 
 test_server_a_deploy_contracts() {
@@ -2100,9 +2376,9 @@ EOF
             ! grep -q "Server A Deployment Complete!" "${output}"
             exit 0
         '; then
-        record_pass "Root server-a 在预部署清理失败时会立即终止且不进入后续部署"
+        record_pass "Root server-a 在预部署云环境审查失败时会立即终止且不进入后续部署"
     else
-        record_fail "Root server-a 在预部署清理失败时会立即终止且不进入后续部署"
+        record_fail "Root server-a 在预部署云环境审查失败时会立即终止且不进入后续部署"
     fi
 
     local workdir="${temp_root}/root-server-a"
@@ -2158,6 +2434,10 @@ EOF
 
             grep -q "Connectivity Tests" "${output}"
             grep -q "Server A Deployment Incomplete" "${output}"
+            grep -q "Exposure Profile  : vpn-first" "${output}"
+            grep -q "New API Initialization" "${output}"
+            grep -q "Admin Credential  : Created by you during first-run setup" "${output}"
+            ! grep -q "New API Admin Pass : 123456" "${output}"
             ! grep -q "Server A Deployment Complete!" "${output}"
             exit 0
         '; then
@@ -2228,6 +2508,8 @@ EOF
 
             grep -q "VPN" "${output}"
             grep -q "Server A Deployment Incomplete" "${output}"
+            grep -q "Exposure Profile  : vpn-first" "${output}"
+            ! grep -q "root/123456" "${output}"
             ! grep -q "Server A Deployment Complete!" "${output}"
             exit 0
         '; then
@@ -2272,9 +2554,9 @@ EOF
             ! grep -q "Server A Deployment Complete!" "${output}"
             exit 0
         '; then
-        record_pass "AI Gateway Bridge server-a 在预部署清理失败时会立即终止且不进入后续部署"
+        record_pass "AI Gateway Bridge server-a 在预部署云环境审查失败时会立即终止且不进入后续部署"
     else
-        record_fail "AI Gateway Bridge server-a 在预部署清理失败时会立即终止且不进入后续部署"
+        record_fail "AI Gateway Bridge server-a 在预部署云环境审查失败时会立即终止且不进入后续部署"
     fi
 
     local workdir="${temp_root}/bridge-server-a"
@@ -2330,6 +2612,10 @@ EOF
 
             grep -q "Connectivity Tests" "${output}"
             grep -q "Server A Deployment Incomplete" "${output}"
+            grep -q "Exposure Profile  : vpn-first" "${output}"
+            grep -q "New API Initialization" "${output}"
+            grep -q "Admin Credential  : Created by you during first-run setup" "${output}"
+            ! grep -q "New API Admin Pass : 123456" "${output}"
             ! grep -q "Server A Deployment Complete!" "${output}"
             exit 0
         '; then
@@ -2400,6 +2686,8 @@ EOF
 
             grep -q "VPN" "${output}"
             grep -q "Server A Deployment Incomplete" "${output}"
+            grep -q "Exposure Profile  : vpn-first" "${output}"
+            ! grep -q "root/123456" "${output}"
             ! grep -q "Server A Deployment Complete!" "${output}"
             exit 0
         '; then
@@ -2463,9 +2751,9 @@ EOF
             ! grep -q "DEPLOYMENT INCOMPLETE" "${output}"
             exit 0
         '; then
-        record_pass "Root server-b 在预部署清理失败时会立即终止且不进入后续部署"
+        record_pass "Root server-b 在预部署云环境审查失败时会立即终止且不进入后续部署"
     else
-        record_fail "Root server-b 在预部署清理失败时会立即终止且不进入后续部署"
+        record_fail "Root server-b 在预部署云环境审查失败时会立即终止且不进入后续部署"
     fi
 
     cat > "${workdir}/dd-reinstall.sh" <<'EOF'
@@ -2578,9 +2866,9 @@ EOF
             ! grep -q "DEPLOYMENT INCOMPLETE" "${output}"
             exit 0
         '; then
-        record_pass "AI Gateway Bridge server-b 在预部署清理失败时会立即终止且不进入后续部署"
+        record_pass "AI Gateway Bridge server-b 在预部署云环境审查失败时会立即终止且不进入后续部署"
     else
-        record_fail "AI Gateway Bridge server-b 在预部署清理失败时会立即终止且不进入后续部署"
+        record_fail "AI Gateway Bridge server-b 在预部署云环境审查失败时会立即终止且不进入后续部署"
     fi
 
     cat > "${workdir}/dd-reinstall.sh" <<'EOF'
@@ -2692,7 +2980,7 @@ test_install_deploy_entrypoint_contracts() {
         'run_cli_command "用户管理执行失败，请先处理上方错误。" manage_users'
         'run_cli_command "Bifrost 管理平台部署未完成，请先处理上方错误。" deploy_bifrost_api'
         'run_cli_command "深度诊断执行失败，请先处理上方错误。" manage_diagnostics'
-        'run_cli_command "预部署环境清理未完成，请先处理上方错误。" pre_deploy_check'
+        'run_cli_command "预部署云环境审查未完成，请先处理上方错误。" pre_deploy_check'
     )
 
     local missing_root_cli=0
@@ -2723,7 +3011,7 @@ test_install_deploy_entrypoint_contracts() {
         'run_cli_command "多节点 Server B 管理执行失败，请先处理上方错误。" manage_servers'
         'run_cli_command "用户管理执行失败，请先处理上方错误。" manage_users'
         'run_cli_command "深度诊断执行失败，请先处理上方错误。" manage_diagnostics'
-        'run_cli_command "预部署环境清理未完成，请先处理上方错误。" pre_deploy_check'
+        'run_cli_command "预部署云环境审查未完成，请先处理上方错误。" pre_deploy_check'
     )
 
     local missing_bridge_cli=0
@@ -2762,6 +3050,34 @@ test_dd_reinstall_contracts() {
     mkdir -p "${workdir}"
     cp "${SCRIPT_DIR}/scripts/dd-reinstall.sh" "${workdir}/dd-reinstall.sh"
     cp "${SCRIPT_DIR}/scripts/common.sh" "${workdir}/common.sh"
+
+    local dangerous_pattern
+    local root_dd_static_ok=1
+    local dangerous_patterns=(
+        "Cloud Agent Cleanup"
+        "monitoring agents / security daemons / telemetry"
+        "Remove detected agents only"
+        "systemctl mask \"\${svc}\""
+        "pkill -9"
+        "apt-get purge -y \"\${pkg}\""
+        "dnf remove -y \"\${pkg}\""
+        "yum remove -y \"\${pkg}\""
+        "rm -rf \"\${agent_path}\""
+        "systemctl mask cloud-init cloud-config cloud-final"
+    )
+    for dangerous_pattern in "${dangerous_patterns[@]}"; do
+        if grep -Fq -- "${dangerous_pattern}" "${workdir}/dd-reinstall.sh"; then
+            root_dd_static_ok=0
+            break
+        fi
+    done
+    if [[ "${root_dd_static_ok}" -eq 1 ]] && \
+       grep -Fq "Cloud Readiness Review Options" "${workdir}/dd-reinstall.sh" && \
+       grep -Fq "Cloud integration review was not acknowledged. Deployment must stop." "${workdir}/dd-reinstall.sh"; then
+        record_pass "Root dd-reinstall uses non-destructive cloud readiness review contract"
+    else
+        record_fail "Root dd-reinstall still contains destructive provider-component modification contract"
+    fi
 
     if BIFROST_TRACE_COMMON_LOAD=0 \
         DD_REINSTALL_SH="${workdir}/dd-reinstall.sh" \
@@ -2802,12 +3118,12 @@ test_dd_reinstall_contracts() {
             if pre_deploy_check >"${output_file}" 2>&1; then
                 exit 1
             fi
-            grep -q "Cloud agent cleanup was skipped, cancelled, or failed. Deployment must stop." "${output_file}"
+            grep -q "Cloud integration review was not acknowledged. Deployment must stop." "${output_file}"
             ! grep -q "Pre-deployment check complete. Proceeding with deployment" "${output_file}"
         '; then
-        record_pass "Root dd-reinstall 在检测到 agent 但跳过清理时会阻断部署"
+        record_pass "Root dd-reinstall 在检测到云集成但未确认审查时会阻断部署"
     else
-        record_fail "Root dd-reinstall 在检测到 agent 但跳过清理时会阻断部署"
+        record_fail "Root dd-reinstall 在检测到云集成但未确认审查时会阻断部署"
     fi
 
     if BIFROST_TRACE_COMMON_LOAD=0 \
@@ -2826,12 +3142,12 @@ test_dd_reinstall_contracts() {
             if pre_deploy_check >"${output_file}" 2>&1; then
                 exit 1
             fi
-            grep -q "System verification detected unresolved issues. Deployment must stop." "${output_file}"
+            grep -q "Cloud readiness verification detected unresolved issues. Deployment must stop." "${output_file}"
             ! grep -q "Pre-deployment check complete. Proceeding with deployment" "${output_file}"
         '; then
-        record_pass "Root dd-reinstall 在系统校验失败时会阻断部署"
+        record_pass "Root dd-reinstall 在云就绪校验失败时会阻断部署"
     else
-        record_fail "Root dd-reinstall 在系统校验失败时会阻断部署"
+        record_fail "Root dd-reinstall 在云就绪校验失败时会阻断部署"
     fi
 
     if BIFROST_TRACE_COMMON_LOAD=0 \
@@ -2845,9 +3161,9 @@ test_dd_reinstall_contracts() {
                 exit 1
             fi
         '; then
-        record_pass "Root offer_dd_reinstall 在 Light Clean 取消/失败时会透传非零"
+        record_pass "Root offer_dd_reinstall 在云集成审查取消/失败时会透传非零"
     else
-        record_fail "Root offer_dd_reinstall 在 Light Clean 取消/失败时会透传非零"
+        record_fail "Root offer_dd_reinstall 在云集成审查取消/失败时会透传非零"
     fi
 
     if BIFROST_TRACE_COMMON_LOAD=0 \
@@ -2878,6 +3194,34 @@ test_bridge_dd_reinstall_contracts() {
     mkdir -p "${workdir}"
     cp "${SCRIPT_DIR}/ai-gateway-bridge/scripts/dd-reinstall.sh" "${workdir}/dd-reinstall.sh"
     cp "${SCRIPT_DIR}/ai-gateway-bridge/scripts/common.sh" "${workdir}/common.sh"
+
+    local dangerous_pattern
+    local bridge_dd_static_ok=1
+    local dangerous_patterns=(
+        "Cloud Agent Cleanup"
+        "monitoring agents / security daemons / telemetry"
+        "Remove detected agents only"
+        "systemctl mask \"\${svc}\""
+        "pkill -9"
+        "apt-get purge -y \"\${pkg}\""
+        "dnf remove -y \"\${pkg}\""
+        "yum remove -y \"\${pkg}\""
+        "rm -rf \"\${agent_path}\""
+        "systemctl mask cloud-init cloud-config cloud-final"
+    )
+    for dangerous_pattern in "${dangerous_patterns[@]}"; do
+        if grep -Fq -- "${dangerous_pattern}" "${workdir}/dd-reinstall.sh"; then
+            bridge_dd_static_ok=0
+            break
+        fi
+    done
+    if [[ "${bridge_dd_static_ok}" -eq 1 ]] && \
+       grep -Fq "Cloud Readiness Review Options" "${workdir}/dd-reinstall.sh" && \
+       grep -Fq "Cloud integration review was not acknowledged. Deployment must stop." "${workdir}/dd-reinstall.sh"; then
+        record_pass "AI Gateway Bridge dd-reinstall uses non-destructive cloud readiness review contract"
+    else
+        record_fail "AI Gateway Bridge dd-reinstall still contains destructive provider-component modification contract"
+    fi
 
     if BIFROST_TRACE_COMMON_LOAD=0 \
         DD_REINSTALL_SH="${workdir}/dd-reinstall.sh" \
@@ -2918,12 +3262,12 @@ test_bridge_dd_reinstall_contracts() {
             if pre_deploy_check >"${output_file}" 2>&1; then
                 exit 1
             fi
-            grep -q "Cloud agent cleanup was skipped, cancelled, or failed. Deployment must stop." "${output_file}"
+            grep -q "Cloud integration review was not acknowledged. Deployment must stop." "${output_file}"
             ! grep -q "Pre-deployment check complete. Proceeding with deployment" "${output_file}"
         '; then
-        record_pass "AI Gateway Bridge dd-reinstall 在检测到 agent 但跳过清理时会阻断部署"
+        record_pass "AI Gateway Bridge dd-reinstall 在检测到云集成但未确认审查时会阻断部署"
     else
-        record_fail "AI Gateway Bridge dd-reinstall 在检测到 agent 但跳过清理时会阻断部署"
+        record_fail "AI Gateway Bridge dd-reinstall 在检测到云集成但未确认审查时会阻断部署"
     fi
 
     if BIFROST_TRACE_COMMON_LOAD=0 \
@@ -2942,12 +3286,12 @@ test_bridge_dd_reinstall_contracts() {
             if pre_deploy_check >"${output_file}" 2>&1; then
                 exit 1
             fi
-            grep -q "System verification detected unresolved issues. Deployment must stop." "${output_file}"
+            grep -q "Cloud readiness verification detected unresolved issues. Deployment must stop." "${output_file}"
             ! grep -q "Pre-deployment check complete. Proceeding with deployment" "${output_file}"
         '; then
-        record_pass "AI Gateway Bridge dd-reinstall 在系统校验失败时会阻断部署"
+        record_pass "AI Gateway Bridge dd-reinstall 在云就绪校验失败时会阻断部署"
     else
-        record_fail "AI Gateway Bridge dd-reinstall 在系统校验失败时会阻断部署"
+        record_fail "AI Gateway Bridge dd-reinstall 在云就绪校验失败时会阻断部署"
     fi
 
     if BIFROST_TRACE_COMMON_LOAD=0 \
@@ -2961,9 +3305,9 @@ test_bridge_dd_reinstall_contracts() {
                 exit 1
             fi
         '; then
-        record_pass "AI Gateway Bridge offer_dd_reinstall 在 Light Clean 取消/失败时会透传非零"
+        record_pass "AI Gateway Bridge offer_dd_reinstall 在云集成审查取消/失败时会透传非零"
     else
-        record_fail "AI Gateway Bridge offer_dd_reinstall 在 Light Clean 取消/失败时会透传非零"
+        record_fail "AI Gateway Bridge offer_dd_reinstall 在云集成审查取消/失败时会透传非零"
     fi
 
     if BIFROST_TRACE_COMMON_LOAD=0 \
@@ -3609,7 +3953,7 @@ EOF
         LYNIS_LOG_DIR="${temp_root}/lynis" \
         LYNIS_REPORT_FILE="${temp_root}/lynis/lynis-report.txt" \
         LYNIS_DATA_FILE="${temp_root}/lynis/lynis-report.dat" \
-        LYNIS_CRON_FILE="/proc/1/lynis-audit" \
+        LYNIS_CRON_FILE="/proc/1/bifrost-test/lynis-audit" \
         bash -c '
             set -euo pipefail
             output="$(mktemp)"
@@ -4097,7 +4441,7 @@ EOF
         LYNIS_LOG_DIR="${temp_root}/lynis" \
         LYNIS_REPORT_FILE="${temp_root}/lynis/lynis-report.txt" \
         LYNIS_DATA_FILE="${temp_root}/lynis/lynis-report.dat" \
-        LYNIS_CRON_FILE="/proc/1/lynis-audit" \
+        LYNIS_CRON_FILE="/proc/1/bifrost-test/lynis-audit" \
         bash -c '
             set -euo pipefail
             output="$(mktemp)"
@@ -4971,20 +5315,43 @@ test_ports() {
         record_fail "Mihomo mixed-port 不一致 (模板或 mihomo.sh 未设置 7890)"
     fi
 
-    # Server A management path parity
+    # Server A management path and exposure-profile parity
     if grep -q 'header_up X-Forwarded-Prefix /manage' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
-       grep -q 'header_up X-Forwarded-Prefix /manage' "${SCRIPT_DIR}/scripts/server-a.sh"; then
-        record_pass "Server A /manage 前缀在模板与运行脚本中一致"
+       grep -q 'header_up X-Forwarded-Prefix /manage' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -Fq 'path /api/* /static/* /logo.png /dashboard' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -Fq 'path /api/* /static/* /logo.png /dashboard' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -q '@manage_private' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -q '@manage_private' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -q 'New API static assets require VPN/private access in vpn-first profile' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -q 'New API static assets require VPN/private access in vpn-first profile' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -q 'Bifrost management requires VPN/private access in vpn-first profile' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -q 'Bifrost management requires VPN/private access in vpn-first profile' "${SCRIPT_DIR}/scripts/server-a.sh"; then
+        record_pass "Server A /manage 前缀与 vpn-first 暴露面在模板与运行脚本中一致"
     else
-        record_fail "Server A /manage 前缀在模板与运行脚本中不一致"
+        record_fail "Server A /manage 前缀与 vpn-first 暴露面在模板与运行脚本中不一致"
     fi
 
-    # Server B panel path parity
-    if grep -q 'handle /xui-panel/\*' "${SCRIPT_DIR}/configs/caddy/Caddyfile-b.tpl" && \
-       grep -q 'handle_path /xui-panel/\*' "${SCRIPT_DIR}/scripts/server-b.sh"; then
-        record_pass "Server B 3x-ui 路径在模板与运行脚本中一致"
+    # Server B panel path and exposure-profile parity
+    if grep -q '@xui_private' "${SCRIPT_DIR}/configs/caddy/Caddyfile-b.tpl" && \
+       grep -q '@xui_private' "${SCRIPT_DIR}/scripts/server-b.sh" && \
+       grep -q 'remote_ip' "${SCRIPT_DIR}/configs/caddy/Caddyfile-b.tpl" && \
+       grep -q 'remote_ip' "${SCRIPT_DIR}/scripts/server-b.sh" && \
+       grep -q '3x-ui requires VPN/private access in vpn-first profile' "${SCRIPT_DIR}/configs/caddy/Caddyfile-b.tpl" && \
+       grep -q '3x-ui requires VPN/private access in vpn-first profile' "${SCRIPT_DIR}/scripts/server-b.sh"; then
+        record_pass "Server B 3x-ui 路径与 vpn-first 暴露面在模板与运行脚本中一致"
     else
-        record_fail "Server B 3x-ui 路径在模板与运行脚本中不一致"
+        record_fail "Server B 3x-ui 路径与 vpn-first 暴露面在模板与运行脚本中不一致"
+    fi
+
+    # Health checks must follow the same exposure profile. vpn-first should not
+    # mark a 403 management surface as unhealthy.
+    if grep -q 'resolve_exposure_profile' "${SCRIPT_DIR}/scripts/health-check.sh" && \
+       grep -q 'PUBLIC_MANAGE_EXPOSURE_PROFILE' "${SCRIPT_DIR}/scripts/health-check.sh" && \
+       grep -q 'allowlisted_from_current_origin' "${SCRIPT_DIR}/scripts/health-check.sh" && \
+       grep -q 'PUBLIC_MANAGE_POLICY' "${SCRIPT_DIR}/scripts/health-check.sh"; then
+        record_pass "Health-check /manage 探测已按暴露面 profile 区分 403 保护与公网管理模式"
+    else
+        record_fail "Health-check /manage 探测未按暴露面 profile 区分 403 保护与公网管理模式"
     fi
 
     # VPN subnet 10.8.0.0/24
@@ -5829,7 +6196,7 @@ main() {
         menu)       test_menu ;;
         mihomo)     test_mihomo_contracts; test_bridge_mihomo_contracts ;;
         xray)       test_xray_contracts; test_bridge_xray_contracts ;;
-        deploy)     test_server_a_deploy_contracts; test_bridge_server_a_deploy_contracts; test_server_b_deploy_contracts; test_bridge_server_b_deploy_contracts; test_install_deploy_entrypoint_contracts; test_dd_reinstall_contracts; test_bridge_dd_reinstall_contracts ;;
+        deploy)     test_server_a_deploy_contracts; test_bridge_server_a_deploy_contracts; test_server_b_deploy_contracts; test_bridge_server_b_deploy_contracts; test_caddy_exposure_generation_contracts; test_install_deploy_entrypoint_contracts; test_dd_reinstall_contracts; test_bridge_dd_reinstall_contracts ;;
         dd)         test_dd_reinstall_contracts; test_bridge_dd_reinstall_contracts ;;
         keepalive)  test_keepalive_contracts; test_bridge_keepalive_contracts ;;
         vpn)        test_vpn_contracts; test_bridge_vpn_contracts; test_vpn_deploy_contracts; test_bridge_vpn_deploy_contracts ;;
@@ -5868,6 +6235,8 @@ main() {
             test_server_b_deploy_contracts
             echo ""
             test_bridge_server_b_deploy_contracts
+            echo ""
+            test_caddy_exposure_generation_contracts
             echo ""
             test_install_deploy_entrypoint_contracts
             echo ""

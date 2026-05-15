@@ -12,6 +12,7 @@ __pycache__/
 
 # Development tools
 .playwright-mcp/
+.serena/
 .agents/
 .trellis/
 .claude/
