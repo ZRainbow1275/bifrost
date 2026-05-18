@@ -192,7 +192,7 @@ sudo ./install.sh
 5. **Docker 安装** — 安装 Docker CE
 6. **New API 部署** — Docker Compose 部署 AI API 网关
 7. **伪装网站部署** — 正常企业网站
-8. **Caddy 部署** — 反向代理到 New API；域名模式走 Caddy 自动证书，IP 模式走 Certbot `shortlived` IP 证书
+8. **Caddy 部署** — 反向代理到 New API；域名模式走 Caddy 自动证书，Cloudflare 模式走 Origin CA 文件，IP 模式走 Certbot `shortlived` IP 证书
 9. **Netdata 监控**
 10. **连通性测试** — 自动测试隧道和 API 网关
 
@@ -227,6 +227,49 @@ sudo ./install.sh
 - IP 变化后必须重新运行 Server A Caddy/IP 证书配置，旧 IP 证书不会自动覆盖新 IP。
 
 域名模式仍是长期生产推荐路径；IP HTTPS 模式用于没有备案域名时把真实服务器测试链路先跑通。
+
+---
+
+### 2.6 Cloudflare Origin CA 一键域名模式
+
+如果域名通过 Cloudflare 代理到 Server A，推荐使用 Cloudflare Origin CA 证书，并在 Cloudflare 面板把 SSL/TLS 加密模式设置为 **Full (strict)**。这个模式会在 Caddy 启动前检查证书和私钥文件，避免部署到最后才出现 `open ... origin.pem: The system cannot find the file specified` 这类错误。
+
+```bash
+export BIFROST_SERVER_A_TLS_MODE=cloudflare-origin
+export BIFROST_SERVER_A_DOMAIN=api.example.com
+export BIFROST_CLOUDFLARE_ORIGIN_CERT=/etc/caddy/certs/api.example.com-origin.pem
+export BIFROST_CLOUDFLARE_ORIGIN_KEY=/etc/caddy/certs/api.example.com-origin.key
+export BIFROST_EXPOSURE_PROFILE=vpn-first
+export BIFROST_NEW_API_IMAGE="calciumion/new-api:<fixed-version-or-digest>"
+
+sudo ./install.sh --server-a
+```
+
+Cloudflare 侧必须同时满足：
+
+- DNS：`api.example.com` 的 `A` 记录指向 Server A 公网 IP，代理状态为 Proxied。
+- SSL/TLS：Overview 选择 `Full (strict)`；不要使用 Flexible。
+- Origin Server：生成 Origin Certificate 和 Private Key 后，分别保存到上面两个路径；文件必须非空且 Caddy 运行用户可读取。
+- Cache Rules：对 `api.example.com` 的 `/v1/*`、`/api/*`、`/dashboard*`、`/login`、`/static/*`、`/logo.png` 选择 Bypass cache。
+- WAF / Security Rules：生产推荐保留 `vpn-first`，管理路径只允许 VPN/私网/可信来源访问；如必须公网管理，显式设置 `BIFROST_EXPOSURE_PROFILE=public-managed` 并配置 Cloudflare WAF 来源限制和限速。
+
+### 2.7 New API 数据库与 compose 门禁
+
+脚本默认使用 New API 的本地数据目录和 Redis，避免无意引入 PostgreSQL volume 密码漂移。如果要使用 PostgreSQL，必须显式开启：
+
+```bash
+export BIFROST_NEW_API_DB=postgres
+export BIFROST_NEW_API_POSTGRES_PASSWORD='<strong-existing-or-new-password>'
+sudo ./install.sh --server-a
+```
+
+一键部署会执行以下门禁：
+
+- 生成并复用 `/opt/new-api/.env`，不会每次运行都重置 `SESSION_SECRET` 或数据库密码。
+- 生成 `SQL_DSN=postgres://...@postgres:5432/new-api?sslmode=disable`，避免容器内 PostgreSQL TLS 噪音。
+- 在 `docker compose up -d` 前执行 `docker compose config --quiet`。
+- 强制 New API 只绑定 `127.0.0.1:3000:3000`，公网入口只能走 Caddy。
+- 如果检测到 PostgreSQL `password authentication failed` / `SQLSTATE 28P01`，会提示恢复旧 `.env`、提供旧密码或做显式迁移/重建，而不是继续伪装成功。
 
 ---
 

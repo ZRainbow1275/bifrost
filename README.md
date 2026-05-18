@@ -112,6 +112,20 @@ chmod +x install.sh
 4. 代理隧道搭建 (Xray + Mihomo)
 5. 域名白名单与流媒体拦截
 
+Server A 也支持非交互的一键部署。Cloudflare 代理域名推荐使用 Origin CA + Full (strict)：
+
+```bash
+export BIFROST_SERVER_A_TLS_MODE=cloudflare-origin
+export BIFROST_SERVER_A_DOMAIN=api.example.com
+export BIFROST_CLOUDFLARE_ORIGIN_CERT=/etc/caddy/certs/api.example.com-origin.pem
+export BIFROST_CLOUDFLARE_ORIGIN_KEY=/etc/caddy/certs/api.example.com-origin.key
+export BIFROST_EXPOSURE_PROFILE=vpn-first
+export BIFROST_NEW_API_IMAGE="calciumion/new-api:<fixed-version-or-digest>"
+sudo ./install.sh --server-a
+```
+
+New API 部署会先执行 `docker compose config --quiet`，复用 `/opt/new-api/.env` 中的密钥/数据库密码，并强制 `3000` 只绑定 `127.0.0.1`。如需 PostgreSQL，显式设置 `BIFROST_NEW_API_DB=postgres`，避免旧 volume 与新密码漂移。
+
 ### 员工接入
 
 部署完成后，管理员为员工生成接入凭据：

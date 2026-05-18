@@ -1448,6 +1448,26 @@ test_supply_chain_contracts() {
         record_fail "Server A 生产 profile 会拒绝未显式允许的 New API latest 镜像"
     fi
 
+    if grep -q 'prepare_new_api_env' scripts/server-a.sh && \
+       grep -q 'NEW_API_ENV_FILE="${NEW_API_DIR}/.env"' scripts/server-a.sh && \
+       grep -q 'docker compose config --quiet' scripts/server-a.sh && \
+       grep -q 'sslmode=disable' scripts/server-a.sh && \
+       grep -q 'verify_new_api_port_binding' scripts/server-a.sh && \
+       grep -q 'diagnose_new_api_startup_failure' scripts/server-a.sh; then
+        record_pass "Server A New API 一键部署会持久化 env、预检 compose、限制 3000 暴露并诊断 Postgres 漂移"
+    else
+        record_fail "Server A New API 一键部署缺少 env/compose/端口/Postgres 漂移门禁"
+    fi
+
+    if grep -q 'cloudflare-origin' scripts/server-a.sh && \
+       grep -q 'collect_cloudflare_origin_tls_files' scripts/server-a.sh && \
+       grep -q 'BIFROST_CLOUDFLARE_ORIGIN_CERT' scripts/server-a.sh && \
+       grep -q 'Cloudflare DNS for' scripts/server-a.sh; then
+        record_pass "Server A Caddy 支持 Cloudflare Origin CA 显式证书文件模式"
+    else
+        record_fail "Server A Caddy 缺少 Cloudflare Origin CA 显式证书文件模式"
+    fi
+
     if grep -Eq 'Default Admin: root|Default Pass : 123456|New API Admin Pass : 123456|root/123456' scripts/server-a.sh; then
         record_fail "Server A 不应继续输出 New API 弱默认管理员口令"
     else
@@ -1537,6 +1557,26 @@ test_bridge_supply_chain_contracts() {
         record_pass "AI Gateway Bridge Server A 生产 profile 会拒绝未显式允许的 New API latest 镜像"
     else
         record_fail "AI Gateway Bridge Server A 生产 profile 会拒绝未显式允许的 New API latest 镜像"
+    fi
+
+    if grep -q 'prepare_new_api_env' ai-gateway-bridge/scripts/server-a.sh && \
+       grep -q 'NEW_API_ENV_FILE="${NEW_API_DIR}/.env"' ai-gateway-bridge/scripts/server-a.sh && \
+       grep -q 'docker compose config --quiet' ai-gateway-bridge/scripts/server-a.sh && \
+       grep -q 'sslmode=disable' ai-gateway-bridge/scripts/server-a.sh && \
+       grep -q 'verify_new_api_port_binding' ai-gateway-bridge/scripts/server-a.sh && \
+       grep -q 'diagnose_new_api_startup_failure' ai-gateway-bridge/scripts/server-a.sh; then
+        record_pass "AI Gateway Bridge Server A New API 一键部署会持久化 env、预检 compose、限制 3000 暴露并诊断 Postgres 漂移"
+    else
+        record_fail "AI Gateway Bridge Server A New API 一键部署缺少 env/compose/端口/Postgres 漂移门禁"
+    fi
+
+    if grep -q 'cloudflare-origin' ai-gateway-bridge/scripts/server-a.sh && \
+       grep -q 'collect_cloudflare_origin_tls_files' ai-gateway-bridge/scripts/server-a.sh && \
+       grep -q 'BIFROST_CLOUDFLARE_ORIGIN_CERT' ai-gateway-bridge/scripts/server-a.sh && \
+       grep -q 'Cloudflare DNS for' ai-gateway-bridge/scripts/server-a.sh; then
+        record_pass "AI Gateway Bridge Server A Caddy 支持 Cloudflare Origin CA 显式证书文件模式"
+    else
+        record_fail "AI Gateway Bridge Server A Caddy 缺少 Cloudflare Origin CA 显式证书文件模式"
     fi
 
     if grep -q '^require_docker_server_version()' ai-gateway-bridge/scripts/common.sh && \
@@ -2297,11 +2337,25 @@ EOF
             grep -q -- "--preferred-profile shortlived" "${TEMP_ROOT}/certbot.log"
             grep -q -- "--ip-address 203.0.113.10" "${TEMP_ROOT}/certbot.log"
             grep -q "cert-name 203.0.113.10" "${TEMP_ROOT}/systemd/bifrost-certbot-renew.service"
+
+            printf "fake origin cert\n" > "${TEMP_ROOT}/cloudflare-origin.pem"
+            printf "fake origin key\n" > "${TEMP_ROOT}/cloudflare-origin.key"
+            BIFROST_SERVER_A_TLS_MODE=cloudflare-origin \
+            BIFROST_SERVER_A_DOMAIN="cf.example.com" \
+            BIFROST_CLOUDFLARE_ORIGIN_CERT="${TEMP_ROOT}/cloudflare-origin.pem" \
+            BIFROST_CLOUDFLARE_ORIGIN_KEY="${TEMP_ROOT}/cloudflare-origin.key" \
+            setup_caddy_a >/dev/null
+
+            grep -q "# TLS mode: cloudflare-origin" "$CADDY_CONFIG"
+            grep -q "cf.example.com {" "$CADDY_CONFIG"
+            grep -Fq "tls ${TEMP_ROOT}/cloudflare-origin.pem ${TEMP_ROOT}/cloudflare-origin.key" "$CADDY_CONFIG"
+            grep -q "ENDPOINT_MODE=cloudflare-origin" "${TEMP_ROOT}/server-a-domain.conf"
+            grep -q "SERVER_A_BASE_URL=https://cf.example.com" "${TEMP_ROOT}/server-a-domain.conf"
             exit 0
         '; then
-        record_pass "${label} Server A Caddyfile 生成按 vpn-first/public-managed/IP HTTPS 区分管理面暴露"
+        record_pass "${label} Server A Caddyfile 生成按 vpn-first/public-managed/IP HTTPS/Cloudflare Origin 区分管理面暴露"
     else
-        record_fail "${label} Server A Caddyfile 生成按 vpn-first/public-managed/IP HTTPS 区分管理面暴露"
+        record_fail "${label} Server A Caddyfile 生成按 vpn-first/public-managed/IP HTTPS/Cloudflare Origin 区分管理面暴露"
     fi
 
     rm -rf "${temp_root}"
@@ -5387,6 +5441,8 @@ test_ports() {
        grep -q 'Bifrost management requires VPN/private access in vpn-first profile' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
        grep -q 'Bifrost management requires VPN/private access in vpn-first profile' "${SCRIPT_DIR}/scripts/server-a.sh" && \
        grep -q 'tls {{TLS_CERT_FILE}} {{TLS_KEY_FILE}}' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -q 'CLOUDFLARE_ORIGIN_CERT_FILE' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -q 'cloudflare-origin' "${SCRIPT_DIR}/scripts/server-a.sh" && \
        grep -q 'server_a_caddy_tls_block' "${SCRIPT_DIR}/scripts/server-a.sh" && \
        grep -q -- '--preferred-profile shortlived' "${SCRIPT_DIR}/scripts/server-a.sh" && \
        grep -q -- '--ip-address "$public_ip"' "${SCRIPT_DIR}/scripts/server-a.sh"; then

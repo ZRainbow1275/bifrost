@@ -123,6 +123,54 @@ docker compose up -d
 df -h /
 ```
 
+#### PostgreSQL 密码或 TLS 连接错误
+
+典型日志：
+
+```text
+failed SASL auth: FATAL: password authentication failed
+SQLSTATE 28P01
+tls error: server refused TLS connection
+```
+
+处理顺序：
+
+```bash
+cd /opt/new-api
+
+# 1. 先验证 compose，不要直接 up
+docker compose config --quiet
+
+# 2. 查看脚本生成并复用的环境文件
+grep -E 'NEW_API_DB_DRIVER|NEW_API_SQL_DSN|NEW_API_POSTGRES_USER|NEW_API_POSTGRES_DB' .env
+
+# 3. 确认 PostgreSQL 内部连接显式禁用 TLS
+grep -q 'sslmode=disable' .env && echo ok
+
+# 4. 如果 postgres-data 已存在，不要随手改 .env 里的密码
+ls -ld postgres-data
+docker compose logs --tail 120 new-api postgres
+```
+
+关键点：PostgreSQL volume 初始化后，数据库内部密码不会因为你修改 `docker-compose.yml` 或 `.env` 自动同步。正确做法是恢复原来的 `/opt/new-api/.env`，或在重新部署前设置 `BIFROST_NEW_API_POSTGRES_PASSWORD` 为旧数据库密码。只有在确认已备份并接受清空数据时，才手动停止 compose 并删除 `postgres-data/` 后重建。
+
+#### 3000 端口暴露检查
+
+New API 不应该直接暴露到公网，公网入口只能走 Caddy：
+
+```bash
+docker ps --filter 'name=^/new-api$' --format '{{.Ports}}'
+# 正确示例: 127.0.0.1:3000->3000/tcp
+# 错误示例: 0.0.0.0:3000->3000/tcp
+```
+
+如果看到 `0.0.0.0:3000` 或 `:::3000`，立即修改 `/opt/new-api/docker-compose.yml` 为：
+
+```yaml
+ports:
+  - "127.0.0.1:3000:3000"
+```
+
 ### 症状：New API 无法连接上游 AI API
 
 ```bash
@@ -177,7 +225,7 @@ caddy list-certificates
 certbot certificates
 
 # 4. 验证 Caddyfile 语法
-caddy validate --config /etc/caddy/Caddyfile
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
 # 5. 检查 80/443 端口
 ss -tlnp | grep -E ':80|:443'
@@ -199,6 +247,41 @@ certbot renew --dry-run --cert-name <SERVER_A_PUBLIC_IPV4>
 - IP HTTPS 模式未开放公网 `80/tcp`，Let's Encrypt HTTP-01 challenge 或后续续期无法到达 Server A
 - Certbot 版本低于 5.4，缺少 `--ip-address` 或 IP webroot 支持
 - Caddyfile 中 IP 模式没有显式加载 `/etc/letsencrypt/live/<IP>/fullchain.pem` 与 `privkey.pem`
+- Cloudflare Origin CA 模式下证书或私钥路径不存在、文件为空，或 Cloudflare SSL/TLS 未设置为 `Full (strict)`
+
+### 症状：Cloudflare Origin CA 模式下 Caddy 启动失败
+
+典型日志：
+
+```text
+loading certificates: open /etc/caddy/certs/api.example.com-origin.pem: no such file or directory
+```
+
+处理：
+
+```bash
+# 1. 确认证书和私钥文件存在且非空
+sudo test -s /etc/caddy/certs/api.example.com-origin.pem
+sudo test -s /etc/caddy/certs/api.example.com-origin.key
+
+# 2. 确认 Caddy 能读取
+sudo chmod 600 /etc/caddy/certs/api.example.com-origin.*
+sudo chown root:caddy /etc/caddy/certs/api.example.com-origin.* 2>/dev/null || true
+
+# 3. 用与部署脚本一致的命令验证
+sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+# 4. 重启并看日志
+sudo systemctl restart caddy
+sudo journalctl -u caddy -n 80 --no-pager
+```
+
+Cloudflare 面板同时确认：
+
+- DNS 记录为 Proxied。
+- SSL/TLS Overview 为 `Full (strict)`。
+- Origin Server 证书覆盖当前主机名，例如 `api.example.com` 或 `*.example.com`。
+- 对 API 和管理路径配置 Bypass cache，不要缓存 `/v1/*`、`/api/*`、`/dashboard*`、`/login`、`/static/*`。
 
 ### 症状：IP HTTPS 证书 6 天内过期或浏览器提示证书无效
 

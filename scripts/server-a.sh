@@ -35,6 +35,7 @@ readonly XRAY_CONFIG="${XRAY_CONFIG_DIR}/config.json"
 readonly XRAY_BIN="/usr/local/bin/xray"
 readonly XRAY_GEODATA_DIR="/usr/local/share/xray"
 readonly NEW_API_DIR="/opt/new-api"
+readonly NEW_API_ENV_FILE="${NEW_API_DIR}/.env"
 readonly CADDY_CONFIG="/etc/caddy/Caddyfile"
 readonly DECOY_WEBROOT="/var/www/html"
 readonly CADDY_LOG_DIR="/var/log/caddy"
@@ -196,11 +197,14 @@ server_a_tls_mode() {
         domain|fqdn)
             echo "domain"
             ;;
+        cloudflare-origin|cloudflare|cf-origin|origin)
+            echo "cloudflare-origin"
+            ;;
         ip|ip-cert|ip-address)
             echo "ip"
             ;;
         *)
-            log_error "Invalid BIFROST_SERVER_A_TLS_MODE='${mode}'. Use 'domain' or 'ip'."
+            log_error "Invalid BIFROST_SERVER_A_TLS_MODE='${mode}'. Use 'domain', 'cloudflare-origin', or 'ip'."
             return 1
             ;;
     esac
@@ -222,7 +226,15 @@ detect_public_ipv4() {
 }
 
 collect_server_a_domain() {
-    local domain=""
+    local domain="${BIFROST_SERVER_A_DOMAIN:-${DEPLOY_DOMAIN:-}}"
+    if [[ -n "$domain" ]]; then
+        if validate_domain_name "$domain"; then
+            echo "$domain"
+            return 0
+        fi
+        log_error "BIFROST_SERVER_A_DOMAIN/DEPLOY_DOMAIN is not a valid FQDN: ${domain}"
+        return 1
+    fi
     while true; do
         read -rp "$(echo -e "${CYAN}Enter your domain name (must be ICP-registered): ${NC}")" domain
         if validate_domain_name "$domain"; then
@@ -231,6 +243,38 @@ collect_server_a_domain() {
         fi
         log_error "Invalid domain name. Please enter a valid FQDN (e.g. api.yourcompany.com)."
     done
+}
+
+collect_cloudflare_origin_tls_files() {
+    local cert_file="${BIFROST_CLOUDFLARE_ORIGIN_CERT:-}"
+    local key_file="${BIFROST_CLOUDFLARE_ORIGIN_KEY:-}"
+
+    if [[ -z "$cert_file" || -z "$key_file" ]]; then
+        log_error "Cloudflare Origin CA mode requires both certificate file paths:"
+        log_error "  BIFROST_CLOUDFLARE_ORIGIN_CERT=/etc/caddy/certs/<domain>-origin.pem"
+        log_error "  BIFROST_CLOUDFLARE_ORIGIN_KEY=/etc/caddy/certs/<domain>-origin.key"
+        return 1
+    fi
+    if [[ ! -s "$cert_file" ]]; then
+        log_error "Cloudflare Origin certificate file is missing or empty: ${cert_file}"
+        return 1
+    fi
+    if [[ ! -r "$cert_file" ]]; then
+        log_error "Cloudflare Origin certificate file is not readable by the current user: ${cert_file}"
+        return 1
+    fi
+    if [[ ! -s "$key_file" ]]; then
+        log_error "Cloudflare Origin private key file is missing or empty: ${key_file}"
+        return 1
+    fi
+    if [[ ! -r "$key_file" ]]; then
+        log_error "Cloudflare Origin private key file is not readable by the current user: ${key_file}"
+        return 1
+    fi
+
+    CLOUDFLARE_ORIGIN_CERT_FILE="$cert_file"
+    CLOUDFLARE_ORIGIN_KEY_FILE="$key_file"
+    export CLOUDFLARE_ORIGIN_CERT_FILE CLOUDFLARE_ORIGIN_KEY_FILE
 }
 
 collect_server_a_public_ip() {
@@ -459,9 +503,18 @@ CADDYEOF
 server_a_caddy_tls_block() {
     local tls_mode="$1"
     local endpoint_host="$2"
+    local cert_file="${3:-}"
+    local key_file="${4:-}"
     if [[ "$tls_mode" == "ip" ]]; then
         cat <<TLSEOF
     tls ${LETSENCRYPT_LIVE_DIR}/${endpoint_host}/fullchain.pem ${LETSENCRYPT_LIVE_DIR}/${endpoint_host}/privkey.pem {
+        protocols tls1.2 tls1.3
+        ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+    }
+TLSEOF
+    elif [[ "$tls_mode" == "cloudflare-origin" ]]; then
+        cat <<TLSEOF
+    tls ${cert_file} ${key_file} {
         protocols tls1.2 tls1.3
         ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
     }
@@ -1106,6 +1159,150 @@ _test_xray_tunnel() {
 # Deploys New API (AI gateway) via Docker Compose. The container is configured
 # to route upstream API requests through Mihomo routing engine (host.docker.internal:7890).
 # ---------------------------------------------------------------------------
+new_api_db_driver() {
+    local mode="${BIFROST_NEW_API_DB:-${BIFROST_NEW_API_DATABASE:-sqlite}}"
+    mode="${mode,,}"
+    case "$mode" in
+        sqlite|sqlite3)
+            echo "sqlite"
+            ;;
+        postgres|postgresql|pg)
+            echo "postgres"
+            ;;
+        *)
+            log_error "Invalid BIFROST_NEW_API_DB='${mode}'. Use 'sqlite' or 'postgres'."
+            return 1
+            ;;
+    esac
+}
+
+new_api_generate_secret() {
+    local length="${1:-32}"
+    local out=""
+    local chunk=""
+    while [[ ${#out} -lt "$length" ]]; do
+        chunk="$(generate_random_password "$length" | tr -dc 'A-Za-z0-9')" || true
+        out="${out}${chunk}"
+    done
+    printf '%s\n' "${out:0:$length}"
+}
+
+new_api_env_value() {
+    local key="$1"
+    local line=""
+    [[ -f "$NEW_API_ENV_FILE" ]] || return 1
+    line="$(grep -E "^${key}=" "$NEW_API_ENV_FILE" | tail -n1 || true)"
+    [[ -n "$line" ]] || return 1
+    printf '%s\n' "${line#*=}"
+}
+
+prepare_new_api_env() {
+    local requested_db
+    requested_db="$(new_api_db_driver)" || return 1
+    local existing_db=""
+    existing_db="$(new_api_env_value NEW_API_DB_DRIVER || true)"
+    local db_explicit=0
+    if [[ -n "${BIFROST_NEW_API_DB:-}" || -n "${BIFROST_NEW_API_DATABASE:-}" ]]; then
+        db_explicit=1
+    fi
+
+    if [[ -n "$existing_db" && "$db_explicit" -eq 0 ]]; then
+        requested_db="$existing_db"
+    elif [[ -n "$existing_db" && "$existing_db" != "$requested_db" ]]; then
+        log_error "Existing New API database mode is '${existing_db}', but requested '${requested_db}'."
+        log_error "Automatic database migration is not supported. Back up ${NEW_API_DIR}/data and migrate explicitly."
+        return 1
+    fi
+
+    if [[ "$requested_db" == "postgres" && -d "${NEW_API_DIR}/postgres-data" && ! -f "$NEW_API_ENV_FILE" && -z "${BIFROST_NEW_API_POSTGRES_PASSWORD:-}" ]]; then
+        log_error "Found existing PostgreSQL data at ${NEW_API_DIR}/postgres-data but ${NEW_API_ENV_FILE} is missing."
+        log_error "Refusing to generate a new password that would not match the existing PostgreSQL volume."
+        log_error "Restore the original .env, set BIFROST_NEW_API_POSTGRES_PASSWORD to the existing password, or migrate/reset the database manually."
+        return 1
+    fi
+
+    local session_secret
+    session_secret="${BIFROST_NEW_API_SESSION_SECRET:-$(new_api_env_value NEW_API_SESSION_SECRET || true)}"
+    session_secret="${session_secret:-$(new_api_generate_secret 48)}"
+
+    local postgres_db postgres_user postgres_password stored_postgres_password
+    postgres_db="${BIFROST_NEW_API_POSTGRES_DB:-$(new_api_env_value NEW_API_POSTGRES_DB || true)}"
+    postgres_user="${BIFROST_NEW_API_POSTGRES_USER:-$(new_api_env_value NEW_API_POSTGRES_USER || true)}"
+    stored_postgres_password="$(new_api_env_value NEW_API_POSTGRES_PASSWORD || true)"
+    postgres_password="${BIFROST_NEW_API_POSTGRES_PASSWORD:-${stored_postgres_password}}"
+    postgres_db="${postgres_db:-new-api}"
+    postgres_user="${postgres_user:-newapi}"
+    postgres_password="${postgres_password:-$(new_api_generate_secret 40)}"
+
+    if [[ -n "${BIFROST_NEW_API_POSTGRES_PASSWORD:-}" && -n "$stored_postgres_password" && "$BIFROST_NEW_API_POSTGRES_PASSWORD" != "$stored_postgres_password" && -d "${NEW_API_DIR}/postgres-data" ]]; then
+        log_error "BIFROST_NEW_API_POSTGRES_PASSWORD differs from the stored password while PostgreSQL data exists."
+        log_error "Changing the compose environment does not change the password inside an existing PostgreSQL volume."
+        return 1
+    fi
+
+    local sql_dsn=""
+    if [[ "$requested_db" == "postgres" ]]; then
+        sql_dsn="${BIFROST_NEW_API_SQL_DSN:-postgres://${postgres_user}:${postgres_password}@postgres:5432/${postgres_db}?sslmode=disable}"
+    fi
+
+    local old_umask
+    old_umask="$(umask)"
+    umask 077
+    cat > "$NEW_API_ENV_FILE" <<ENVEOF
+NEW_API_DB_DRIVER=${requested_db}
+NEW_API_SESSION_SECRET=${session_secret}
+NEW_API_SQL_DSN=${sql_dsn}
+NEW_API_POSTGRES_DB=${postgres_db}
+NEW_API_POSTGRES_USER=${postgres_user}
+NEW_API_POSTGRES_PASSWORD=${postgres_password}
+ENVEOF
+    umask "$old_umask"
+    chmod 600 "$NEW_API_ENV_FILE"
+
+    NEW_API_DB_DRIVER="$requested_db"
+    export NEW_API_DB_DRIVER
+}
+
+diagnose_new_api_startup_failure() {
+    local logs=""
+    logs="$(docker compose logs --tail 120 2>/dev/null || docker logs new-api --tail 120 2>/dev/null || true)"
+    if [[ -z "$logs" ]]; then
+        return 0
+    fi
+
+    if printf '%s\n' "$logs" | grep -Eiq 'password authentication failed|failed SASL auth|SQLSTATE 28P01'; then
+        log_error "Detected PostgreSQL authentication failure in New API logs."
+        log_error "If PostgreSQL data already existed, changing docker-compose.yml or .env does not change the password stored inside the existing database volume."
+        log_error "Restore the original ${NEW_API_ENV_FILE}, provide the existing password, or perform an explicit backup/migration/reset."
+    fi
+    if printf '%s\n' "$logs" | grep -Eiq 'server refused TLS connection|sslmode'; then
+        log_error "Detected PostgreSQL TLS/sslmode noise in New API logs."
+        log_error "Bifrost-generated PostgreSQL SQL_DSN uses sslmode=disable for the internal Docker network."
+    fi
+
+    log_info "Recent New API compose logs:"
+    printf '%s\n' "$logs" | tail -80
+}
+
+verify_new_api_port_binding() {
+    local ports=""
+    ports="$(docker ps --filter 'name=^/new-api$' --format '{{.Ports}}' 2>/dev/null || true)"
+    if [[ -z "$ports" ]]; then
+        log_error "Unable to verify New API port binding; container 'new-api' is not visible."
+        return 1
+    fi
+    if printf '%s\n' "$ports" | grep -Eq '0\.0\.0\.0:3000->3000|:::3000->3000'; then
+        log_error "New API port 3000 is exposed publicly: ${ports}"
+        log_error "Bifrost requires New API to bind only to 127.0.0.1; public access must go through Caddy."
+        return 1
+    fi
+    if ! printf '%s\n' "$ports" | grep -Eq '127\.0\.0\.1:3000->3000'; then
+        log_error "New API port binding is not the expected loopback mapping: ${ports}"
+        return 1
+    fi
+    log_success "New API port binding is loopback-only (${ports})."
+}
+
 install_new_api() {
     log_info "============================================"
     log_info "  Installing New API (AI Gateway)"
@@ -1131,9 +1328,6 @@ install_new_api() {
         return 1
     fi
 
-    # --- Generate secrets ---
-    local session_secret
-    session_secret=$(generate_random_password 32)
     local exposure_profile
     if ! exposure_profile="$(bifrost_exposure_profile)"; then
         return 1
@@ -1148,6 +1342,14 @@ install_new_api() {
     # --- Create directory structure ---
     mkdir -p "${NEW_API_DIR}/data"
     mkdir -p "${NEW_API_DIR}/redis-data"
+
+    # --- Persist New API runtime secrets and database mode ---
+    if ! prepare_new_api_env; then
+        return 1
+    fi
+    if [[ "$NEW_API_DB_DRIVER" == "postgres" ]]; then
+        mkdir -p "${NEW_API_DIR}/postgres-data"
+    fi
 
     # --- Check for port conflicts ---
     if ss -tlnp 2>/dev/null | grep -q ':3000 '; then
@@ -1203,6 +1405,42 @@ install_new_api() {
     # Because New API runs in a Docker container, it cannot reach 127.0.0.1 of the
     # host directly. We use extra_hosts + host.docker.internal to bridge this gap.
     log_info "Creating Docker Compose configuration (proxy: ${proxy_name} on port ${proxy_port})..."
+    local new_api_depends_on
+    local postgres_service_block=""
+    if [[ "$NEW_API_DB_DRIVER" == "postgres" ]]; then
+        new_api_depends_on='
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy'
+        postgres_service_block='
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: new-api-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: ${NEW_API_POSTGRES_DB}
+      POSTGRES_USER: ${NEW_API_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${NEW_API_POSTGRES_PASSWORD}
+    volumes:
+      - ./postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"'
+    else
+        new_api_depends_on='
+      - redis'
+    fi
     cat > "${NEW_API_DIR}/docker-compose.yml" <<COMPOSEEOF
 # Docker Compose configuration for New API
 # version field is omitted (obsolete in Compose V2+)
@@ -1219,19 +1457,18 @@ services:
       - ./data:/data
     environment:
       - TZ=Asia/Shanghai
-      - SQL_DSN=
+      - SQL_DSN=\${NEW_API_SQL_DSN}
       - REDIS_CONN_STRING=redis://redis:6379
-      - SESSION_SECRET=${session_secret}
+      - SESSION_SECRET=\${NEW_API_SESSION_SECRET}
       - CHANNEL_UPDATE_FREQUENCY=60
       - POLLING_INTERVAL=60
       # Route upstream AI API calls through ${proxy_name} (port ${proxy_port})
       - HTTP_PROXY=http://host.docker.internal:${proxy_port}
       - HTTPS_PROXY=http://host.docker.internal:${proxy_port}
-      - NO_PROXY=localhost,127.0.0.1,::1,redis,host.docker.internal
+      - NO_PROXY=localhost,127.0.0.1,::1,redis,postgres,host.docker.internal
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    depends_on:
-      - redis
+    depends_on:${new_api_depends_on}
     # Security hardening
     security_opt:
       - no-new-privileges:true
@@ -1261,13 +1498,21 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+${postgres_service_block}
 COMPOSEEOF
 
     chmod 600 "${NEW_API_DIR}/docker-compose.yml"
 
+    log_info "Validating Docker Compose configuration..."
+    cd "$NEW_API_DIR"
+    if ! docker compose config --quiet; then
+        log_error "Docker Compose configuration validation failed. Fix ${NEW_API_DIR}/docker-compose.yml and ${NEW_API_ENV_FILE} before starting."
+        return 1
+    fi
+    log_success "Docker Compose configuration validated."
+
     # --- Pull images and start ---
     log_info "Pulling Docker images (this may take a while)..."
-    cd "$NEW_API_DIR"
     if ! docker compose pull; then
         log_error "Failed to pull Docker images. Check network connectivity."
         return 1
@@ -1276,9 +1521,10 @@ COMPOSEEOF
     log_info "Starting New API services..."
     if ! docker compose up -d; then
         log_error "Failed to start New API services."
-        docker compose logs --tail 30
+        diagnose_new_api_startup_failure
         return 1
     fi
+    verify_new_api_port_binding || return 1
 
     # --- Wait for service to be healthy ---
     log_info "Waiting for New API to become ready..."
@@ -1298,8 +1544,9 @@ COMPOSEEOF
     if [[ "$api_ready" == "true" ]]; then
         log_success "New API is running and healthy."
     else
-        log_warn "New API did not respond within ${max_wait}s. It may still be initializing."
-        log_info "Check status: docker logs new-api"
+        log_error "New API did not respond within ${max_wait}s."
+        diagnose_new_api_startup_failure
+        return 1
     fi
 
     # --- Print access information ---
@@ -1308,6 +1555,7 @@ COMPOSEEOF
     log_info "--------------------------------------------"
     log_info "  Local URL    : http://127.0.0.1:3000"
     log_info "  Dashboard    : http://127.0.0.1:3000/dashboard"
+    log_info "  Database     : ${NEW_API_DB_DRIVER}"
     log_info "  First Visit  : Open the dashboard and complete the initial admin setup"
     log_warn "  IMPORTANT: Complete the New API initialization page immediately and set a strong admin password."
     log_info "--------------------------------------------"
@@ -1357,6 +1605,8 @@ setup_caddy_a() {
     local public_ip=""
     local endpoint_host=""
     local site_address=""
+    local cloudflare_origin_cert_file=""
+    local cloudflare_origin_key_file=""
 
     if [[ "$tls_mode" == "ip" ]]; then
         log_warn "Server A TLS mode: IP certificate. This is intended for no-ICP-domain bootstrap on Tencent/domestic hosts."
@@ -1367,8 +1617,18 @@ setup_caddy_a() {
         endpoint_host="$public_ip"
         site_address="https://${public_ip}"
         bootstrap_ip_certificate "$public_ip" || return 1
+    elif [[ "$tls_mode" == "cloudflare-origin" ]]; then
+        domain="$(collect_server_a_domain)" || return 1
+        endpoint_host="$domain"
+        site_address="$domain"
+        collect_cloudflare_origin_tls_files || return 1
+        cloudflare_origin_cert_file="$CLOUDFLARE_ORIGIN_CERT_FILE"
+        cloudflare_origin_key_file="$CLOUDFLARE_ORIGIN_KEY_FILE"
+        log_info "Domain: ${domain}"
+        log_info "TLS mode: Cloudflare Origin CA certificate files"
+        log_warn "Cloudflare DNS for ${domain} must be proxied and SSL/TLS mode must be Full (strict)."
     else
-        domain="$(collect_server_a_domain)"
+        domain="$(collect_server_a_domain)" || return 1
         endpoint_host="$domain"
         site_address="$domain"
         log_info "Domain: ${domain}"
@@ -1595,7 +1855,7 @@ PROFILE_BLOCK
 fi)
 
     # ===== TLS Configuration =====
-$(server_a_caddy_tls_block "${tls_mode}" "${endpoint_host}")
+$(server_a_caddy_tls_block "${tls_mode}" "${endpoint_host}" "${cloudflare_origin_cert_file}" "${cloudflare_origin_key_file}")
 
     # ===== Security Headers =====
     header {
@@ -1653,6 +1913,8 @@ CADDYEOF
         echo "SERVER_A_ENDPOINT_HOST=${endpoint_host}"
         echo "SERVER_A_BASE_URL=https://${endpoint_host}"
         echo "BIFROST_EXPOSURE_PROFILE=${exposure_profile}"
+        echo "BIFROST_CLOUDFLARE_ORIGIN_CERT=${cloudflare_origin_cert_file}"
+        echo "BIFROST_CLOUDFLARE_ORIGIN_KEY=${cloudflare_origin_key_file}"
     } > /root/server-a-domain.conf
     chmod 600 /root/server-a-domain.conf
     export DEPLOY_DOMAIN="$endpoint_host"

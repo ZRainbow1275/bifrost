@@ -4,8 +4,8 @@
 # This Caddyfile configures Caddy as a reverse proxy on the domestic server:
 #   1. Reverse proxy to New API gateway (Docker container)
 #   2. Serve a decoy/camouflage website for non-API traffic
-#   3. Automatic TLS certificate management for domains, or explicit
-#      Certbot-managed certificate files for IP HTTPS mode
+#   3. Automatic TLS certificate management for domains, explicit Cloudflare
+#      Origin CA files, or Certbot-managed certificate files for IP HTTPS mode
 #   4. Security headers and access logging
 #
 # Contract note:
@@ -20,6 +20,8 @@
 #   {{ACME_WEBROOT}}         - Webroot for Let's Encrypt HTTP-01 renewal in IP mode
 #   {{TLS_CERT_FILE}}        - IP certificate fullchain path in IP mode
 #   {{TLS_KEY_FILE}}         - IP certificate private key path in IP mode
+#   {{CLOUDFLARE_ORIGIN_CERT_FILE}} - Cloudflare Origin CA certificate path
+#   {{CLOUDFLARE_ORIGIN_KEY_FILE}}  - Cloudflare Origin CA private key path
 #
 # Place the rendered file at: /etc/caddy/Caddyfile
 # =============================================================================
@@ -58,6 +60,11 @@
 	}
 	# IP HTTPS mode uses Certbot 5.4+ and Let's Encrypt short-lived IP certs:
 	# tls {{TLS_CERT_FILE}} {{TLS_KEY_FILE}} {
+	# 	protocols tls1.2 tls1.3
+	# 	ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+	# }
+	# Cloudflare Origin CA mode requires Cloudflare DNS proxy + Full (strict):
+	# tls {{CLOUDFLARE_ORIGIN_CERT_FILE}} {{CLOUDFLARE_ORIGIN_KEY_FILE}} {
 	# 	protocols tls1.2 tls1.3
 	# 	ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
 	# }
