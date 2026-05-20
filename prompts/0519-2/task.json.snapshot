@@ -1,0 +1,145 @@
+{
+  "id": "server-b-claude-artifacts-marketplace-visual-panel",
+  "name": "server-b-claude-artifacts-marketplace-visual-panel",
+  "title": "Server B 内部 Claude artifacts marketplace + visual panel",
+  "description": "",
+  "status": "in_progress_mvp_delivered",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "ZRainbow",
+  "assignee": "ZRainbow",
+  "createdAt": "2026-05-19",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "[2026-05-19 v1] P9 tech-lead synthesis 完成 prd.md（622 行，含 ADR-1..ADR-4 全锁定）\n[2026-05-19 v2] P9 出 spec.md design-frozen v1（1156 行）\n[2026-05-19 v3] P9 出 spec.md design-frozen v2（1447 行，闭合 spec-review.md 全部 31 findings：6C + 19M + 6N）\n\nspec v2 关键修复（vs v1）：\n- C1 marketplace.json 位置：从 dist sidecar /var/lib/dist/plugins/marketplace.json → git tree .claude-plugin/marketplace.json（客户端 clone repo 读 tree 内文件）\n- C2 protocol schema：source 字段作为 discriminator（非 type），monorepo 用 string 相对路径；owner 改为 {name,email} 对象\n- C3 URL：移除 git+ 前缀，使用 bare https://files.uuhfn.cloud/git/.../.git\n- C4 auth：从 Authorization: Bearer 改为 X-Admin-Key 头（与 bifrost-api/app/dependencies.py:40 实测一致）\n- C5 AC-12 可测化：所有 AC 给出 curl/git/bash 一行命令\n- C6 self-mirror 死锁：bifrost-internal-plugins 不进 git-mirror-sync 矩阵（scripts/git-mirror-sync.sh:10-18 unchanged）\n- M1 mirror 节奏：以 git-mirror@.timer 02:00/RandomizedDelaySec=120 为准（不是 30 分钟）\n- M3 升 MVP blocker：panel.uuhfn.cloud 强制 @panel_private remote_ip {{ADMIN_ALLOWED_RANGES}} vpn-first 复用 Caddyfile-a.tpl:145-181 模式\n- M11 PR-5 拆分：PR-5a (FastAPI 后端 ~580 LOC) + PR-5b (Vue3 SPA ~590 LOC)\n\n关键决策实证（ADR-4 vs WebFetch 实测）：\n- anthropic/claude-code LICENSE.md = proprietary 'All rights reserved'\n- Anthropic Commercial ToS D.4 / F 无 redistribution 授权\n- Q3 'A (仅内部)' / PR-1b deferred / BLOCKED-on-LICENSE\n- marketplace.json.metadata.upstream_url=null / license_id='ALL-RIGHTS-RESERVED'\n\n所有 file:line 锚点基于本地 HEAD 实测：\n- bifrost-api/app/dependencies.py:40-54 (X-Admin-Key)\n- configs/caddy/Caddyfile-a.tpl:145-181 (@*_private vpn-first 模式)\n- configs/systemd/git-mirror@.timer (OnCalendar=*-*-* 02:00:00)\n- scripts/git-mirror-sync.sh:10-18 (matrix unchanged)",
+  "meta": {
+    "phase": "mvp-delivered-2026-05-20",
+    "prd_path": "prd.md",
+    "spec_path": "spec.md",
+    "spec_version": "v2",
+    "spec_lines": 1447,
+    "spec_v1_lines": 1156,
+    "prd_lines": 622,
+    "review_findings_closed": {
+      "critical": "6/6 (100%)",
+      "major": "19/19 (100%)",
+      "minor": "6/6 (100%)",
+      "total": "31/31 (100%)"
+    },
+    "decisions_locked": {
+      "Q1_marketplace_name": "bifrost-internal",
+      "Q2_repo_structure": "monorepo + source-relative-path",
+      "Q3_upstream_mirror": "DENY (degraded from B via ADR-4 LICENSE check)",
+      "Q4_panel": "Vue 3 + Vite SPA + /plugin TUI (dual-panel)",
+      "Q5_auth": "LAN-only public read + X-Admin-Key write",
+      "Q6_versioning": "semver git tag enforced",
+      "Q7_onboarding": "seed dir + settings template (both)"
+    },
+    "adr": {
+      "ADR-1": "monorepo source-relative-path [LOCKED]",
+      "ADR-2": "Vue3 SPA + /plugin TUI dual panel [LOCKED]",
+      "ADR-3": "LAN-only read + X-Admin-Key write [LOCKED; corrected from Bearer in v1]",
+      "ADR-4": "DENY upstream mirror, marketplace internal-only [LOCKED via WebFetch实证]"
+    },
+    "pr_count": 8,
+    "pr_split": [
+      "PR-1",
+      "PR-1b (deferred-on-LICENSE)",
+      "PR-2",
+      "PR-3",
+      "PR-4",
+      "PR-5a",
+      "PR-5b",
+      "PR-6",
+      "PR-7"
+    ],
+    "pr_progress": {
+      "PR-1": "DONE 2026-05-20 commit:2cb8d57 (~1854 LOC marketplace seed + render-marketplace-json.sh + validate + test-render E2E)",
+      "PR-1b": "DEFERRED on ADR-4 LICENSE (BLOCKED on Anthropic OSS license)",
+      "PR-2": "DONE 2026-05-20 commit:9c6dbfe (~636 LOC systemd marketplace-render.path/service + upstream-schema-check timer/service + check-upstream-schema.sh + shared changes in 0519-1 base 77be63d)",
+      "PR-3": "DEFERRED on external 05-19-server-a-hardening-v2#PR-3 merged-to-main (panel.uuhfn.cloud Caddy + @panel_private vpn-first allowlist)",
+      "PR-4": "DONE 2026-05-20 commit:7e63352 (~755 LOC bifrost-api /marketplace/* 4 read endpoints + 34 pytest)",
+      "PR-5a": "DONE 2026-05-20 commit:cd9be42 (~1341 LOC marketplace_admin.py 4 POST + bifrost-admin-router.sh forced-command + _distribution_configure_admin_ssh + 32 pytest)",
+      "PR-5b": "NOT STARTED (Vue 3 SPA + CI panel-build + scripts/server-a.sh --deploy-panel; backend可独立写, SPA联调依赖 PR-3 panel.uuhfn.cloud)",
+      "PR-6": "DONE 2026-05-20 commit:2c66ba9 (~475 LOC team .claude/settings.json.template + CLAUDE.md.template + build-marketplace-seed.sh + seed README)",
+      "PR-7": "DONE 2026-05-20 commit:c0d3f52 (~574 LOC docs/USAGE.md + docs/SECURITY.md + e2e-distribution-rehearsal.sh marketplace section + check-upstream-schema.sh Windows Git Bash compat)"
+    },
+    "pr_deferred": [
+      "PR-1b (BLOCKED-on-LICENSE; ADR-4 LOCKED)",
+      "PR-3 (BLOCKED-on-external server-a-hardening-v2#PR-3)",
+      "PR-5b (NOT STARTED; backend可独立, SPA联调 gated on PR-3)"
+    ],
+    "deploy_fixups_chore_commits": [
+      "52b6ad6 chore: include claude-for-legal Caddyfile (missed in 77be63d)",
+      "5beb2b8 chore: Windows VPS marketplace deploy fixups (Caddyfile /git/* + setup-marketplace-vps.ps1 ErrorActionPreference)",
+      "5a19a9a chore: Windows VPS DEPLOY.md fixups (HEAD branch + PS 5.1 compat)"
+    ],
+    "ac_count": 14,
+    "ac_status": {
+      "AC-1": "PASS (e2e nftables drop contract; live nmap diff deferred to --execute)",
+      "AC-2": "DEFERRED on PR-3 (git ls-remote files.uuhfn.cloud/git/bifrost-internal-plugins.git)",
+      "AC-3": "DEFERRED on PR-3",
+      "AC-4": "PASS (jq settings.json.template extraKnownMarketplaces source.url)",
+      "AC-5": "DEFERRED on PR-3 + PR-5b (claude headless plugin install)",
+      "AC-6": "DEFERRED on PR-5b (version rollback)",
+      "AC-7": "PASS via test-in-docker.sh distribution (server-b.sh idempotence step 07)",
+      "AC-8": "PASS via pytest test_marketplace_router.py (401/403/200)",
+      "AC-9": "PASS via pytest (SPA list API mock)",
+      "AC-10": "PASS mock via pytest test_marketplace_admin_router.py (live deferred on PR-3)",
+      "AC-11": "PASS (LICENSE + NOTICE in PR-1 seed, ALL-RIGHTS-RESERVED)",
+      "AC-12": "PASS (check-upstream-schema.sh real run, regex matched)",
+      "AC-13": "DEFERRED on PR-3 (dig panel.uuhfn.cloud + allowlist gating)",
+      "AC-14": "PASS (docs/USAGE.md + docs/SECURITY.md grep markers)"
+    },
+    "ac_scriptable_pass": 8,
+    "ac_deferred": 6,
+    "test_baseline": {
+      "pytest": "66 PASS (PR-4 34 + PR-5a 32)",
+      "test-in-docker distribution": "51 PASS (0519-1 base 26 + marketplace PR-2 25)",
+      "test-in-docker marketplace_skeleton": "21 PASS (PR-1 render E2E)",
+      "test-in-docker syntax": "61 PASS (含 bifrost-admin-router.sh + build-marketplace-seed.sh)"
+    },
+    "risk_count": 14,
+    "risk_closed_by_v2": [
+      "M3",
+      "C6"
+    ],
+    "dependencies": [
+      "05-19-server-b-private-distribution",
+      "05-19-server-a-hardening-v2#PR-3"
+    ],
+    "technical_debt": [
+      "TD-1: marketplace.py + marketplace_admin.py SSH wrapper duplication (~80 LOC, abstract to app/utils/ssh_runner.py in cleanup PR)",
+      "TD-2: bifrost-admin-router.sh audit_log JSON escape only handles `\"` (backslash/newline left for jq port in hardening PR)",
+      "TD-3: bifrost-admin-router.sh upload verb uses default tar extract; `--no-relative-names` + `..` rejection deferred",
+      "TD-4: bifrost-readonly-router.sh logs:admin-audit verb not yet exposed (PR-5a follow-up needed; marketplace.py /marketplace/logs?service=admin-audit returns 422 placeholder)",
+      "TD-5: AC-7 docker fallback to static grep cannot verify quantitative '<1s second run'; needs production --execute"
+    ],
+    "next_pr_unlocks": {
+      "PR-3_merge_unlocks": ["AC-2", "AC-3", "AC-13", "PR-5b SPA E2E"],
+      "PR-5b_completion_unlocks": ["AC-5", "AC-6", "AC-10 live"]
+    },
+    "commit_chain": [
+      "77be63d 0519-1 base + shared marketplace hooks",
+      "2cb8d57 PR-1 marketplace seed + render-marketplace-json.sh",
+      "9c6dbfe PR-2 marketplace-render systemd + upstream-schema-check",
+      "7e63352 PR-4 bifrost-api /marketplace/* read routes",
+      "52b6ad6 chore claude-for-legal Caddyfile",
+      "cd9be42 PR-5a admin write routes + bifrost-admin-router",
+      "5beb2b8 chore Windows VPS marketplace deploy fixups",
+      "2c66ba9 PR-6 team settings template + onboarding seed",
+      "5a19a9a chore Windows VPS DEPLOY.md fixups",
+      "c0d3f52 PR-7 docs + E2E + AC-12 verification"
+    ]
+  }
+}
