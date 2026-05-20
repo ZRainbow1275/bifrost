@@ -1,0 +1,156 @@
+# Caddyfile for NewAPI behind Cloudflare.
+#
+# Primary mode:
+#   Cloudflare DNS record: api.uuhfn.cloud -> VPS IP, Proxied (orange cloud)
+#   Cloudflare SSL/TLS mode: Full (strict)
+#   Caddy TLS certificate: Cloudflare Origin CA certificate
+#
+# Required files on the VPS:
+#   C:/caddy/certs/uuhfn-cloud-origin.pem
+#   C:/caddy/certs/uuhfn-cloud-origin-key.pem
+#
+# NewAPI upstream:
+#   http://127.0.0.1:3000
+{
+	# Admin API bound to loopback only — enables `caddy reload` without exposing API externally.
+	admin localhost:2019
+	email admin@uuhfn.cloud
+}
+
+api.uuhfn.cloud {
+	tls C:/caddy/certs/uuhfn-cloud-origin.pem C:/caddy/certs/uuhfn-cloud-origin-key.pem
+
+	encode zstd gzip
+
+	request_body {
+		max_size 16MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+		-Server
+	}
+
+	@dynamic_api path /api/* /v1/* /relay/* /dashboard* /token* /user* /admin* /login* /register*
+	header @dynamic_api Cache-Control "no-store"
+
+	# These Cloudflare headers preserve the real client IP for NewAPI logs/rate limits.
+	# Keep direct origin access blocked; otherwise a direct attacker can spoof CF-Connecting-IP.
+	reverse_proxy 127.0.0.1:3000 {
+		flush_interval -1
+		header_up Host {host}
+		header_up X-Real-IP {http.request.header.CF-Connecting-IP}
+		header_up X-Forwarded-For {http.request.header.CF-Connecting-IP}
+		transport http {
+			dial_timeout 5s
+			response_header_timeout 300s
+			read_timeout 300s
+			write_timeout 300s
+		}
+	}
+
+	log {
+		output file C:/caddy/logs/newapi-access.log {
+			roll_size 50MiB
+			roll_keep 10
+			roll_keep_for 720h
+		}
+		format json
+	}
+}
+
+# ============================================================================
+# Verdaccio private npm mirror — proxy + cache upstream registry.npmjs.org
+# Team usage:
+#   npm config set registry https://npm.uuhfn.cloud/
+# Upstream:
+#   http://127.0.0.1:4873
+# ============================================================================
+npm.uuhfn.cloud {
+	tls C:/caddy/certs/uuhfn-cloud-origin.pem C:/caddy/certs/uuhfn-cloud-origin-key.pem
+
+	encode zstd gzip
+
+	# npm publish/tarball uploads can be large; keep generous.
+	request_body {
+		max_size 200MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	reverse_proxy 127.0.0.1:4873 {
+		header_up Host {host}
+		header_up X-Real-IP {http.request.header.CF-Connecting-IP}
+		header_up X-Forwarded-For {http.request.header.CF-Connecting-IP}
+		header_up X-Forwarded-Proto https
+		transport http {
+			dial_timeout 5s
+			response_header_timeout 120s
+			read_timeout 600s
+			write_timeout 600s
+		}
+	}
+
+	log {
+		output file C:/caddy/logs/verdaccio-access.log {
+			roll_size 50MiB
+			roll_keep 10
+			roll_keep_for 720h
+		}
+		format json
+	}
+}
+
+# ============================================================================
+# Static distribution — cc-switch .msi, Node.js MSI, setup.bat, etc.
+# Layout:
+#   C:/caddy/dist/
+#     ├─ CC-Switch-vX.Y.Z-Windows.msi
+#     ├─ CC-Switch-vX.Y.Z-Windows-Portable.zip
+#     ├─ node-vXX.X.X-x64.msi
+#     └─ setup.bat
+# ============================================================================
+files.uuhfn.cloud {
+	tls C:/caddy/certs/uuhfn-cloud-origin.pem C:/caddy/certs/uuhfn-cloud-origin-key.pem
+
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+		-Server
+	}
+
+	# Block dotfiles (e.g. .git, .htaccess) from being served.
+	@hidden path_regexp hidden (^|/)\.
+
+	respond @hidden 404
+
+	root * C:/caddy/dist
+	file_server {
+		browse
+		hide .* _*
+	}
+
+	log {
+		output file C:/caddy/logs/files-access.log {
+			roll_size 50MiB
+			roll_keep 10
+			roll_keep_for 720h
+		}
+		format json
+	}
+}
