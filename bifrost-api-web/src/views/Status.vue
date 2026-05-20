@@ -10,8 +10,14 @@ const status = ref<MarketplaceStatusData | null>(null);
 const disk = ref<MarketplaceDiskData | null>(null);
 const logs = ref("");
 const logService = ref<"render" | "schema-check" | "admin-audit">("render");
-const loading = ref(false);
-const error = ref("");
+const statusLoading = ref(false);
+const diskLoading = ref(false);
+const logsLoading = ref(false);
+const statusError = ref("");
+const diskError = ref("");
+const logsError = ref("");
+
+const loading = computed(() => statusLoading.value || diskLoading.value || logsLoading.value);
 
 const totalDisk = computed(() => {
   if (!disk.value) {
@@ -24,24 +30,95 @@ const totalDisk = computed(() => {
   );
 });
 
-async function load(): Promise<void> {
-  loading.value = true;
-  error.value = "";
+const probeLabel = computed(() => {
+  if (!status.value) {
+    return "未知";
+  }
+  return status.value.up ? "UP" : "DOWN";
+});
+
+const pluginCountLabel = computed(() => {
+  if (!status.value) {
+    return "未记录";
+  }
+  return String(status.value.plugin_count);
+});
+
+const diskLabel = computed(() => {
+  if (!disk.value) {
+    return "未记录";
+  }
+  return formatMegabytes(totalDisk.value);
+});
+
+const upstreamLabel = computed(() => {
+  if (!status.value) {
+    return "未知";
+  }
+  return status.value.upstream_alert ? "ALERT" : "OK";
+});
+
+const stateErrorLabel = computed(() => {
+  if (!status.value) {
+    return "状态未加载";
+  }
+  return status.value.state_error ?? "无";
+});
+
+const logFallback = computed(() => {
+  if (logsLoading.value) {
+    return "Loading logs...";
+  }
+  if (logsError.value) {
+    return "日志不可用。";
+  }
+  return "No logs returned.";
+});
+
+async function loadStatus(): Promise<void> {
+  statusLoading.value = true;
+  statusError.value = "";
   try {
-    const [nextStatus, nextDisk] = await Promise.all([marketplaceApi.status(), marketplaceApi.disk()]);
-    status.value = nextStatus;
-    disk.value = nextDisk;
+    status.value = await marketplaceApi.status();
+  } catch (err) {
+    statusError.value = err instanceof Error ? err.message : "状态加载失败";
+  } finally {
+    statusLoading.value = false;
+  }
+}
+
+async function loadDisk(): Promise<void> {
+  diskLoading.value = true;
+  diskError.value = "";
+  try {
+    disk.value = await marketplaceApi.disk();
+  } catch (err) {
+    diskError.value = err instanceof Error ? err.message : "磁盘加载失败";
+  } finally {
+    diskLoading.value = false;
+  }
+}
+
+async function loadLogs(): Promise<void> {
+  logsLoading.value = true;
+  logsError.value = "";
+  try {
     logs.value = await marketplaceApi.logs(logService.value, 200);
   } catch (err) {
-    error.value = err instanceof Error ? err.message : "加载失败";
+    logs.value = "";
+    logsError.value = err instanceof Error ? err.message : "日志加载失败";
   } finally {
-    loading.value = false;
+    logsLoading.value = false;
   }
+}
+
+async function load(): Promise<void> {
+  await Promise.all([loadStatus(), loadDisk(), loadLogs()]);
 }
 
 function selectLogService(service: "render" | "schema-check" | "admin-audit"): void {
   logService.value = service;
-  void load();
+  void loadLogs();
 }
 
 onMounted(() => {
@@ -62,24 +139,28 @@ onMounted(() => {
       </button>
     </div>
 
-    <p v-if="error" class="error-text">{{ error }}</p>
+    <div v-if="statusError || diskError || logsError" class="error-stack">
+      <p v-if="statusError" class="error-text">Status: {{ statusError }}</p>
+      <p v-if="diskError" class="error-text">Disk: {{ diskError }}</p>
+      <p v-if="logsError" class="error-text">Logs: {{ logsError }}</p>
+    </div>
 
     <div class="metrics-grid">
       <div class="metric">
         <span>Probe</span>
-        <strong>{{ status?.up ? "UP" : "DOWN" }}</strong>
+        <strong>{{ probeLabel }}</strong>
       </div>
       <div class="metric">
         <span>Plugins</span>
-        <strong>{{ status?.plugin_count ?? 0 }}</strong>
+        <strong>{{ pluginCountLabel }}</strong>
       </div>
       <div class="metric">
         <span>Disk</span>
-        <strong>{{ formatMegabytes(totalDisk) }}</strong>
+        <strong>{{ diskLabel }}</strong>
       </div>
       <div class="metric">
         <span>Upstream</span>
-        <strong>{{ status?.upstream_alert ? "ALERT" : "OK" }}</strong>
+        <strong>{{ upstreamLabel }}</strong>
       </div>
     </div>
 
@@ -91,9 +172,9 @@ onMounted(() => {
       <dt>Last upstream check</dt>
       <dd>{{ formatDate(status?.upstream_last_check_ts) }}</dd>
       <dt>State error</dt>
-      <dd>{{ status?.state_error ?? "无" }}</dd>
+      <dd>{{ stateErrorLabel }}</dd>
     </dl>
 
-    <pre class="log-pane">{{ logs || "No logs returned." }}</pre>
+    <pre class="log-pane">{{ logs || logFallback }}</pre>
   </section>
 </template>
