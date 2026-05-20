@@ -115,6 +115,147 @@ iptables -S DOCKER-USER | grep -E '3000|4873|8081|8082'
 nft list table inet filter
 ```
 
+### Server B 内部 Claude marketplace 安全边界
+
+internal Claude Code plugin marketplace（`prompts/0519-1/marketplace-bootstrap/`）的安全边界由 ADR-4（spec.md §5.2，LOCKED via WebFetch 实测）+ panel.uuhfn.cloud `@panel_private` + 独立 SSH 双通道支撑。整体定位 internal-only，**不镜像 anthropic/claude-code 或任何 proprietary upstream**。
+
+#### 暴露面
+
+| 面 | 允许 | 禁止 |
+|----|------|------|
+| `panel.uuhfn.cloud`（公网） | 仅 vpn-first allowlist（`@panel_private` matcher）；非 allowlist 来源 403 | 公网无差别访问 admin endpoint；公网爆破 X-Admin-Key |
+| `files.uuhfn.cloud/git/bifrost-internal-plugins.git` | 公网只读 clone（fcgiwrap，HTTP smart protocol） | `git-receive-pack`（Caddy 已硬阻 403） |
+| Server B `marketplace-render.service` 写入 `/var/lib/git-mirrors/...` | 仅 root；marketplace-render 通过 systemd unit 执行 | 任何用户态写入 bare 仓库 |
+| `bifrost-admin` SSH 写通道 | forced-command 仅 5 verbs：`upload tag-create approve curate rerender` | 任意 SSH 命令；交互 shell；root 私钥复用 |
+| `bifrost-readonly` SSH 读通道（PR-2 既有） | forced-command 白名单（marketplace:status, list-json, disk-report, logs:marketplace-render, logs:upstream-schema-check） | 写命令、其它服务的日志、状态文件 |
+
+#### `@panel_private` 解释（PR-3 落地后生效）
+
+panel.uuhfn.cloud 走 vpn-first allowlist 而不是公网。Caddy 在 `Caddyfile-a` 顶层定义 `@panel_private` matcher（`remote_ip` + VPN/私网段），匹配命中后才允许 reverse_proxy 到 bifrost-api；其它来源直接 403。这把"admin 上传 panel"的暴露面收回到管理网/VPN，**与 hardening-v2 PR-3 的 `vpn-first` profile 协同**。RK-4 因此被显式闭合（公网 token 爆破窗口归零）。
+
+> DNS 上 `panel.uuhfn.cloud` 仍解析到 Server A 公网 IP（普通员工浏览器 → Server A 入口走 wg0 隧道），但 Caddy 在 vpn-first allowlist 失配时直接 403，不把请求转发到 bifrost-api，也不读 X-Admin-Key。
+
+#### X-Admin-Key 轮换 SOP
+
+bifrost-api 通过 `BIFROST_ADMIN_KEY` 环境变量配置，由 `require_admin` dependency 在所有 `/marketplace/*` 路由强制要求 `X-Admin-Key` header。轮换流程：
+
+```bash
+# 1. 生成新 key
+NEW_KEY="$(openssl rand -hex 32)"
+
+# 2. 写入 systemd drop-in 或 /etc/bifrost-api/env
+sudo tee /etc/bifrost-api/env.d/admin-key.conf > /dev/null <<ENV
+BIFROST_ADMIN_KEY=${NEW_KEY}
+ENV
+sudo chmod 0600 /etc/bifrost-api/env.d/admin-key.conf
+
+# 3. 重启 bifrost-api（让新 key 生效，旧 key 立即失效）
+sudo systemctl restart bifrost-api
+
+# 4. 通知需要上传/curate 的管理员（带外 / 加密通道）；NewAPI Token 单独管理
+```
+
+频率建议每季度 + 人员变动 + 异常调用后立即。**严禁**把 X-Admin-Key 写入 git 仓库、CI 配置或 settings template。
+
+#### ADR-4 LICENSE 引用
+
+ADR-4 决策（spec.md §5.2，LOCKED via WebFetch 实测）：**DENY** 镜像 anthropic/claude-code。因此：
+
+- `prompts/0519-1/marketplace-bootstrap/bifrost-internal-plugins/LICENSE` 显式声明 `ALL-RIGHTS-RESERVED`
+- `bifrost-internal-plugins/NOTICE` 明示不镜像 upstream
+- `marketplace.json.metadata.upstream_url = null`
+- `marketplace.json.metadata.license_id = "ALL-RIGHTS-RESERVED"`
+
+每个 plugin 子目录可以带自己的 LICENSE 文件；默认 policy 是 `ALL-RIGHTS-RESERVED`，除非明确覆盖。任何镜像 upstream 的尝试（PR-1b 路径）当前 deferred，触发条件由 `check-upstream-schema.sh` 监控。
+
+#### `permissions.deny` 设计（PR-6 settings template）
+
+`prompts/0519-1/team-config/.claude/settings.json.template` 默认下发的 `permissions.deny` 12 条硬阻：
+
+- `Bash(curl http://github.com/*)` / `Bash(curl https://github.com/*)`
+- `Bash(curl http://raw.githubusercontent.com/*)` / `Bash(curl https://raw.githubusercontent.com/*)`
+- `Bash(wget http://github.com/*)` / `Bash(wget https://github.com/*)`
+- `Bash(npm install *)`
+- `Bash(pip install --index-url *)` / `Bash(pip install --extra-index-url *)`
+- `WebFetch(domain:github.com)` / `WebFetch(domain:raw.githubusercontent.com)`
+- `WebFetch(domain:registry.npmjs.org)`
+
+这是 RK-2（恶意 plugin hook 提权）的最后一道防线：即便恶意 plugin 通过 admin upload 审核失误进入仓库，它的任何"从公网 GitHub 拉 payload"或"npm install"动作会被 Claude Code 在执行前 deny。**任何缩减 `deny` 都是 security review 范围的变更**，必须走 PR review + 多人 sign-off。
+
+#### `bifrost-admin` SSH 通道
+
+PR-5a 的设计：
+
+- 独立 Linux user `bifrost-admin`（与 `bifrost-readonly` 完全分开）
+- `~bifrost-admin/.ssh/authorized_keys` 的每一条 key 都走 `command="/usr/local/bin/bifrost-admin-router.sh"` + `no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty,restrict`
+- `bifrost-admin-router.sh` 仅接受 5 verbs（`upload tag-create approve curate rerender`），其它输入 exit 2
+- 所有动作 `printf '%s %s %s\n' "$(date -Iseconds)" "${VERB}" "${audit_id}" >> /var/log/marketplace/admin-audit.log`
+- bifrost-api 经 `subprocess.run(['ssh', '-i', settings.admin_ssh_key, ...])` 调用，**不复用 readonly key**（M11 闭合）
+
+读通道（PR-2 既有 `bifrost-readonly`）和写通道（PR-5a `bifrost-admin`）即使一方泄露，另一方权限不会被牵连——这是双通道隔离的安全前提。
+
+#### Plugin hook 提权风险（RK-2 缓解）
+
+Claude Code plugin 通过 `.claude-plugin/plugin.json` + `manifest.yaml` 声明 declared_hooks / declared_mcp_servers / declared_skills。RK-2（恶意 plugin hook 提权）通过三层缓解：
+
+1. **panel curate**：admin upload 时人工审核 manifest.yaml + plugin 内容（panel.uuhfn.cloud admin SPA + audit log）
+2. **`permissions.deny`**：即使 hook 通过审核，运行时 Claude Code 仍会 deny 公网 GitHub / npm 等高危动作
+3. **audit log**：`/var/log/marketplace/admin-audit.log` 记录 upload / approve / curate / rerender 全链路，事后可追溯
+
+#### upstream LICENSE 漂移监测（RK-1 + RK-5 缓解）
+
+`scripts/check-upstream-schema.sh` 由 `upstream-schema-check.timer` 每日运行：
+
+- 抓 `https://github.com/anthropics/claude-code/raw/main/LICENSE.md` 的 sha256
+- 与 baseline（`/etc/bifrost-api/marketplace/upstream-license-baseline.sha256`）比对
+- 不变：`LICENSE-OK <sha256> <ts>`，state.json `upstream_alert = false`
+- 漂移：`UPSTREAM-CHANGED <old> -> <new> <ts>`，state.json `upstream_alert = true`，Vue admin panel 红色 badge
+
+AC-12 验收命令（spec.md §11 + e2e rehearsal 自动执行）：
+
+```bash
+bash scripts/check-upstream-schema.sh 2>&1 | head -1 | \
+    grep -E '^(LICENSE-OK|LICENSE-BASELINE-INIT|UPSTREAM-CHANGED) [0-9a-f]{64}'
+jq -e '.upstream_alert == false' /var/lib/dist/plugins/state.json
+```
+
+当 alert 触发，agent manager 介入 SOP：
+
+1. 人工对照新版 LICENSE / Commercial Terms，确认是否变为 OSS license
+2. 如果是 OSS license（如 MIT/Apache-2.0），评估是否启动 PR-1b（mirror upstream）路径
+3. 如果仍 proprietary 但条款收紧（如禁止内部 fork），通知法务 + 团队
+4. **不要**自动更新 baseline；baseline 更新必须人工 commit + PR review
+
+#### 审计日志查阅
+
+```bash
+# 读通道（PR-2 既有 — render / schema-check 日志）
+curl -H "X-Admin-Key: ${ADMIN_KEY}" \
+  "https://<server-a-domain>/manage/marketplace/logs?service=render&tail=200"
+
+curl -H "X-Admin-Key: ${ADMIN_KEY}" \
+  "https://<server-a-domain>/manage/marketplace/logs?service=schema-check&tail=200"
+
+# 写通道（PR-5a — 仅 admin-audit.log；当前 PR-7 docs marker，
+# bifrost-readonly-router.sh 的 logs:admin-audit verb 是 PR-5a 范围
+# 但未在 readonly-router 中开放，PR-7 不补；当 admin-audit 可读时
+# 通过 /marketplace/logs?service=admin-audit 出口）
+```
+
+bifrost-api 当前对 `service=admin-audit` 返回 422（spec.md §7.2 占位），等 PR-5a 在 `bifrost-readonly-router.sh` 增加 `logs:admin-audit` verb（独立后续 PR）后，会自动转为 200。
+
+#### 风险登记簿映射
+
+参见 spec.md §12 风险登记簿，本小节涉及：
+
+- RK-1（Anthropic 升级 marketplace 协议）— 由 `check-upstream-schema.sh` + docs min Claude Code 版本缓解
+- RK-2（恶意 plugin hook 提权）— 由 `permissions.deny` + panel curate + audit log 三层缓解
+- RK-4（panel 公网 token 爆破，**已闭合**）— `@panel_private` vpn-first
+- RK-5（LICENSE 合规误判）— ADR-4 LOCKED + check-upstream-schema.sh + 强制 LICENSE/NOTICE
+- RK-8（admin/readonly 通道混淆）— 两 user + 两 forced-command + audit log
+- RK-12（C6 自指 upstream 死锁，**已闭合**）— bifrost-internal-plugins 不进 git-mirror-sync 矩阵
+- RK-14（state.json 并发写）— `mktemp` + `mv` 原子替换
+
 ### 密钥与密码轮换
 
 | 对象 | 频率 | 操作 |

@@ -60,12 +60,28 @@ if [[ -f "${BASELINE_SHA256_FILE}" ]]; then
     baseline_sha256="$(tr -d '[:space:]' < "${BASELINE_SHA256_FILE}" || true)"
 fi
 
+_ensure_parent_dir() {
+    # Ensure the parent directory for $1 exists with mode $2.
+    # On Linux/Server B (root), prefer `install -d -m <mode>` for atomic semantics.
+    # On Windows Git Bash / non-root environments where `install -d` cannot apply
+    # POSIX mode bits, fall back to mkdir -p + best-effort chmod so the script
+    # remains usable from e2e rehearsals run on a developer laptop.
+    local target_dir mode
+    target_dir="$(dirname "$1")"
+    mode="$2"
+    if install -d -m "${mode}" "${target_dir}" 2>/dev/null; then
+        return 0
+    fi
+    mkdir -p "${target_dir}"
+    chmod "${mode}" "${target_dir}" 2>/dev/null || true
+}
+
 upstream_alert=false
 if [[ -z "${baseline_sha256}" ]]; then
     # First run on this host (or baseline file got wiped). Initialise it; not an alert.
-    install -d -m 0750 "$(dirname "${BASELINE_SHA256_FILE}")"
+    _ensure_parent_dir "${BASELINE_SHA256_FILE}" 0750
     printf '%s\n' "${current_sha256}" > "${BASELINE_SHA256_FILE}"
-    chmod 0644 "${BASELINE_SHA256_FILE}"
+    chmod 0644 "${BASELINE_SHA256_FILE}" 2>/dev/null || true
     echo "LICENSE-BASELINE-INIT ${current_sha256} ${ts}"
     upstream_alert=false
 elif [[ "${current_sha256}" == "${baseline_sha256}" ]]; then
@@ -82,9 +98,9 @@ if command -v jq >/dev/null 2>&1; then
     if [[ ! -f "${STATE_FILE}" ]]; then
         # Render service hasn't run yet; seed a minimal file so the panel still
         # surfaces the upstream_alert badge.
-        install -d -m 0755 "$(dirname "${STATE_FILE}")"
+        _ensure_parent_dir "${STATE_FILE}" 0755
         printf '{"upstream_alert":false}\n' > "${STATE_FILE}"
-        chmod 0644 "${STATE_FILE}"
+        chmod 0644 "${STATE_FILE}" 2>/dev/null || true
     fi
     tmp="$(mktemp)"
     if jq --argjson a "${upstream_alert}" --arg ts "${ts}" \

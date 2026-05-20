@@ -740,6 +740,195 @@ pwsh -File scripts/legacy-vps-final-snapshot.ps1 `
 
 ---
 
+## Server B 内部 Claude marketplace
+
+`prompts/0519-1/marketplace-bootstrap/` 引入的内部 Claude Code plugin marketplace 在 Server B 上承载，团队成员通过 `panel.uuhfn.cloud` 管理上传/curate，普通使用走 `files.uuhfn.cloud/git/bifrost-internal-plugins.git` 只读 clone。设计文档见 `.trellis/tasks/05-19-server-b-claude-artifacts-marketplace-visual-panel/spec.md`。
+
+> 安全边界与 ADR-4（internal-only LICENSE）见 `docs/SECURITY.md` 中"Server B 内部 Claude marketplace 安全边界"小节。
+
+### 部署前置条件
+
+1. Server B 私有分发栈（上一节）已经启用：`bash scripts/server-b.sh --enable-distribution` 跑过，`/var/lib/git-mirrors`、`/var/lib/dist`、`/var/log/marketplace` 三个目录存在。
+2. DNS：在域名提供商把 `panel.uuhfn.cloud` 的 `A` 记录指向 Server A 公网 IP（Caddy 反代到 bifrost-api）。**注意：DNS 步骤只在 PR-3 panel.uuhfn.cloud Caddy 配置落地后生效**；在 PR-3 合并前，DNS 可以先解析，但浏览器访问会落到默认 vhost。
+3. bifrost-api 已经配置 `BIFROST_ADMIN_KEY`（参考"暴露面 Profile"小节），并且独立的 `bifrost-admin` SSH key 已经写入 Server B 的 `~bifrost-admin/.ssh/authorized_keys`。
+4. `prompts/0519-1/team-config/.claude/settings.json.template` 中的 `extraKnownMarketplaces.bifrost-internal.source.url` 应该是 `https://files.uuhfn.cloud/git/bifrost-internal-plugins.git`（PR-6 默认值，无 `git+` 前缀；`source.source = "url"`）。
+
+### Server B 启用 marketplace
+
+`bash scripts/server-b.sh --enable-distribution` 内置 step 07 `_distribution_render_marketplace_scripts`，会一并完成：
+
+- 渲染 `/usr/local/bin/render-marketplace-json.sh`、`/usr/local/bin/check-upstream-schema.sh`
+- 初始化 `bifrost-internal-plugins.git` bare 仓库（在 `/var/lib/git-mirrors/`）
+- 写入 LICENSE / NOTICE / state.json 初始内容（ADR-4 internal-only baseline）
+- 启用 `marketplace-render.path` 和 `upstream-schema-check.timer`
+
+启动后验证：
+
+```bash
+systemctl is-active marketplace-render.path upstream-schema-check.timer
+ls /var/lib/git-mirrors/bifrost-internal-plugins.git/HEAD
+cat /var/lib/dist/plugins/state.json | jq .
+dig +short panel.uuhfn.cloud
+```
+
+### Admin 上传 plugin SOP
+
+唯一合法上传通道是 `panel.uuhfn.cloud → bifrost-api admin endpoint → bifrost-admin SSH → 仓库 push`。fcgiwrap 已经 403 阻断 `git-receive-pack`，开发者无法直接 push 到 bare 仓库。
+
+完整流程：
+
+```bash
+# 1. 本地 clone（read-only 通道）
+git clone https://files.uuhfn.cloud/git/bifrost-internal-plugins.git
+cd bifrost-internal-plugins
+
+# 2. 添加新 plugin 目录 plugins/<name>/
+mkdir -p plugins/my-plugin/.claude-plugin
+cat > plugins/my-plugin/.claude-plugin/plugin.json <<JSON
+{"name":"my-plugin","version":"0.1.0","description":"..."}
+JSON
+cat > plugins/my-plugin/manifest.yaml <<YAML
+version: "0.1.0"
+description: "What this plugin does"
+license_id: "ALL-RIGHTS-RESERVED"
+maintainers:
+  - {name: "Alice", email: "alice@uuhfn.cloud"}
+requires:
+  claude_code_min_version: "2.1.0"
+permissions:
+  declared_skills: ["hello"]
+YAML
+
+# 3. 本地测试通过后打 tarball
+tar czf my-plugin-v0.1.0.tar.gz -C plugins/my-plugin .
+
+# 4. 浏览器走 VPN/管理网段访问 https://panel.uuhfn.cloud/marketplace/upload
+#    上传 tarball + manifest.yaml；X-Admin-Key 来自管理员
+
+# 4'. 或者直接 curl（脚本化场景）
+ADMIN_KEY=$(cat ~/.bifrost-admin-key)   # 不要落盘 commit
+curl -X POST \
+     -H "X-Admin-Key: ${ADMIN_KEY}" \
+     -F "tarball=@my-plugin-v0.1.0.tar.gz" \
+     -F "manifest=@plugins/my-plugin/manifest.yaml" \
+     https://panel.uuhfn.cloud/marketplace/admin/upload
+
+# 5. bifrost-api 接收后会通过 bifrost-admin SSH 到 Server B
+#    bifrost-admin-router.sh 解 tarball → commit → tag plugins/my-plugin/v0.1.0
+#    → marketplace-render.path 触发 → state.json 更新 last_render_ts
+```
+
+成功响应：
+
+```json
+{
+  "success": true,
+  "data": {
+    "tag_created": "plugins/my-plugin/v0.1.0",
+    "git_head_sha": "abc123...",
+    "audit_id": "550e8400-e29b-41d4-a716-446655440000"
+  }
+}
+```
+
+所有动作落到 `/var/log/marketplace/admin-audit.log`（Server B），可通过 bifrost-api `/marketplace/logs?service=admin-audit` 读取（PR-5a deferred 路径，PR-7 暂占位 422）。
+
+### 版本回退 / curate
+
+发布有问题的版本后，admin 可以走两条路：
+
+1. **直接 tag 回退**：把 `manifest.yaml` 中 `version` 改回上一个稳定版本，重新走"Admin 上传"流程，annotated tag 会指向新 commit。`/plugin install <name>@bifrost-internal` 默认拉最新 tag。
+2. **/marketplace/admin/curate（feature/deprecate）**：在 `marketplace.json.metadata` 标注 `deprecated`，团队成员 `/plugin marketplace update` 后会看到警告，但已安装的版本仍可用。
+
+curate 调用示例：
+
+```bash
+curl -X POST \
+     -H "X-Admin-Key: ${ADMIN_KEY}" \
+     -H "Content-Type: application/json" \
+     -d '{"plugin":"my-plugin","action":"deprecate","reason":"v0.1.0 has CVE"}' \
+     https://panel.uuhfn.cloud/marketplace/admin/curate
+```
+
+### 团队成员日常使用
+
+成员侧零状态：
+
+```bash
+# 1. 拷贝 settings 模板
+mkdir -p ~/.claude
+cp prompts/0519-1/team-config/.claude/settings.json.template ~/.claude/settings.json
+
+# 2. 启动 claude
+claude
+
+# 3. 在 TUI 内
+/plugin marketplace update bifrost-internal      # 同步最新 marketplace.json
+/plugin install my-plugin@bifrost-internal       # 安装最新版
+/plugin install my-plugin@bifrost-internal --version v0.1.0   # 钉版本
+
+# 安装路径：
+# ~/.claude/plugins/cache/bifrost-internal/my-plugin/v0.1.0/
+```
+
+`/plugin marketplace update bifrost-internal` 后面会 `git ls-remote` 到 `https://files.uuhfn.cloud/git/bifrost-internal-plugins.git`，需要 VPN/管理网段可达。
+
+### CLAUDE_CODE_PLUGIN_SEED_DIR 离线模式
+
+对于 VPN 不通 / 出差 / 干净笔记本，先用 `scripts/build-marketplace-seed.sh` 在内网打包：
+
+```bash
+# 在能访问 marketplace 的工作站
+bash scripts/build-marketplace-seed.sh --output dist/marketplace-seed.tar.gz
+# 会同时写出 dist/marketplace-seed.tar.gz.sha256
+```
+
+把两个文件用任意旁路通道（U 盘 / 内部 S3 / Verdaccio file-store）分发到目标机：
+
+```bash
+# 目标机
+sha256sum -c marketplace-seed.tar.gz.sha256
+mkdir -p ~/marketplace-seed
+tar xzf marketplace-seed.tar.gz -C ~/marketplace-seed
+
+# 让 Claude Code 直接读 seed，不走网络
+export CLAUDE_CODE_PLUGIN_SEED_DIR="$HOME/marketplace-seed/bifrost-internal-plugins"
+echo "export CLAUDE_CODE_PLUGIN_SEED_DIR=$HOME/marketplace-seed/bifrost-internal-plugins" >> ~/.bashrc
+
+# 还没设置 settings 的话
+mkdir -p ~/.claude
+cp ~/marketplace-seed/settings.json.template ~/.claude/settings.json
+
+# 启动；/plugin browse 应能看到 bifrost-internal，即使 wg 没起
+claude
+```
+
+完整 onboarding 指南见 `prompts/0519-1/marketplace-bootstrap/seed/README.md`。VPN 恢复后跑一次 `/plugin marketplace update bifrost-internal` 就能切回在线模式。
+
+### /plugin marketplace update 同步
+
+成员需要拉取最新发布版本时：
+
+```bash
+# TUI 内
+/plugin marketplace update bifrost-internal
+/plugin install <name>@bifrost-internal
+```
+
+如果上游有新 tag，新版本会出现在 `/plugin browse` 中；本地已安装版本不受影响（cache 中按 version 目录存）。
+
+### 故障排查
+
+| 现象 | 排查命令 | 修复 |
+|------|----------|------|
+| `/plugin browse` 看不到 bifrost-internal | `jq '.extraKnownMarketplaces' ~/.claude/settings.json` | 重新拷贝 PR-6 settings template；确认 `source.source == "url"` 且 url 没有 `git+` 前缀 |
+| `git ls-remote` 报 SSL / 拒绝连接 | `curl -I https://files.uuhfn.cloud/` 是否 2xx | 检查 wg0 隧道 (`wg show wg0`)；不通则回退到离线 seed |
+| `permission denied` 触发 Bash 工具 | 看 settings 模板中的 `permissions.deny` | 跟 security reviewer 讨论是否新增窄域 `allow`，不要直接删除 `deny` 条目 |
+| 上传后 `/plugin marketplace update` 没拉到新版本 | Server B `journalctl -u marketplace-render.service` | bifrost-api `/marketplace/status` 看 `last_render_ts`；render 卡住时手动 `systemctl start marketplace-render.service` |
+| `marketplace.json` 解析失败 | `git -C /var/lib/git-mirrors/bifrost-internal-plugins.git show HEAD:.claude-plugin/marketplace.json \| jq .` | 检查 render exit code，多数情况是 manifest.yaml schema 不合规（必填字段缺失或 version 不是 SemVer） |
+
+---
+
 ## 注意事项
 
 1. **安全**：定期更换 SSH 密钥和管理面板密码
