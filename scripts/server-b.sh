@@ -2456,11 +2456,13 @@ _distribution_render_git_mirror_script() {
 }
 
 # spec.md section 9.1 step 06: install marketplace render + upstream LICENSE watchdog
-# scripts. bifrost-admin-router.sh is intentionally NOT installed here; it ships
-# with PR-5a once the admin SSH channel is in scope.
+# scripts plus the PR-5a admin write router (bifrost-admin-router.sh).
 _distribution_render_marketplace_scripts() {
     install -m 0755 "${PROJECT_ROOT}/scripts/render-marketplace-json.sh" /usr/local/bin/render-marketplace-json.sh
     install -m 0755 "${PROJECT_ROOT}/scripts/check-upstream-schema.sh" /usr/local/bin/check-upstream-schema.sh
+    # spec.md PR-5a: install the write-side forced-command admin router so the
+    # bifrost-admin user authorized_keys command= line resolves.
+    install -m 0755 "${PROJECT_ROOT}/scripts/bifrost-admin-router.sh" /usr/local/bin/bifrost-admin-router.sh
 }
 
 # spec.md section 9.2 / M6: marketplace directories must be owned by git-mirror so
@@ -2582,6 +2584,49 @@ EOF
     _distribution_state_set "BIFROST_READONLY_SSH_CONFIGURED" "1"
 }
 
+# spec.md PR-5a / section 6.3 / section 9.2: configure the independent
+# bifrost-admin SSH user used by panel.uuhfn.cloud admin write endpoints.
+# - dedicated system user (no shell login); home created under /var/lib
+# - forced-command authorized_keys pinned to /usr/local/bin/bifrost-admin-router.sh
+# - admin-audit.log file pre-created with mode 0640 owned by bifrost-admin
+# - bifrost-admin added to the git-mirror group so it can rw the bare repo
+# Idempotent: the function safely re-runs when --enable-distribution is invoked
+# multiple times; the step-state machine still gates execution to once per box.
+_distribution_configure_admin_ssh() {
+    local admin_user="bifrost-admin"
+    local public_key="${BIFROST_ADMIN_SSH_PUBLIC_KEY:-}"
+    local public_key_file="${BIFROST_ADMIN_SSH_PUBLIC_KEY_FILE:-}"
+    if [[ -z "${public_key}" && -n "${public_key_file}" && -f "${public_key_file}" ]]; then
+        public_key="$(tr -d '\r\n' < "${public_key_file}")"
+    fi
+
+    # 1. ensure the dedicated admin user exists (no shell, login disabled)
+    if ! id "${admin_user}" &>/dev/null; then
+        useradd -r -m -d "/var/lib/${admin_user}" -s /usr/sbin/nologin "${admin_user}"
+    fi
+    # 2. add bifrost-admin to git-mirror group so it can read/write the bare repo
+    usermod -aG "${DISTRIBUTION_GIT_MIRROR_USER}" "${admin_user}" 2>/dev/null || true
+    # 3. ensure audit-log file exists with appropriate ownership/mode
+    install -d -m 0750 -o "${admin_user}" -g "${admin_user}" /var/log/marketplace
+    if [[ ! -f /var/log/marketplace/admin-audit.log ]]; then
+        install -m 0640 -o "${admin_user}" -g "${admin_user}" /dev/null /var/log/marketplace/admin-audit.log
+    fi
+    # 4. install authorized_keys with the PR-5a forced-command line
+    if [[ -z "${public_key}" ]]; then
+        log_warn "BIFROST_ADMIN_SSH_PUBLIC_KEY not provided; /marketplace/admin/* SSH write channel is not enabled yet."
+        _distribution_state_set "BIFROST_ADMIN_SSH_CONFIGURED" "0"
+        return 0
+    fi
+    local home_dir="/var/lib/${admin_user}"
+    install -d -m 0700 -o "${admin_user}" -g "${admin_user}" "${home_dir}/.ssh"
+    cat > "${home_dir}/.ssh/authorized_keys" <<EOF
+command="/usr/local/bin/bifrost-admin-router.sh \${SSH_ORIGINAL_COMMAND}",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ${public_key}
+EOF
+    chmod 0600 "${home_dir}/.ssh/authorized_keys"
+    chown "${admin_user}:${admin_user}" "${home_dir}/.ssh/authorized_keys"
+    _distribution_state_set "BIFROST_ADMIN_SSH_CONFIGURED" "1"
+}
+
 _distribution_ensure_caddy_service() {
     if systemctl list-unit-files caddy.service &>/dev/null || [[ -f /etc/systemd/system/caddy.service ]]; then
         return 0
@@ -2682,6 +2727,25 @@ _distribution_verify() {
         failures=$((failures + 1))
     fi
 
+    # spec.md PR-5a / section 11 AC-10: the bifrost-admin SSH channel must be
+    # ready to receive uploads. We verify the user exists, the router binary
+    # is installed and the authorized_keys file carries a command= directive.
+    # When BIFROST_ADMIN_SSH_PUBLIC_KEY was unset the channel intentionally
+    # leaves authorized_keys absent (see _distribution_configure_admin_ssh);
+    # that branch only warns, it does not fail the verifier.
+    if ! id bifrost-admin &>/dev/null; then
+        log_error "bifrost-admin SSH user is missing (PR-5a)."
+        failures=$((failures + 1))
+    fi
+    if [[ ! -x /usr/local/bin/bifrost-admin-router.sh ]]; then
+        log_error "/usr/local/bin/bifrost-admin-router.sh is missing or not executable (PR-5a)."
+        failures=$((failures + 1))
+    fi
+    if [[ -f /var/lib/bifrost-admin/.ssh/authorized_keys ]]         && ! grep -q "command=\"/usr/local/bin/bifrost-admin-router.sh" /var/lib/bifrost-admin/.ssh/authorized_keys; then
+        log_error "bifrost-admin authorized_keys exists but lacks the forced-command directive (PR-5a)."
+        failures=$((failures + 1))
+    fi
+
     if [[ "${failures}" -gt 0 ]]; then
         return 1
     fi
@@ -2777,6 +2841,10 @@ enable_distribution() {
         _distribution_prepare_marketplace_dirs
         _distribution_init_marketplace_bare
         _distribution_init_upstream_schema_baseline
+        # spec.md PR-5a / section 9.2: configure the bifrost-admin SSH channel
+        # so /marketplace/admin/* writes can land. Runs *before* the path unit
+        # is enabled so the audit-log file is ready when render fires.
+        _distribution_configure_admin_ssh
         # spec.md M19: explicitly enable systemd triggers; the path unit becomes
         # active only after the bare repo exists (we just created it above).
         systemctl enable --now marketplace-render.path
@@ -2851,6 +2919,12 @@ disable_distribution() {
     # invocation. marketplace-render.service is oneshot; nothing to disable.
     systemctl disable --now marketplace-render.path 2>/dev/null || true
     systemctl disable --now upstream-schema-check.timer 2>/dev/null || true
+    # spec.md PR-5a / section 9.4: intentionally do NOT remove the bifrost-admin
+    # system user nor delete /var/log/marketplace/admin-audit.log on disable.
+    # The audit trail is a security artefact and must survive teardown so
+    # incident review can reconstruct any prior plugin uploads. To fully
+    # remove the admin user run `userdel -r bifrost-admin` manually after
+    # archiving the audit log.
     systemctl disable --now restic-to-a.timer 2>/dev/null || true
     systemctl disable --now git-mirror@claude-for-legal-zh.timer 2>/dev/null || true
     systemctl stop git-mirror@claude-for-legal-zh.service 2>/dev/null || true

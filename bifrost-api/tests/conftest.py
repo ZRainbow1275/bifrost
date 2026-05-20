@@ -37,11 +37,17 @@ def _patch_settings_for_tests():
         "readonly_ssh_key": deps.settings.readonly_ssh_key,
         "server_b_wg_ip": deps.settings.server_b_wg_ip,
         "readonly_ssh_timeout_sec": deps.settings.readonly_ssh_timeout_sec,
+        "admin_user": deps.settings.admin_user,
+        "admin_ssh_key": deps.settings.admin_ssh_key,
+        "admin_ssh_timeout_sec": deps.settings.admin_ssh_timeout_sec,
     }
     deps.settings.admin_key = "test-admin-key"
     deps.settings.readonly_ssh_key = "/nonexistent/test/path/will-fail-is_file"
     deps.settings.server_b_wg_ip = "127.0.0.1"
     deps.settings.readonly_ssh_timeout_sec = 0.5
+    deps.settings.admin_user = "bifrost-admin"
+    deps.settings.admin_ssh_key = "/nonexistent/test/path/will-fail-is_file"
+    deps.settings.admin_ssh_timeout_sec = 0.5
     try:
         yield deps.settings
     finally:

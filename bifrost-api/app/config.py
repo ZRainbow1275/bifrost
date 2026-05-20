@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     readonly_user: str = "bifrost-readonly"
     readonly_ssh_timeout_sec: float = 8.0
 
+    # Server B marketplace admin SSH channel (PR-5a, spec section 6.3 + 7.3).
+    # IMPORTANT: must be an *independent* SSH user / key pair from the readonly
+    # channel above (M11 closure). The forced-command on Server B routes through
+    # /usr/local/bin/bifrost-admin-router.sh which whitelists write verbs only.
+    admin_user: str = "bifrost-admin"
+    admin_ssh_key: str = "/etc/bifrost-api/ssh/bifrost-admin.ed25519"
+    admin_ssh_timeout_sec: float = 30.0
+
     # Optional cross-origin access. Leave empty for same-origin only access.
     cors_allow_origins: str = ""
     cors_allow_credentials: bool = False

@@ -5940,13 +5940,54 @@ test_distribution_contracts() {
     fi
 
     local sh_check
-    for sh_check in scripts/check-upstream-schema.sh scripts/bifrost-readonly-router.sh; do
+    for sh_check in scripts/check-upstream-schema.sh scripts/bifrost-readonly-router.sh scripts/bifrost-admin-router.sh; do
         if [[ -f "${SCRIPT_DIR}/${sh_check}" ]] && bash -n "${SCRIPT_DIR}/${sh_check}" 2>/dev/null; then
             record_pass "bash -n: ${sh_check}"
         else
             record_fail "bash -n: ${sh_check}"
         fi
     done
+
+    # spec.md PR-5a contract assertions: admin-router whitelist + server-b helpers.
+    if [[ -f "${SCRIPT_DIR}/scripts/bifrost-admin-router.sh" ]] \
+       && grep -Fq "upload)" "${SCRIPT_DIR}/scripts/bifrost-admin-router.sh" \
+       && grep -Fq "tag-create)" "${SCRIPT_DIR}/scripts/bifrost-admin-router.sh" \
+       && grep -Fq "approve)" "${SCRIPT_DIR}/scripts/bifrost-admin-router.sh" \
+       && grep -Fq "curate)" "${SCRIPT_DIR}/scripts/bifrost-admin-router.sh" \
+       && grep -Fq "rerender)" "${SCRIPT_DIR}/scripts/bifrost-admin-router.sh"; then
+        record_pass "bifrost-admin-router.sh contains 5 PR-5a write verbs (spec section 6.3 + 7.2)"
+    else
+        record_fail "bifrost-admin-router.sh missing one or more PR-5a write verbs"
+    fi
+
+    if grep -Fq 'forbidden' "${SCRIPT_DIR}/scripts/bifrost-admin-router.sh" \
+       && grep -Fq 'exit 2' "${SCRIPT_DIR}/scripts/bifrost-admin-router.sh"; then
+        record_pass "bifrost-admin-router.sh fails closed on unknown verb (forbidden + exit 2)"
+    else
+        record_fail "bifrost-admin-router.sh missing forbidden / exit 2 fail-closed default"
+    fi
+
+    if grep -Fq 'audit_log' "${SCRIPT_DIR}/scripts/bifrost-admin-router.sh" \
+       && grep -Fq '/var/log/marketplace/admin-audit.log' "${SCRIPT_DIR}/scripts/bifrost-admin-router.sh" \
+       && grep -Fq 'sync' "${SCRIPT_DIR}/scripts/bifrost-admin-router.sh"; then
+        record_pass "bifrost-admin-router.sh writes audit log + sync (spec section 6.3)"
+    else
+        record_fail "bifrost-admin-router.sh missing audit log + sync chain"
+    fi
+
+    if ! grep -E '(^[[:space:]]*eval |^[[:space:]]*exec sh |^[[:space:]]*bash -c )' "${SCRIPT_DIR}/scripts/bifrost-admin-router.sh" >/dev/null 2>&1; then
+        record_pass "bifrost-admin-router.sh free of eval / exec sh / bash -c (spec M11)"
+    else
+        record_fail "bifrost-admin-router.sh uses eval / exec sh / bash -c -- escape hatch forbidden by spec M11"
+    fi
+
+    if grep -Fq '_distribution_configure_admin_ssh()' "${SCRIPT_DIR}/scripts/server-b.sh" \
+       && grep -Fq 'BIFROST_ADMIN_SSH_PUBLIC_KEY' "${SCRIPT_DIR}/scripts/server-b.sh" \
+       && grep -Fq 'bifrost-admin-router.sh' "${SCRIPT_DIR}/scripts/server-b.sh"; then
+        record_pass "server-b.sh defines _distribution_configure_admin_ssh + admin-router install (spec PR-5a section 9.2)"
+    else
+        record_fail "server-b.sh missing _distribution_configure_admin_ssh / admin-router install"
+    fi
 
     local temp_root
     temp_root="$(mktemp -d)"
@@ -5997,6 +6038,7 @@ test_distribution_contracts() {
             _distribution_prepare_marketplace_dirs() { echo prepare_marketplace_dirs >> "${TMP_ROOT}/calls"; }
             _distribution_init_marketplace_bare() { echo init_marketplace_bare >> "${TMP_ROOT}/calls"; }
             _distribution_init_upstream_schema_baseline() { echo init_upstream_schema_baseline >> "${TMP_ROOT}/calls"; }
+            _distribution_configure_admin_ssh() { echo configure_admin_ssh >> "${TMP_ROOT}/calls"; }
             _distribution_configure_readonly_ssh() { _distribution_state_set BIFROST_READONLY_SSH_CONFIGURED 0; }
             _distribution_write_restic_env() { echo render_restic_env >> "${TMP_ROOT}/calls"; }
             _distribution_init_verdaccio_bootstrap() { _distribution_state_set VERDACCIO_BOOTSTRAP_INITIALIZED 1; }
@@ -6020,6 +6062,8 @@ test_distribution_contracts() {
             [[ "$(grep -c "^init_marketplace_bare$" "${TMP_ROOT}/calls")" -eq 1 ]]
             [[ "$(grep -c "^init_upstream_schema_baseline$" "${TMP_ROOT}/calls")" -eq 1 ]]
             [[ "$(grep -c "^render_marketplace_scripts$" "${TMP_ROOT}/calls")" -eq 1 ]]
+            # spec.md PR-5a: bifrost-admin SSH config must fire exactly once in step 07.
+            [[ "$(grep -c "^configure_admin_ssh$" "${TMP_ROOT}/calls")" -eq 1 ]]
         '; then
         record_pass "enable_distribution mock 验证 step-state 幂等与 secret 不落 state"
     else

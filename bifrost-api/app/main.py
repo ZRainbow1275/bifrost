@@ -24,6 +24,7 @@ from .config import Settings
 from .dependencies import get_newapi_client
 from .routers import channels as channels_router
 from .routers import marketplace as marketplace_router
+from .routers import marketplace_admin as marketplace_admin_router
 from .routers import mirrors as mirrors_router
 from .routers import models as models_router
 from .routers import stats as stats_router
@@ -128,6 +129,7 @@ app.include_router(channels_router.router)
 app.include_router(stats_router.router)
 app.include_router(mirrors_router.router)
 app.include_router(marketplace_router.router)
+app.include_router(marketplace_admin_router.router)
 
 
 # ------------------------------------------------------------------
