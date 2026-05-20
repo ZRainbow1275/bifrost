@@ -112,13 +112,22 @@ npm.uuhfn.cloud {
 }
 
 # ============================================================================
-# Static distribution — cc-switch .msi, Node.js MSI, setup.bat, etc.
-# Layout:
+# Static distribution + bare git repos for Claude Code plugin marketplace.
+#
+# Static layout (default route, /):
 #   C:/caddy/dist/
 #     ├─ CC-Switch-vX.Y.Z-Windows.msi
 #     ├─ CC-Switch-vX.Y.Z-Windows-Portable.zip
 #     ├─ node-vXX.X.X-x64.msi
-#     └─ setup.bat
+#     ├─ setup.bat
+#     └─ docs/                                  (team tutorials)
+#
+# Git layout (/git/*  -> bare repos, dumb HTTP, READ-ONLY):
+#   C:/caddy/git/
+#     ├─ claude-for-legal-ZH.git/               (upstream mirror, daily sync)
+#     └─ bifrost-internal-plugins.git/          (team marketplace catalog)
+#
+# Push is disabled per-repo by `git config http.receivepack false`.
 # ============================================================================
 files.uuhfn.cloud {
 	tls C:/caddy/certs/uuhfn-cloud-origin.pem C:/caddy/certs/uuhfn-cloud-origin-key.pem
@@ -134,15 +143,41 @@ files.uuhfn.cloud {
 		-Server
 	}
 
-	# Block dotfiles (e.g. .git, .htaccess) from being served.
-	@hidden path_regexp hidden (^|/)\.
+	# ---- bare git repos at /git/* -----------------------------------------
+	# Strip /git prefix, then serve from C:/caddy/git so that
+	#   https://files.uuhfn.cloud/git/<repo>.git/info/refs
+	# resolves to
+	#   C:/caddy/git/<repo>.git/info/refs
+	#
+	# This is DUMB HTTP only (static files). We deliberately do NOT set the
+	# `application/x-git-upload-pack-advertisement` Content-Type — that header
+	# would make git clients select the smart HTTP protocol and expect
+	# pkt-line-encoded bodies that file_server cannot produce, causing
+	# "remote end hung up unexpectedly". Letting Caddy emit the default
+	# text/plain (or no Content-Type at all) makes git fall back to dumb HTTP
+	# and fetch static refs/objects directly. Repo must have been prepared
+	# with `git --bare update-server-info`.
+	handle_path /git/* {
+		root * C:/caddy/git
 
-	respond @hidden 404
+		# Git clients re-fetch info/refs every request anyway.
+		header Cache-Control "no-cache, max-age=0, must-revalidate"
 
-	root * C:/caddy/dist
-	file_server {
-		browse
-		hide .* _*
+		# Serve files but NEVER list bare-repo directory contents.
+		file_server
+	}
+
+	# ---- default static distribution at / ---------------------------------
+	handle {
+		# Block dotfiles (e.g. .htaccess) on the default route only.
+		@hidden path_regexp hidden (^|/)\.
+		respond @hidden 404
+
+		root * C:/caddy/dist
+		file_server {
+			browse
+			hide .* _*
+		}
 	}
 
 	log {

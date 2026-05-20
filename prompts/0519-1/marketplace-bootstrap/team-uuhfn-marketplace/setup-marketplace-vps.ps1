@@ -26,7 +26,11 @@
 # 幂等：可重跑。bare repo 已存在则仅 force-update refs。
 # ============================================================================
 
-$ErrorActionPreference = 'Stop'
+# Note: 'Continue' (not 'Stop') because git writes informational progress to
+# stderr (e.g. "To <repo>"), and with Stop + 2>&1 PowerShell mis-interprets that
+# as a RemoteException. We rely on explicit $LASTEXITCODE checks for git calls
+# and Fail() for PowerShell cmdlet failures.
+$ErrorActionPreference = 'Continue'
 
 # ---- Config -----------------------------------------------------------------
 $BareRoot      = 'C:\caddy\git'
@@ -53,9 +57,9 @@ Write-Host "   $gitVer"
 
 if (-not (Test-Path 'C:\caddy\git\claude-for-legal-ZH.git')) {
     Fail @"
-claude-for-legal-ZH.git 还没在 C:\caddy\git\ 下。
-先按 prompts/0519-1/claude-for-legal-mirror/DEPLOY.md 部署 upstream mirror，
-否则 git-subdir source 会 404。
+claude-for-legal-ZH.git not found under C:\caddy\git\.
+Deploy the upstream mirror first (prompts/0519-1/claude-for-legal-mirror/DEPLOY.md),
+otherwise git-subdir sources will 404.
 "@
 }
 Write-Host '   upstream mirror present: C:\caddy\git\claude-for-legal-ZH.git'
@@ -136,17 +140,21 @@ try {
     Remove-Item -Recurse -Force $tmpRoot -ErrorAction SilentlyContinue
 }
 
-# 7. update-server-info + 配置只读
+# 7. update-server-info + 配置只读 + 修 HEAD 指向 main
 Write-Step '7/8 enabling dumb HTTP'
 Push-Location $BarePath
 try {
+    # `git init --bare` defaults HEAD -> refs/heads/master, but we push `main`.
+    # Without this, clients clone OK but get "remote HEAD refers to nonexistent ref"
+    # and end up with no working tree checked out.
+    git symbolic-ref HEAD refs/heads/main
     git --bare update-server-info
     git config http.receivepack false
     git config http.uploadpack true
 } finally {
     Pop-Location
 }
-Write-Host '   dumb HTTP enabled (push disabled)'
+Write-Host '   dumb HTTP enabled (push disabled), HEAD -> refs/heads/main'
 
 # 8. 验证
 Write-Step '8/8 verifying via local Caddy loopback'
@@ -167,15 +175,15 @@ Write-Host '=== SETUP COMPLETE ===' -ForegroundColor Green
 Write-Host "Marketplace bare repo : $BarePath"
 Write-Host "Public URL            : https://files.uuhfn.cloud/git/$MarketName.git"
 Write-Host ''
-Write-Host '团队成员客户端一键命令：' -ForegroundColor Cyan
+Write-Host 'Team client one-shot commands:' -ForegroundColor Cyan
 Write-Host "  /plugin marketplace add https://files.uuhfn.cloud/git/$MarketName.git"
 Write-Host '  /plugin install commercial-legal@team-uuhfn'
 Write-Host '  /plugin install corporate-legal@team-uuhfn'
-Write-Host '  ...（12 个 plugin 任选）'
+Write-Host '  ...(12 plugins total, pick any)'
 Write-Host ''
-Write-Host '远端验证（在团队成员机器上跑）：'
+Write-Host 'Remote sanity check (run on a team member machine):'
 Write-Host "  git ls-remote https://files.uuhfn.cloud/git/$MarketName.git"
-Write-Host '  → 应输出一行 commit SHA + refs/heads/main'
+Write-Host '  -> expect one line: <commit SHA>\trefs/heads/main'
 Write-Host ''
-Write-Host '后续更新 marketplace（例如加内部插件后）：'
-Write-Host '  重跑本脚本即可（幂等 force-push）。'
+Write-Host 'Future updates (e.g. after adding internal plugins):'
+Write-Host '  re-run this script (idempotent force-push).'
