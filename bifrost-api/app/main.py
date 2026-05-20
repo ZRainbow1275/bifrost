@@ -23,6 +23,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from .config import Settings
 from .dependencies import get_newapi_client
 from .routers import channels as channels_router
+from .routers import marketplace as marketplace_router
+from .routers import mirrors as mirrors_router
 from .routers import models as models_router
 from .routers import stats as stats_router
 from .routers import users as users_router
@@ -124,6 +126,8 @@ app.include_router(users_router.router)
 app.include_router(models_router.router)
 app.include_router(channels_router.router)
 app.include_router(stats_router.router)
+app.include_router(mirrors_router.router)
+app.include_router(marketplace_router.router)
 
 
 # ------------------------------------------------------------------
