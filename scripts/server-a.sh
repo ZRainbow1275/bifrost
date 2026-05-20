@@ -210,6 +210,22 @@ server_a_tls_mode() {
     esac
 }
 
+server_a_new_api_mode() {
+    local mode="${BIFROST_SERVER_A_NEWAPI_MODE:-distribution}"
+    case "${mode}" in
+        distribution|server-b|remote)
+            echo "distribution"
+            ;;
+        legacy|local)
+            echo "legacy"
+            ;;
+        *)
+            log_error "Invalid BIFROST_SERVER_A_NEWAPI_MODE='${mode}'. Use 'distribution' or 'legacy'."
+            return 1
+            ;;
+    esac
+}
+
 detect_public_ipv4() {
     local service ip
     for service in \
@@ -1601,6 +1617,15 @@ setup_caddy_a() {
     if ! tls_mode="$(server_a_tls_mode)"; then
         return 1
     fi
+    local new_api_mode
+    if ! new_api_mode="$(server_a_new_api_mode)"; then
+        return 1
+    fi
+    local server_b_wg_ip="${BIFROST_SERVER_B_WG_IP:-10.8.0.2}"
+    local new_api_upstream="localhost:3000"
+    if [[ "${new_api_mode}" == "distribution" ]]; then
+        new_api_upstream="${server_b_wg_ip}:3000"
+    fi
     local domain=""
     local public_ip=""
     local endpoint_host=""
@@ -1639,6 +1664,64 @@ setup_caddy_a() {
     # --- Create log directory ---
     mkdir -p "$CADDY_LOG_DIR"
 
+    local distribution_site_block=""
+    local distribution_domain="${BIFROST_DISTRIBUTION_DOMAIN:-${BIFROST_DOMAIN:-}}"
+    if [[ -z "${distribution_domain}" && -n "${domain}" ]]; then
+        case "${domain}" in
+            api.*|npm.*|files.*|legacy.*)
+                distribution_domain="${domain#*.}"
+                ;;
+            *)
+                distribution_domain="${domain}"
+                ;;
+        esac
+    fi
+    if [[ -n "${distribution_domain}" ]]; then
+        distribution_site_block="$(cat <<DISTRIBUTIONEOF
+
+# ===== Server B private distribution reverse proxies =====
+(server_b_proxy) {
+    reverse_proxy {args[0]} {
+        header_up Host {host}
+        header_up X-Forwarded-Proto https
+        header_up X-Real-IP {client_ip}
+        lb_try_duration 2s
+        fail_duration 30s
+    }
+}
+
+api.${distribution_domain} {
+$(server_a_caddy_tls_block "${tls_mode}" "${endpoint_host}" "${cloudflare_origin_cert_file}" "${cloudflare_origin_key_file}")
+    encode gzip
+    import server_b_proxy http://${server_b_wg_ip}:3000
+}
+
+npm.${distribution_domain} {
+$(server_a_caddy_tls_block "${tls_mode}" "${endpoint_host}" "${cloudflare_origin_cert_file}" "${cloudflare_origin_key_file}")
+    encode gzip
+    handle {
+        request_body {
+            max_size 100MB
+        }
+        import server_b_proxy http://${server_b_wg_ip}:4873
+    }
+}
+
+files.${distribution_domain} {
+$(server_a_caddy_tls_block "${tls_mode}" "${endpoint_host}" "${cloudflare_origin_cert_file}" "${cloudflare_origin_key_file}")
+    encode gzip
+    @git path /git/*
+    handle @git {
+        import server_b_proxy http://${server_b_wg_ip}:8082
+    }
+    handle {
+        import server_b_proxy http://${server_b_wg_ip}:8081
+    }
+}
+DISTRIBUTIONEOF
+)"
+    fi
+
     # --- Create Caddyfile ---
     log_info "Generating Caddy configuration..."
     cat > "$CADDY_CONFIG" <<CADDYEOF
@@ -1646,6 +1729,7 @@ setup_caddy_a() {
 # Endpoint: ${endpoint_host}
 # TLS mode: ${tls_mode}
 # Exposure profile: ${exposure_profile}
+# NewAPI mode: ${new_api_mode}
 # Generated on $(date '+%Y-%m-%d %H:%M:%S')
 
 ${site_address} {
@@ -1696,7 +1780,7 @@ ${site_address} {
 
     # ===== New API Gateway (AI API Traffic) =====
     handle /v1/* {
-        reverse_proxy localhost:3000 {
+        reverse_proxy ${new_api_upstream} {
             header_up X-Real-IP {remote_host}
             header_up X-Forwarded-For {remote_host}
             header_up X-Forwarded-Proto {scheme}
@@ -1713,7 +1797,7 @@ $(if [[ "${exposure_profile}" == "vpn-first" ]]; then
 cat <<PROFILE_BLOCK
     # ===== Public readiness endpoint only =====
     handle /api/status {
-        reverse_proxy localhost:3000 {
+        reverse_proxy ${new_api_upstream} {
             header_up X-Real-IP {remote_host}
             header_up X-Forwarded-For {remote_host}
             header_up X-Forwarded-Proto {scheme}
@@ -1726,7 +1810,7 @@ cat <<PROFILE_BLOCK
         remote_ip ${admin_allowed_ranges}
     }
     handle @newapi_private {
-        reverse_proxy localhost:3000 {
+        reverse_proxy ${new_api_upstream} {
             header_up X-Real-IP {remote_host}
             header_up X-Forwarded-For {remote_host}
             header_up X-Forwarded-Proto {scheme}
@@ -1791,35 +1875,35 @@ else
 cat <<PROFILE_BLOCK
     # ===== New API Gateway API and Dashboard =====
     handle /api/* {
-        reverse_proxy localhost:3000 {
+        reverse_proxy ${new_api_upstream} {
             header_up X-Real-IP {remote_host}
             header_up X-Forwarded-For {remote_host}
             header_up X-Forwarded-Proto {scheme}
         }
     }
     handle /static/* {
-        reverse_proxy localhost:3000 {
+        reverse_proxy ${new_api_upstream} {
             header_up X-Real-IP {remote_host}
             header_up X-Forwarded-For {remote_host}
             header_up X-Forwarded-Proto {scheme}
         }
     }
     handle /logo.png {
-        reverse_proxy localhost:3000 {
+        reverse_proxy ${new_api_upstream} {
             header_up X-Real-IP {remote_host}
             header_up X-Forwarded-For {remote_host}
             header_up X-Forwarded-Proto {scheme}
         }
     }
     handle /dashboard {
-        reverse_proxy localhost:3000 {
+        reverse_proxy ${new_api_upstream} {
             header_up X-Real-IP {remote_host}
             header_up X-Forwarded-For {remote_host}
             header_up X-Forwarded-Proto {scheme}
         }
     }
     handle /dashboard/* {
-        reverse_proxy localhost:3000 {
+        reverse_proxy ${new_api_upstream} {
             header_up X-Real-IP {remote_host}
             header_up X-Forwarded-For {remote_host}
             header_up X-Forwarded-Proto {scheme}
@@ -1845,7 +1929,7 @@ cat <<PROFILE_BLOCK
     # ===== Default: Reverse Proxy to New API =====
     # Catches any path not matched above (e.g. /login, /panel, /token, etc.)
     handle {
-        reverse_proxy localhost:3000 {
+        reverse_proxy ${new_api_upstream} {
             header_up X-Real-IP {remote_host}
             header_up X-Forwarded-For {remote_host}
             header_up X-Forwarded-Proto {scheme}
@@ -1876,6 +1960,7 @@ $(server_a_caddy_tls_block "${tls_mode}" "${endpoint_host}" "${cloudflare_origin
         format json
     }
 }
+${distribution_site_block}
 $(server_a_ip_http_challenge_block "${public_ip}")
 CADDYEOF
 
@@ -3028,11 +3113,21 @@ deploy_server_a() {
     fi
     echo ""
 
-    # --- Step 6: Install New API ---
-    log_info "[Step 6/14] Installing New API (AI Gateway)..."
-    if ! install_new_api; then
-        log_error "New API installation failed. Aborting."
+    # --- Step 6: New API mode ---
+    log_info "[Step 6/14] New API mode..."
+    local new_api_mode
+    if ! new_api_mode="$(server_a_new_api_mode)"; then
         return 1
+    fi
+    if [[ "${new_api_mode}" == "legacy" ]]; then
+        log_warn "BIFROST_SERVER_A_NEWAPI_MODE=legacy selected. Installing local New API on Server A."
+        if ! install_new_api; then
+            log_error "New API installation failed. Aborting."
+            return 1
+        fi
+    else
+        log_info "Skipping local New API install; Server A is running distribution gateway mode."
+        log_info "New API upstream will be Server B over WireGuard at ${BIFROST_SERVER_B_WG_IP:-10.8.0.2}:3000."
     fi
     echo ""
 

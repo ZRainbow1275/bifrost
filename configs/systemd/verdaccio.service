@@ -1,0 +1,22 @@
+[Unit]
+Description=Verdaccio private npm registry
+Requires=docker.service wg-quick@wg0.service
+After=docker.service wg-quick@wg0.service
+
+[Service]
+Type=simple
+WorkingDirectory=/var/lib/verdaccio
+ExecStartPre=-/usr/bin/docker rm -f verdaccio
+ExecStart=/usr/bin/docker run --name verdaccio \
+    -p 10.8.0.2:4873:4873 \
+    -e VERDACCIO_PUBLIC_URL=https://npm.uuhfn.cloud \
+    -v /var/lib/verdaccio/storage:/verdaccio/storage \
+    -v /var/lib/verdaccio/config:/verdaccio/conf \
+    --user 10001:65533 \
+    verdaccio/verdaccio:6.7.1
+ExecStop=/usr/bin/docker stop verdaccio
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

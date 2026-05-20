@@ -26,6 +26,7 @@
 #   uninstall - uninstall cron 清理边界契约
 #   supply    - 供应链 / trust bootstrap 契约
 #   bifrost   - bifrost-api 管理面合同测试
+#   distribution - Server B 私有分发栈静态/模拟合同测试
 #   all       - 运行全部测试
 # =============================================================================
 
@@ -125,6 +126,9 @@ os.environ["BIFROST_ADMIN_KEY"] = "test-admin"
 os.environ["BIFROST_PUBLIC_BASE_URL"] = "https://api.example.com"
 os.environ["BIFROST_NEWAPI_ADMIN_TOKEN"] = "test-token"
 os.environ["BIFROST_NEWAPI_BASE_URL"] = "http://127.0.0.1:9"
+os.environ["BIFROST_SERVER_B_WG_IP"] = "127.0.0.1"
+os.environ["BIFROST_READONLY_SSH_KEY"] = "/tmp/bifrost-readonly-test-missing.ed25519"
+os.environ["BIFROST_READONLY_USER"] = "bifrost-readonly"
 os.environ.pop("BIFROST_CORS_ALLOW_ORIGINS", None)
 os.environ["BIFROST_CORS_ALLOW_CREDENTIALS"] = "false"
 
@@ -191,6 +195,61 @@ with TestClient(app) as client:
     ensure(
         wrong_admin_key.status_code == 403,
         f"Wrong X-Admin-Key should return 403, got {wrong_admin_key.status_code}",
+    )
+
+    mirrors_missing_admin = client.get("/mirrors/status")
+    ensure(
+        mirrors_missing_admin.status_code == 401,
+        f"Missing X-Admin-Key on /mirrors/status should return 401, got {mirrors_missing_admin.status_code}",
+    )
+
+    mirrors_wrong_admin = client.get(
+        "/mirrors/status",
+        headers={"X-Admin-Key": "wrong-admin-key"},
+    )
+    ensure(
+        mirrors_wrong_admin.status_code == 403,
+        f"Wrong X-Admin-Key on /mirrors/status should return 403, got {mirrors_wrong_admin.status_code}",
+    )
+
+    mirrors_status = client.get(
+        "/mirrors/status",
+        headers={"X-Admin-Key": "test-admin"},
+    )
+    ensure(
+        mirrors_status.status_code == 200,
+        f"/mirrors/status should degrade to 200 with per-service status, got {mirrors_status.status_code}",
+    )
+    mirrors_status_data = mirrors_status.json().get("data", {})
+    ensure(
+        mirrors_status_data.get("verdaccio", {}).get("up") is False,
+        "Unreachable Verdaccio probe should be reported as up=false",
+    )
+    ensure(
+        mirrors_status_data.get("wg_link", {}).get("ssh_configured") is False,
+        "Missing readonly SSH key should be reported as ssh_configured=false",
+    )
+
+    mirrors_logs = client.get(
+        "/mirrors/logs?service=verdaccio&tail=200",
+        headers={"X-Admin-Key": "test-admin"},
+    )
+    ensure(
+        mirrors_logs.status_code == 503,
+        f"/mirrors/logs should fail closed when readonly SSH key is missing, got {mirrors_logs.status_code}",
+    )
+    ensure(
+        "ed25519" not in mirrors_logs.text,
+        "/mirrors/logs error should not leak the configured private key path",
+    )
+
+    mirrors_disk = client.get(
+        "/mirrors/disk",
+        headers={"X-Admin-Key": "test-admin"},
+    )
+    ensure(
+        mirrors_disk.status_code == 503,
+        f"/mirrors/disk should fail closed when readonly SSH key is missing, got {mirrors_disk.status_code}",
     )
 
     cors_preflight = client.options(
@@ -2549,7 +2608,7 @@ EOF
             grep -q "Connectivity Tests" "${output}"
             grep -q "Server A Deployment Incomplete" "${output}"
             grep -q "Exposure Profile  : vpn-first" "${output}"
-            grep -q "New API Initialization" "${output}"
+            grep -q "Skipping local New API install; Server A is running distribution gateway mode" "${output}"
             grep -q "Admin Credential  : Created by you during first-run setup" "${output}"
             ! grep -q "New API Admin Pass : 123456" "${output}"
             ! grep -q "Server A Deployment Complete!" "${output}"
@@ -5595,6 +5654,380 @@ test_docs() {
     done
 }
 
+# --- Test: Server B marketplace skeleton (PR-1, static checks only) ---
+test_marketplace_skeleton_contracts() {
+    info "=== Server B 内部 Claude marketplace skeleton 静态合同测试 ==="
+
+    local required_files=(
+        "scripts/render-marketplace-json.sh"
+        "scripts/validate-marketplace-schema.sh"
+        "tests/test-render-marketplace.sh"
+        "prompts/0519-1/marketplace-bootstrap/bifrost-internal-plugins/.claude-plugin/marketplace.json"
+        "prompts/0519-1/marketplace-bootstrap/bifrost-internal-plugins/LICENSE"
+        "prompts/0519-1/marketplace-bootstrap/bifrost-internal-plugins/NOTICE"
+        "prompts/0519-1/marketplace-bootstrap/bifrost-internal-plugins/README.md"
+        "prompts/0519-1/marketplace-bootstrap/bifrost-internal-plugins/.gitignore"
+        "prompts/0519-1/marketplace-bootstrap/bifrost-internal-plugins/plugins/hello-world-skill/.claude-plugin/plugin.json"
+        "prompts/0519-1/marketplace-bootstrap/bifrost-internal-plugins/plugins/hello-world-skill/manifest.yaml"
+        "prompts/0519-1/marketplace-bootstrap/bifrost-internal-plugins/plugins/hello-world-skill/skills/hello/SKILL.md"
+        "prompts/0519-1/marketplace-bootstrap/bifrost-internal-plugins/plugins/hello-world-skill/LICENSE"
+        "prompts/0519-1/marketplace-bootstrap/bifrost-internal-plugins/plugins/hello-world-skill/README.md"
+    )
+    local file
+    for file in "${required_files[@]}"; do
+        if [[ -f "${SCRIPT_DIR}/${file}" ]]; then
+            record_pass "marketplace skeleton file exists: ${file}"
+        else
+            record_fail "marketplace skeleton file missing: ${file}"
+        fi
+    done
+
+    local sh
+    for sh in scripts/render-marketplace-json.sh \
+              scripts/validate-marketplace-schema.sh \
+              tests/test-render-marketplace.sh; do
+        if [[ -f "${SCRIPT_DIR}/${sh}" ]] && bash -n "${SCRIPT_DIR}/${sh}" 2>/dev/null; then
+            record_pass "bash -n: ${sh}"
+        else
+            record_fail "bash -n: ${sh}"
+        fi
+    done
+
+    local seed_json="${SCRIPT_DIR}/prompts/0519-1/marketplace-bootstrap/bifrost-internal-plugins/.claude-plugin/marketplace.json"
+    if command -v jq >/dev/null 2>&1; then
+        if bash "${SCRIPT_DIR}/scripts/validate-marketplace-schema.sh" "${seed_json}" >/dev/null 2>&1; then
+            record_pass "validate-marketplace-schema.sh accepts seed marketplace.json"
+        else
+            record_fail "validate-marketplace-schema.sh rejected seed marketplace.json"
+        fi
+
+        local seed_name seed_owner_type seed_src
+        seed_name="$(jq -r .name "${seed_json}" 2>/dev/null)"
+        seed_owner_type="$(jq -r ".owner | type" "${seed_json}" 2>/dev/null)"
+        seed_src="$(jq -r ".plugins[0].source" "${seed_json}" 2>/dev/null)"
+        if [[ "${seed_name}" == "bifrost-internal" ]]; then
+            record_pass "seed marketplace.json .name == bifrost-internal"
+        else
+            record_fail "seed marketplace.json .name == '${seed_name}' (expected bifrost-internal)"
+        fi
+        if [[ "${seed_owner_type}" == "object" ]]; then
+            record_pass "seed marketplace.json .owner is object (spec.md C2)"
+        else
+            record_fail "seed marketplace.json .owner is '${seed_owner_type}' (expected object)"
+        fi
+        if [[ "${seed_src}" == "./plugins/hello-world-skill" ]]; then
+            record_pass "seed marketplace.json .plugins[0].source uses relative-path string (spec.md 4.1)"
+        else
+            record_fail "seed marketplace.json .plugins[0].source == '${seed_src}' (expected ./plugins/hello-world-skill)"
+        fi
+        if grep -q "git+" "${seed_json}"; then
+            record_fail "seed marketplace.json contains forbidden git+ URL prefix (spec.md C3)"
+        else
+            record_pass "seed marketplace.json has no git+ URL prefix (spec.md C3)"
+        fi
+    else
+        record_fail "jq missing; cannot run schema validator (install jq to run this test)"
+    fi
+}
+
+# --- Test: Server B private distribution contracts ---
+test_distribution_contracts() {
+    info "=== Server B 私有分发栈合同测试 ==="
+
+    local required_files=(
+        "configs/verdaccio/config.yaml.tpl"
+        "configs/new-api/docker-compose.yml.tpl"
+        "configs/new-api/pg-init.sh"
+        "configs/caddy/Caddyfile-b-distribution.tpl"
+        "configs/nftables/bifrost-distribution.nft.tpl"
+        "configs/systemd/verdaccio.service"
+        "configs/systemd/git-mirror@.service"
+        "configs/systemd/git-mirror@.timer"
+        "configs/systemd/caddy-wg-after.conf"
+        "configs/restic/restic-to-a.service"
+        "configs/restic/restic-to-a.timer"
+        "scripts/git-mirror-sync.sh"
+        "scripts/bifrost-readonly-router.sh"
+        "scripts/bifrost-restic-backup.sh"
+        "scripts/e2e-distribution-rehearsal.sh"
+        "scripts/legacy-vps-final-snapshot.ps1"
+        "configs/systemd/marketplace-render.path"
+        "configs/systemd/marketplace-render.service"
+        "configs/systemd/upstream-schema-check.timer"
+        "configs/systemd/upstream-schema-check.service"
+        "scripts/check-upstream-schema.sh"
+    )
+    local file
+    for file in "${required_files[@]}"; do
+        if [[ -f "${SCRIPT_DIR}/${file}" ]]; then
+            record_pass "distribution 文件存在: ${file}"
+        else
+            record_fail "distribution 文件缺失: ${file}"
+        fi
+    done
+
+    if grep -Fq 'sslmode=disable' "${SCRIPT_DIR}/configs/new-api/docker-compose.yml.tpl" && \
+       grep -Fq 'condition: service_healthy' "${SCRIPT_DIR}/configs/new-api/docker-compose.yml.tpl" && \
+       grep -Fq 'redis-server' "${SCRIPT_DIR}/configs/new-api/docker-compose.yml.tpl" && \
+       grep -Fq -- '--appendonly' "${SCRIPT_DIR}/configs/new-api/docker-compose.yml.tpl"; then
+        record_pass "NewAPI compose 固化 PG sslmode/healthcheck/Redis AOF"
+    else
+        record_fail "NewAPI compose 缺少 PG sslmode/healthcheck/Redis AOF 合同"
+    fi
+
+    if grep -Fq 'VERDACCIO_PUBLIC_URL=https://npm.uuhfn.cloud' "${SCRIPT_DIR}/configs/systemd/verdaccio.service" && \
+       grep -Fq 'Requires=docker.service wg-quick@wg0.service' "${SCRIPT_DIR}/configs/systemd/verdaccio.service" && \
+       ! grep -Fq 'VERDACCIO_BOOTSTRAP_PASSWORD' "${SCRIPT_DIR}/configs/systemd/verdaccio.service"; then
+        record_pass "Verdaccio unit 绑定 wg0 且不暴露 bootstrap 密码"
+    else
+        record_fail "Verdaccio unit 未满足 wg0/public URL/secret 合同"
+    fi
+
+    if grep -Fq 'git push disabled on mirror' "${SCRIPT_DIR}/configs/caddy/Caddyfile-b-distribution.tpl" && \
+       grep -Fq 'env QUERY_STRING' "${SCRIPT_DIR}/configs/caddy/Caddyfile-b-distribution.tpl" && \
+       grep -Fq 'env CONTENT_LENGTH' "${SCRIPT_DIR}/configs/caddy/Caddyfile-b-distribution.tpl"; then
+        record_pass "Server B Caddy git mirror 禁 push 且 FastCGI env 完整"
+    else
+        record_fail "Server B Caddy git mirror 缺少只读或 FastCGI env 合同"
+    fi
+
+    if grep -Fq 'table inet filter' "${SCRIPT_DIR}/configs/nftables/bifrost-distribution.nft.tpl" && \
+       grep -Fq 'policy drop' "${SCRIPT_DIR}/configs/nftables/bifrost-distribution.nft.tpl" && \
+       grep -Fq 'iifname != "wg0" tcp dport { 3000, 4873, 8081, 8082 } drop' "${SCRIPT_DIR}/configs/nftables/bifrost-distribution.nft.tpl" && \
+       grep -Fq 'DOCKER-USER' "${SCRIPT_DIR}/scripts/server-b.sh"; then
+        record_pass "nftables 单表 drop + DOCKER-USER 防公网泄漏"
+    else
+        record_fail "nftables/DOCKER-USER 防泄漏合同缺失"
+    fi
+
+    if grep -Fq -- '--enable-distribution' "${SCRIPT_DIR}/scripts/server-b.sh" && \
+       grep -Fq -- '--disable-distribution' "${SCRIPT_DIR}/scripts/server-b.sh" && \
+       grep -Fq -- '--rotate-bootstrap-pwd' "${SCRIPT_DIR}/scripts/server-b.sh" && \
+       grep -Fq '_distribution_step_done' "${SCRIPT_DIR}/scripts/server-b.sh" && \
+       ! grep -E 'VERDACCIO_BOOTSTRAP_PASSWORD.*_distribution_state_set|_distribution_state_set.*VERDACCIO_BOOTSTRAP_PASSWORD' "${SCRIPT_DIR}/scripts/server-b.sh" >/dev/null; then
+        record_pass "server-b.sh distribution 入口/step-state/secret 边界存在"
+    else
+        record_fail "server-b.sh distribution 入口/step-state/secret 边界缺失"
+    fi
+
+    if grep -Fq 'command="/usr/local/bin/bifrost-readonly-router.sh \${SSH_ORIGINAL_COMMAND}"' "${SCRIPT_DIR}/scripts/server-b.sh" && \
+       grep -Fq 'logs:verdaccio)' "${SCRIPT_DIR}/scripts/bifrost-readonly-router.sh" && \
+       grep -Fq 'logs:new-api' "${SCRIPT_DIR}/scripts/bifrost-readonly-router.sh" && \
+       grep -Fq 'journalctl -u "git-mirror@${repo}" --no-pager -n 200' "${SCRIPT_DIR}/scripts/bifrost-readonly-router.sh" && \
+       grep -Fq 'forbidden' "${SCRIPT_DIR}/scripts/bifrost-readonly-router.sh"; then
+        record_pass "bifrost-readonly forced-command 白名单合同存在"
+    else
+        record_fail "bifrost-readonly forced-command 白名单合同缺失"
+    fi
+
+    if grep -Fq 'check_distribution()' "${SCRIPT_DIR}/scripts/diagnostics.sh" && \
+       grep -Fq -- '--check distribution' "${SCRIPT_DIR}/scripts/diagnostics.sh" && \
+       grep -Fq 'VERDACCIO_PUBLIC_URL=https://npm.uuhfn.cloud' "${SCRIPT_DIR}/scripts/diagnostics.sh" && \
+       grep -Fq 'sslmode=disable' "${SCRIPT_DIR}/scripts/diagnostics.sh"; then
+        record_pass "diagnostics.sh 支持 --check distribution 且覆盖关键合同"
+    else
+        record_fail "diagnostics.sh distribution 检查缺失"
+    fi
+
+    if grep -Fq '(server_b_proxy)' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -Fq 'api.{{DOMAIN}}' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -Fq 'npm.{{DOMAIN}}' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -Fq 'files.{{DOMAIN}}' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -Fq 'http://10.8.0.2:3000' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -Fq 'http://10.8.0.2:4873' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl"; then
+        record_pass "Server A Caddy 模板包含 api/npm/files 到 Server B 的反代"
+    else
+        record_fail "Server A Caddy 模板缺少 api/npm/files 到 Server B 的反代"
+    fi
+
+    if grep -Fq 'server_a_new_api_mode()' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -Fq 'BIFROST_SERVER_A_NEWAPI_MODE' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -Fq 'BIFROST_DISTRIBUTION_DOMAIN' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -Fq 'api.*|npm.*|files.*|legacy.*)' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -Fq 'distribution_domain="${domain#*.}"' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       ! grep -Fq 'health_uri /-/ping' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       ! grep -Fq 'health_uri /-/ping' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -Fq 'Skipping local New API install; Server A is running distribution gateway mode' "${SCRIPT_DIR}/scripts/server-a.sh"; then
+        record_pass "Server A NewAPI 默认路径已转 distribution/legacy 显式模式且分发域名/健康检查合同正确"
+    else
+        record_fail "Server A NewAPI distribution/legacy 模式或分发反代合同缺失"
+    fi
+
+    # === spec.md PR-2 contract assertions (marketplace + step 07 + admin-router) ===
+    if grep -Fq '@plugins_status path /plugins/state.json /plugins/LICENSE.md /plugins/NOTICE.md' "${SCRIPT_DIR}/configs/caddy/Caddyfile-b-distribution.tpl"; then
+        record_pass "Caddyfile-b-distribution.tpl contains @plugins_status matcher (spec 3.3)"
+    else
+        record_fail "Caddyfile-b-distribution.tpl missing @plugins_status matcher (spec 3.3)"
+    fi
+
+    if grep -Fq '_distribution_prepare_marketplace_dirs' "${SCRIPT_DIR}/scripts/server-b.sh" \
+       && grep -Fq '_distribution_init_marketplace_bare' "${SCRIPT_DIR}/scripts/server-b.sh" \
+       && grep -Fq '_distribution_init_upstream_schema_baseline' "${SCRIPT_DIR}/scripts/server-b.sh" \
+       && grep -Fq '_distribution_render_marketplace_license_notice' "${SCRIPT_DIR}/scripts/server-b.sh" \
+       && grep -Fq '_distribution_render_marketplace_scripts' "${SCRIPT_DIR}/scripts/server-b.sh"; then
+        record_pass "server-b.sh contains all 5 PR-2 marketplace helper definitions (spec 9.2)"
+    else
+        record_fail "server-b.sh missing one or more PR-2 marketplace helper definitions (spec 9.2)"
+    fi
+
+    if grep -Fq 'step_id="07_render_marketplace"' "${SCRIPT_DIR}/scripts/server-b.sh"; then
+        record_pass "server-b.sh enable_distribution injects step 07_render_marketplace (spec 9.1)"
+    else
+        record_fail "server-b.sh missing step 07_render_marketplace (spec 9.1)"
+    fi
+
+    if grep -Fq 'systemctl disable --now marketplace-render.path' "${SCRIPT_DIR}/scripts/server-b.sh" \
+       && grep -Fq 'systemctl disable --now upstream-schema-check.timer' "${SCRIPT_DIR}/scripts/server-b.sh"; then
+        record_pass "disable_distribution stops marketplace + upstream-schema-check (spec 9.4 M12)"
+    else
+        record_fail "disable_distribution missing marketplace + upstream-schema-check shutdown (spec 9.4 M12)"
+    fi
+
+    # spec.md C6 anti-regression: bifrost-internal-plugins must NOT appear in git-mirror-sync.sh.
+    if ! grep -Fq 'bifrost-internal-plugins' "${SCRIPT_DIR}/scripts/git-mirror-sync.sh"; then
+        record_pass "git-mirror-sync.sh has no bifrost-internal-plugins arm (spec C6 anti-regression)"
+    else
+        record_fail "git-mirror-sync.sh contains bifrost-internal-plugins arm -- violates spec C6"
+    fi
+
+    if grep -Fq 'marketplace:status)' "${SCRIPT_DIR}/scripts/bifrost-readonly-router.sh" \
+       && grep -Fq 'marketplace:list-json)' "${SCRIPT_DIR}/scripts/bifrost-readonly-router.sh" \
+       && grep -Fq 'marketplace:disk-report)' "${SCRIPT_DIR}/scripts/bifrost-readonly-router.sh" \
+       && grep -Fq 'logs:marketplace-render)' "${SCRIPT_DIR}/scripts/bifrost-readonly-router.sh" \
+       && grep -Fq 'logs:upstream-schema-check)' "${SCRIPT_DIR}/scripts/bifrost-readonly-router.sh"; then
+        record_pass "bifrost-readonly-router.sh contains 5 marketplace case arms (spec PR-2 section 10)"
+    else
+        record_fail "bifrost-readonly-router.sh missing marketplace case arms (spec PR-2 section 10)"
+    fi
+
+    # spec.md M16: logs:git-mirror inner allowlist must include bifrost-internal-plugins.
+    if grep -Fq 'claude-for-legal-zh|bifrost-internal-plugins)' "${SCRIPT_DIR}/scripts/bifrost-readonly-router.sh"; then
+        record_pass "bifrost-readonly-router.sh logs:git-mirror inner allowlist contains bifrost-internal-plugins (spec M16)"
+    else
+        record_fail "bifrost-readonly-router.sh logs:git-mirror inner allowlist missing bifrost-internal-plugins (spec M16)"
+    fi
+
+    if grep -Fq 'PathModified=/var/lib/git-mirrors/bifrost-internal-plugins.git/packed-refs' "${SCRIPT_DIR}/configs/systemd/marketplace-render.path"; then
+        record_pass "marketplace-render.path watches packed-refs (spec 4.3 M5)"
+    else
+        record_fail "marketplace-render.path missing packed-refs PathModified"
+    fi
+
+    if grep -Fq 'Requires=network-online.target' "${SCRIPT_DIR}/configs/systemd/marketplace-render.service" \
+       && grep -Fq 'ExecStart=/usr/local/bin/render-marketplace-json.sh bifrost-internal-plugins' "${SCRIPT_DIR}/configs/systemd/marketplace-render.service"; then
+        record_pass "marketplace-render.service contains network-online + ExecStart (spec 4.3 M7)"
+    else
+        record_fail "marketplace-render.service missing network-online / ExecStart"
+    fi
+
+    if grep -Fq 'Requires=network-online.target' "${SCRIPT_DIR}/configs/systemd/upstream-schema-check.service" \
+       && grep -Fq 'ExecStart=/usr/local/bin/check-upstream-schema.sh' "${SCRIPT_DIR}/configs/systemd/upstream-schema-check.service"; then
+        record_pass "upstream-schema-check.service contains network-online + ExecStart (spec 4.3 M7)"
+    else
+        record_fail "upstream-schema-check.service missing network-online / ExecStart"
+    fi
+
+    if grep -Fq 'OnCalendar=daily' "${SCRIPT_DIR}/configs/systemd/upstream-schema-check.timer"; then
+        record_pass "upstream-schema-check.timer contains OnCalendar=daily (spec 4.3)"
+    else
+        record_fail "upstream-schema-check.timer missing OnCalendar=daily"
+    fi
+
+    if grep -Eq 'LICENSE-OK|LICENSE-BASELINE-INIT|UPSTREAM-CHANGED' "${SCRIPT_DIR}/scripts/check-upstream-schema.sh"; then
+        record_pass "check-upstream-schema.sh emits AC-12 status code literals (spec 5.4)"
+    else
+        record_fail "check-upstream-schema.sh missing AC-12 status code literals (spec 5.4)"
+    fi
+
+    local sh_check
+    for sh_check in scripts/check-upstream-schema.sh scripts/bifrost-readonly-router.sh; do
+        if [[ -f "${SCRIPT_DIR}/${sh_check}" ]] && bash -n "${SCRIPT_DIR}/${sh_check}" 2>/dev/null; then
+            record_pass "bash -n: ${sh_check}"
+        else
+            record_fail "bash -n: ${sh_check}"
+        fi
+    done
+
+    local temp_root
+    temp_root="$(mktemp -d)"
+    if BIFROST_TRACE_COMMON_LOAD=0 \
+        SERVER_B_SH="${SCRIPT_DIR}/scripts/server-b.sh" \
+        TMP_ROOT="${temp_root}" \
+        bash -c '
+            set -euo pipefail
+            source "$SERVER_B_SH"
+            state_file="${TMP_ROOT}/distribution-state.env"
+            step_file="${TMP_ROOT}/distribution-steps.txt"
+            touch "${step_file}"
+
+            detect_system() { PKG_MGR=apt; }
+            _install_base_dependencies() { return 0; }
+            _distribution_require_wg0() { return 0; }
+            _distribution_ensure_docker() { return 0; }
+            _install_caddy() { return 0; }
+            _distribution_ensure_caddy_service() { return 0; }
+            _distribution_ensure_user() { return 0; }
+            install_packages() { return 0; }
+            command() {
+                if [[ "${1:-}" == "-v" ]]; then
+                    return 0
+                fi
+                builtin command "$@"
+            }
+            get_public_ip() { echo "203.0.113.44"; }
+            _distribution_state_set() { printf "%s=%s\n" "$1" "$2" >> "${state_file}"; }
+            _distribution_state_get() { grep -E "^$1=" "${state_file}" 2>/dev/null | tail -n1 | cut -d= -f2-; }
+            _distribution_step_done() {
+                case "$1" in
+                    08_*|09_*|10_*|11_*|12_*|13_*) return 0 ;;
+                esac
+                grep -Fxq "$1" "${step_file}"
+            }
+            _distribution_mark_step_done() { printf "%s\n" "$1" >> "${step_file}"; }
+            _distribution_write_verdaccio_config() { echo render_verdaccio >> "${TMP_ROOT}/calls"; }
+            _distribution_write_new_api_env() { echo render_new_api_env >> "${TMP_ROOT}/calls"; }
+            _distribution_render_new_api_compose() { echo render_new_api_compose >> "${TMP_ROOT}/calls"; }
+            _distribution_render_caddy() { echo render_caddy >> "${TMP_ROOT}/calls"; }
+            _distribution_render_nftables() { echo render_nftables >> "${TMP_ROOT}/calls"; }
+            _distribution_render_systemd_units() { echo render_systemd >> "${TMP_ROOT}/calls"; }
+            _distribution_render_git_mirror_script() { echo render_git_script >> "${TMP_ROOT}/calls"; }
+            _distribution_render_readonly_router() { echo render_readonly_router >> "${TMP_ROOT}/calls"; }
+            _distribution_render_restic_script() { echo render_restic_script >> "${TMP_ROOT}/calls"; }
+            _distribution_render_marketplace_scripts() { echo render_marketplace_scripts >> "${TMP_ROOT}/calls"; }
+            _distribution_prepare_marketplace_dirs() { echo prepare_marketplace_dirs >> "${TMP_ROOT}/calls"; }
+            _distribution_init_marketplace_bare() { echo init_marketplace_bare >> "${TMP_ROOT}/calls"; }
+            _distribution_init_upstream_schema_baseline() { echo init_upstream_schema_baseline >> "${TMP_ROOT}/calls"; }
+            _distribution_configure_readonly_ssh() { _distribution_state_set BIFROST_READONLY_SSH_CONFIGURED 0; }
+            _distribution_write_restic_env() { echo render_restic_env >> "${TMP_ROOT}/calls"; }
+            _distribution_init_verdaccio_bootstrap() { _distribution_state_set VERDACCIO_BOOTSTRAP_INITIALIZED 1; }
+            _distribution_verify() { return 0; }
+            _distribution_prepare_dirs() { return 0; }
+            _distribution_apply_docker_user_rules() { return 0; }
+            nft() { return 0; }
+            systemctl() { return 0; }
+            docker() { return 0; }
+
+            enable_distribution >/tmp/enable1.out
+            enable_distribution >/tmp/enable2.out
+            grep -Fq "DISTRIBUTION_ENABLED=1" "${state_file}"
+            grep -Fq "BIFROST_READONLY_SSH_CONFIGURED=0" "${state_file}"
+            ! grep -Fq "VERDACCIO_BOOTSTRAP_PASSWORD" "${state_file}"
+            [[ "$(grep -c "^render_verdaccio$" "${TMP_ROOT}/calls")" -eq 1 ]]
+            # spec.md PR-2 M19: step 07 must mark complete AND each step-07 helper
+            # must execute exactly once across two enable_distribution invocations.
+            grep -Fxq "07_render_marketplace" "${step_file}"
+            [[ "$(grep -c "^prepare_marketplace_dirs$" "${TMP_ROOT}/calls")" -eq 1 ]]
+            [[ "$(grep -c "^init_marketplace_bare$" "${TMP_ROOT}/calls")" -eq 1 ]]
+            [[ "$(grep -c "^init_upstream_schema_baseline$" "${TMP_ROOT}/calls")" -eq 1 ]]
+            [[ "$(grep -c "^render_marketplace_scripts$" "${TMP_ROOT}/calls")" -eq 1 ]]
+        '; then
+        record_pass "enable_distribution mock 验证 step-state 幂等与 secret 不落 state"
+    else
+        record_fail "enable_distribution mock 验证失败"
+    fi
+    rm -rf "${temp_root}"
+}
+
 # --- Test: Bifrost API contracts ---
 test_bifrost_api_contracts() {
     info "=== Bifrost API 合同测试 ==="
@@ -6332,6 +6765,8 @@ main() {
         panel)      test_server_b_panel_contracts; test_bridge_server_b_panel_contracts ;;
         docs)       test_docs ;;
         bifrost)    test_bifrost_api_contracts; test_bifrost_shell_contracts ;;
+        distribution) test_distribution_contracts ;;
+        marketplace_skeleton) test_marketplace_skeleton_contracts ;;
         docker)     test_in_container ;;
         all)
             test_syntax
@@ -6430,10 +6865,14 @@ main() {
             echo ""
             test_bifrost_shell_contracts
             echo ""
+            test_distribution_contracts
+            echo ""
+            test_marketplace_skeleton_contracts
+            echo ""
             test_in_container
             ;;
         *)
-            echo "用法: $0 [syntax|functions|configs|security|mihomo|xray|deploy|keepalive|multi|user|whitelist|monitoring|diagnostics|update|backup|uninstall|supply|panel|ports|menu|docs|bifrost|docker|all]"
+            echo "用法: $0 [syntax|functions|configs|security|mihomo|xray|deploy|keepalive|multi|user|whitelist|monitoring|diagnostics|update|backup|uninstall|supply|panel|ports|menu|docs|bifrost|distribution|marketplace_skeleton|docker|all]"
             exit 1
             ;;
     esac

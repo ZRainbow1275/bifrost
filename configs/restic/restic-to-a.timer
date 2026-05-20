@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Server B distribution backup to Server A
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=300
+Persistent=true
+Unit=restic-to-a.service
+
+[Install]
+WantedBy=timers.target

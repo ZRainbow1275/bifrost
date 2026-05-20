@@ -586,6 +586,160 @@ export BIFROST_NEW_API_IMAGE="calciumion/new-api:<fixed-version-or-digest>"
 
 ---
 
+## Server B 私有分发栈
+
+`prompts/0519-1` 对应的分发栈把 Verdaccio、静态 files、git mirror、NewAPI、PostgreSQL、Redis 下沉到 Server B。Server A 默认转为纯入口网关：TLS 终止、WireGuard hub、Caddy reverse_proxy、bifrost-api 管理面。团队成员仍访问 `https://api.uuhfn.cloud`、`https://npm.uuhfn.cloud`、`https://files.uuhfn.cloud`，不会直接接触 Server B。
+
+### 部署前置条件
+
+1. Server A 已有 WireGuard hub，wg0 地址为 `10.8.0.1/24`。
+2. Server B 已加入同一 WireGuard 网络，wg0 地址为 `10.8.0.2/24`，并能从 A 访问。
+3. DNS 灰云或等价直连：`api.uuhfn.cloud`、`npm.uuhfn.cloud`、`files.uuhfn.cloud` 指向 Server A 公网 IP。
+4. Server B 需要 Docker、Caddy、nftables、fcgiwrap、restic；`server-b.sh --enable-distribution` 会安装/渲染这些依赖。
+5. 若要启用 bifrost-api `/mirrors/logs` 与 `/mirrors/disk`，先生成专用只读 SSH key，不复用 root 私钥。
+
+### Server B 启用
+
+```bash
+ssh root@<SERVER_B_PUBLIC_IP>
+cd /opt/bifrost
+
+# 可选：提供 bifrost-api 只读日志通道公钥
+export BIFROST_READONLY_SSH_PUBLIC_KEY="$(cat /etc/bifrost-api/ssh/bifrost-readonly.ed25519.pub)"
+
+bash scripts/server-b.sh --enable-distribution
+bash scripts/diagnostics.sh --check distribution
+```
+
+脚本会执行这些动作：
+
+- 检查 `wg0` 已存在，避免服务误绑公网。
+- 渲染 Verdaccio、NewAPI compose、Caddy、nftables、systemd、restic 配置。
+- 创建 `git-mirror` 与 `bifrost-readonly` 专用用户。
+- 写入 `DOCKER-USER` 阻断规则，防止 Docker 端口绕过 nftables 从公网泄露。
+- 初始化 Verdaccio `team` bootstrap 账号。密码只显示一次，并写入 `/root/.verdaccio-bootstrap-pwd.txt`，不会写入 deploy state。
+- 启动 `git-mirror@claude-for-legal-zh.timer`、`verdaccio.service`、`restic-to-a.timer`。
+
+重复执行 `--enable-distribution` 是幂等的；已完成 step 会通过 `/var/lib/bifrost/distribution.step-state` 跳过。
+
+### Server A 入口模式
+
+Server A 现在默认是 distribution gateway，不再默认本地安装 NewAPI：
+
+```bash
+export BIFROST_SERVER_A_NEWAPI_MODE=distribution  # 默认值，可不设置
+export BIFROST_SERVER_B_WG_IP=10.8.0.2
+export BIFROST_DISTRIBUTION_DOMAIN=uuhfn.cloud     # 可选；未设置时从主域名推导
+sudo ./install.sh
+# 选择「2. 部署国内服务器 (Server A)」
+```
+
+Caddy 会把：
+
+- `api.<domain>` 反代到 `http://10.8.0.2:3000`
+- `npm.<domain>` 反代到 `http://10.8.0.2:4873`
+- `files.<domain>` 反代到 `http://10.8.0.2:8081`
+- `files.<domain>/git/*` 反代到 `http://10.8.0.2:8082`
+
+如确需旧模式在 Server A 本机安装 NewAPI，必须显式选择：
+
+```bash
+export BIFROST_SERVER_A_NEWAPI_MODE=legacy
+sudo ./install.sh
+```
+
+### bifrost-api 只读镜像源面板
+
+在 Server A 的 bifrost-api 环境中配置：
+
+```bash
+export BIFROST_SERVER_B_WG_IP=10.8.0.2
+export BIFROST_READONLY_SSH_KEY=/etc/bifrost-api/ssh/bifrost-readonly.ed25519
+export BIFROST_READONLY_USER=bifrost-readonly
+```
+
+可用只读接口：
+
+```bash
+curl -H "X-Admin-Key: <admin-key>" https://<domain>/manage/mirrors/status
+curl -H "X-Admin-Key: <admin-key>" "https://<domain>/manage/mirrors/logs?service=verdaccio&tail=200"
+curl -H "X-Admin-Key: <admin-key>" https://<domain>/manage/mirrors/disk
+```
+
+`/mirrors/status` 在 Server B 不可达时会返回各服务 `up=false`，不会把 SSH 私钥路径或底层堆栈泄露给客户端。`/mirrors/logs` 和 `/mirrors/disk` 依赖专用 forced-command SSH key，缺失时 fail closed。
+
+### 切流验收
+
+本仓库提供脚本和合同测试，但真实生产切流必须在两台服务器上执行：
+
+```bash
+# 本地或运维机 dry-run，先看命令列表
+bash scripts/e2e-distribution-rehearsal.sh
+
+# 维护窗口内真实执行
+BIFROST_SERVER_A_HOST=<server-a-ssh-host> \
+BIFROST_SERVER_B_HOST=<server-b-ssh-host> \
+BIFROST_DOMAIN=uuhfn.cloud \
+bash scripts/e2e-distribution-rehearsal.sh --execute
+```
+
+真实验收至少包括：
+
+- `bash scripts/diagnostics.sh --check distribution` 在 Server B 全 PASS。
+- `curl -I https://npm.uuhfn.cloud/` 返回 Verdaccio。
+- `git ls-remote https://files.uuhfn.cloud/git/claude-for-legal-zh.git` 成功。
+- `curl https://api.uuhfn.cloud/api/status` 返回 NewAPI 状态。
+- `nmap -p- <SERVER_B_PUBLIC_IP>` 只剩 `22/tcp` 与 `51820/udp` 这类预期入口。
+- `restic snapshots` 在 Server A 备份仓库能看到 Server B 来源快照。
+
+### 回滚
+
+如果切流失败：
+
+```bash
+# Server A: 回退 Caddy 到上一份配置或 legacy NewAPI 模式
+cp /etc/caddy/Caddyfile.bak.<timestamp> /etc/caddy/Caddyfile
+systemctl reload caddy || systemctl restart caddy
+
+# Server B: 停止分发服务但保留数据
+bash scripts/server-b.sh --disable-distribution
+
+# DNS: 如仍保留 Windows VPS 冷备，可临时把 npm/files/api 记录切回旧入口
+```
+
+不要在故障窗口直接删除 `/var/lib/verdaccio`、`/var/lib/new-api-pg`、`/var/lib/git-mirrors` 或 `/var/lib/dist`。这些目录是回滚和事后取证的数据源。
+
+### 团队 NewAPI 账号重建
+
+本次 NewAPI 是绿启策略，不迁移旧库。切流后：
+
+1. 管理员在新 NewAPI 首次初始化页面创建强密码管理员账号。
+2. 重新创建团队成员账号和 token，旧 Windows VPS / Server A legacy token 作废。
+3. 把新的 `base_url=https://api.uuhfn.cloud/v1` 与 token 发给成员。
+4. 成员替换 cc-switch、Claude Code、OpenAI-compatible 客户端中的 key。
+5. 保留旧 NewAPI 最终快照 30 天，仅用于审计和找回配置，不再接受新写入。
+
+### Windows VPS 退役
+
+迁移稳定后执行最终快照脚本：
+
+```powershell
+pwsh -File scripts/legacy-vps-final-snapshot.ps1 `
+  -VerdaccioDir C:\verdaccio\storage `
+  -CaddyDir C:\caddy `
+  -GitMirrorDir C:\git-mirrors `
+  -OutputDir C:\bifrost-final-snapshot
+```
+
+建议节奏：
+
+- T+0：B 上分发栈完成，DNS 指向 A。
+- T+7：确认 npm/files/git/NewAPI/restic 连续稳定，拉取 Windows VPS final snapshot。
+- T+8：关机退订 Windows VPS。
+- T+30：清理 final snapshot 下载链接和旧 token 记录。
+
+---
+
 ## 注意事项
 
 1. **安全**：定期更换 SSH 密钥和管理面板密码

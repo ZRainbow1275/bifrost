@@ -1,0 +1,72 @@
+################################################################################
+# Caddyfile additions for claude-for-legal-ZH mirror
+#
+# Merge the changes below into your existing C:\caddy\Caddyfile.
+#
+# WHAT TO DO:
+#   - Locate your existing `files.uuhfn.cloud { ... }` block.
+#   - REPLACE that block with the version below (it keeps file_server + browse
+#     on /, adds a dedicated /git/* handler that serves bare git repos from
+#     C:\caddy\git via dumb HTTP).
+#
+# After editing, reload Caddy without restarting:
+#
+#   curl -X POST "http://127.0.0.1:2019/load" \
+#        -H "Content-Type: text/caddyfile" \
+#        --data-binary "@C:\caddy\Caddyfile"
+#
+# Or use:  caddy reload --config C:\caddy\Caddyfile
+################################################################################
+
+files.uuhfn.cloud {
+    # Cloudflare Origin CA wildcard cert (already covers files.uuhfn.cloud)
+    tls C:\caddy\certs\uuhfn-cloud-origin.pem C:\caddy\certs\uuhfn-cloud-origin.key
+
+    encode gzip
+
+    # ---- bare git repos at /git/* -----------------------------------------
+    # Strip /git from the URL, then serve from C:\caddy\git so that
+    #   https://files.uuhfn.cloud/git/claude-for-legal-ZH.git/info/refs
+    # resolves to
+    #   C:\caddy\git\claude-for-legal-ZH.git\info\refs
+    handle_path /git/* {
+        root * C:\caddy\git
+
+        # Force correct Content-Type for git refs/packs (file_server's default
+        # guess is fine for binaries but info/refs is text)
+        @gitrefs path */info/refs
+        header @gitrefs Content-Type "application/x-git-upload-pack-advertisement"
+
+        @packfiles path *.pack
+        header @packfiles Content-Type "application/x-git-pack"
+
+        @idxfiles path *.idx
+        header @idxfiles Content-Type "application/x-git-pack-idx"
+
+        # Cache headers — git clients re-fetch info/refs each time anyway
+        header Cache-Control "no-cache, max-age=0, must-revalidate"
+
+        file_server {
+            # NEVER list directory contents of a bare repo
+            # (browse omitted -> 404 on directories without index.html)
+        }
+    }
+
+    # ---- default static distribution at / ---------------------------------
+    handle {
+        root * C:\caddy\dist
+        file_server {
+            browse
+            hide .* .git
+        }
+    }
+
+    # ---- access logs ------------------------------------------------------
+    log {
+        output file C:\caddy\logs\files-access.log {
+            roll_size 50mb
+            roll_keep 10
+        }
+        format json
+    }
+}

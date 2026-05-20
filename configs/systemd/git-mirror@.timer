@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily mirror trigger for %i
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+RandomizedDelaySec=120
+Persistent=true
+Unit=git-mirror@%i.service
+
+[Install]
+WantedBy=timers.target

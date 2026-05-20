@@ -1,0 +1,9 @@
+[Unit]
+Description=Back up Server B distribution data to Server A via restic
+Requires=network-online.target wg-quick@wg0.service
+After=network-online.target wg-quick@wg0.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/bifrost/restic-to-a.env
+ExecStart=/usr/local/bin/bifrost-restic-backup.sh

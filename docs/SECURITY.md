@@ -94,6 +94,78 @@ Bifrost 支持三种暴露面 profile，并默认采用 `vpn-first`：
 3. Server B 的 3x-ui 直接端口默认不得开放；`/xui-panel/` 在 `vpn-first` 下必须受 VPN/私网/来源白名单保护。
 4. `New API` 镜像应使用固定版本或 digest；`latest` 只能在 `lab` 或显式 `BIFROST_ALLOW_UNPINNED=1` 时临时使用。
 
+### Server B 私有分发栈安全边界
+
+分发栈启用后，Server B 同时承载 Verdaccio、NewAPI、PostgreSQL、Redis、git mirror、静态 files 和 restic 备份任务。它的安全边界必须按“公网最小入口 + wg0 私网服务 + 专用低权只读通道”执行。
+
+| 面 | 允许 | 禁止 |
+|----|------|------|
+| Server B 公网入站 | `22/tcp` 双通道维护入口、`51820/udp` WireGuard、既有 Xray Reality 端口 | `3000/4873/8081/8082` 从公网直接访问 |
+| Server B wg0 入站 | A 和白名单 peer 访问 `3000/4873/8081/8082` | 团队成员绕过 A 直连 B 的服务端口 |
+| Docker 端口 | 绑定 `10.8.0.2:<port>`，并用 `DOCKER-USER` drop 公网 eth0 | `0.0.0.0:<port>` 或仅依赖 nftables 主链 |
+| bifrost-api 日志读取 | `bifrost-readonly` 专用用户 + forced-command 白名单 | root SSH 私钥、任意命令 SSH、交互 shell |
+| Verdaccio bootstrap | 密码只 stdout 一次，并保存 `/root/.verdaccio-bootstrap-pwd.txt` 0400 | 写入 deploy state、日志、bifrost-api 响应 |
+| Git mirror | Caddy 拒绝 `git-receive-pack`，只允许 clone/fetch | 允许 push 到镜像源 |
+
+生产变更后必须运行：
+
+```bash
+bash scripts/diagnostics.sh --check distribution
+iptables -S DOCKER-USER | grep -E '3000|4873|8081|8082'
+nft list table inet filter
+```
+
+### 密钥与密码轮换
+
+| 对象 | 频率 | 操作 |
+|------|------|------|
+| WireGuard A/B key | 90 天或泄露后立即 | 先把新公钥加入对端 peer，再替换本机私钥，最后 `wg-quick down wg0 && wg-quick up wg0` 验证 handshake |
+| bifrost-readonly SSH key | 90 天或人员变更 | `ssh-keygen -t ed25519 -f /etc/bifrost-api/ssh/bifrost-readonly.ed25519 -N ""`，把新公钥写入 B 的 forced-command `authorized_keys`，删除旧公钥 |
+| Verdaccio bootstrap 密码 | 首次分发后、人员变更、泄露后 | `bash scripts/server-b.sh --rotate-bootstrap-pwd`；新密码只发给需要发布私有包的管理员 |
+| NewAPI 管理员密码/token | 每季度、成员离职、异常调用后 | 在新 NewAPI 管理面轮换；成员 token 必须逐人独立，不共享 |
+| restic password | 年度或备份仓库泄露后 | 新建仓库或按 restic 官方流程迁移；旧仓库保留到恢复验证完成 |
+
+WG 轮换时不要同时替换 A/B 两侧私钥。先利用现有隧道把新 peer 配置写入对端，确认新 handshake 小于 10 秒后再移除旧 peer。
+
+### 备份与恢复边界
+
+Server B 数据源包括：
+
+- `/var/lib/verdaccio`
+- `/var/lib/new-api-pg`
+- `/var/lib/new-api-redis`
+- `/var/lib/git-mirrors`
+- `/var/lib/dist`
+
+`restic-to-a.timer` 负责把这些目录备份到 Server A。真实生产验收不能只看 timer active，必须执行：
+
+```bash
+systemctl status restic-to-a.timer
+systemctl start restic-to-a.service
+restic snapshots
+```
+
+恢复演练先恢复到临时目录，比对文件和 PostgreSQL 数据目录完整性后，再进入维护窗口替换生产目录。不要在未验证快照可用前退订旧 Windows VPS 或删除 legacy 数据。
+
+### NewAPI 绿启与账号重建
+
+`BIFROST_SERVER_A_NEWAPI_MODE=distribution` 下，Server A 不再默认安装本地 NewAPI；NewAPI 在 B 上绿启。安全后果是旧 token 不迁移，团队成员必须重建：
+
+1. 管理员初始化 B 上 NewAPI，生成新管理员密码。
+2. 每个成员创建独立账号/token/配额。
+3. 旧 Windows VPS 或 Server A legacy NewAPI 设置只读并保留最终快照 30 天。
+4. 旧 token 在切流完成后集中作废，避免双写和权限漂移。
+
+### Windows VPS 退役门禁
+
+退订旧 Windows VPS 前必须满足：
+
+- `npm.uuhfn.cloud`、`files.uuhfn.cloud`、`api.uuhfn.cloud` 已连续 7 天走 Server A → wg0 → Server B。
+- `restic snapshots` 至少有 7 条 Server B 快照。
+- 已导出 Windows VPS final snapshot，并能在离线环境列出 Verdaccio storage、Caddy 配置、git mirror tarball。
+- 团队成员 NewAPI 账号重建完成，旧 token 作废。
+- 已记录退役日期、快照位置、30 天清理日期。
+
 ### 定期操作清单
 
 | 频率 | 操作 | 命令 |
@@ -107,6 +179,9 @@ Bifrost 支持三种暴露面 profile，并默认采用 `vpn-first`：
 | 每季度 | 审计 API Key 使用情况 | New API 面板 → 日志 |
 | 每季度 | 检查域名 SSL 证书有效期 | `caddy list-certificates` |
 | 每日 | IP HTTPS 模式检查短生命周期证书续期 | `systemctl is-active bifrost-certbot-renew.timer && certbot certificates --cert-name <SERVER_A_PUBLIC_IPV4>` |
+| 每日 | Server B 分发栈健康检查 | `bash scripts/diagnostics.sh --check distribution` |
+| 每日 | Server B restic 快照检查 | `restic snapshots` |
+| 每季度 | bifrost-readonly SSH key 轮换 | 见上方“密钥与密码轮换” |
 
 ### API Key 管理
 

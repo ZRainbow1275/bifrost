@@ -24,3 +24,15 @@ __pycache__/
 .env
 *.key
 *.pem
+.gitnexus
+
+# Codex CLI workspace
+.codex/
+
+# Dev temp / debug artifacts
+tmp/
+*.db
+mitm_mcp_*
+
+# Legacy / one-shot operator scripts (not part of product surface)
+scripts/legacy-vps-*.ps1

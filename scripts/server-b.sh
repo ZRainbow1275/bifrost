@@ -47,6 +47,33 @@ readonly XRAY_INSTALL_SCRIPT_URL="https://github.com/XTLS/Xray-install/raw/main/
 readonly HYSTERIA_INSTALL_URL="https://get.hy2.sh/"
 readonly THREE_X_UI_INSTALL_URL="https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh"
 
+# ==============================================================================
+# Distribution Stack (Server B private mirror / New API) constants
+# ==============================================================================
+
+readonly DISTRIBUTION_STATE_DIR="/var/lib/bifrost"
+readonly DISTRIBUTION_STEP_STATE_FILE="${DISTRIBUTION_STATE_DIR}/distribution.step-state"
+readonly DISTRIBUTION_STATE_FILE="${DISTRIBUTION_STATE_DIR}/distribution.env"
+readonly DISTRIBUTION_ETC_DIR="/etc/bifrost"
+readonly DISTRIBUTION_RESTIC_ENV_FILE="${DISTRIBUTION_ETC_DIR}/restic-to-a.env"
+readonly DISTRIBUTION_VERDACCIO_BOOTSTRAP_FILE="/root/.verdaccio-bootstrap-pwd.txt"
+readonly DISTRIBUTION_NEW_API_DIR="/opt/new-api"
+readonly DISTRIBUTION_NEW_API_ENV_FILE="${DISTRIBUTION_NEW_API_DIR}/.env"
+readonly DISTRIBUTION_VERDACCIO_DIR="/var/lib/verdaccio"
+readonly DISTRIBUTION_GIT_MIRROR_DIR="/var/lib/git-mirrors"
+readonly DISTRIBUTION_GIT_DIST_DIR="/var/lib/dist"
+readonly DISTRIBUTION_GIT_TREE_DIR="/var/lib/dist-tree"
+readonly DISTRIBUTION_READONLY_USER="bifrost-readonly"
+readonly DISTRIBUTION_GIT_MIRROR_USER="git-mirror"
+readonly DISTRIBUTION_WG_IP="${BIFROST_SERVER_B_WG_IP:-10.8.0.2}"
+readonly DISTRIBUTION_WG_PORT="${BIFROST_SERVER_B_WG_PORT:-51820}"
+readonly DISTRIBUTION_WG_CLIENTS_CIDR="${BIFROST_SERVER_B_WG_CLIENTS_CIDR:-10.8.0.0/24}"
+readonly DISTRIBUTION_NEW_API_IMAGE="${BIFROST_NEW_API_IMAGE:-calciumion/new-api:v1.0.0-rc.6}"
+readonly DISTRIBUTION_NEW_API_POSTGRES_DB="${BIFROST_NEW_API_POSTGRES_DB:-newapi}"
+readonly DISTRIBUTION_NEW_API_POSTGRES_USER="${BIFROST_NEW_API_POSTGRES_USER:-newapi}"
+readonly DISTRIBUTION_RESTIC_REPOSITORY="${BIFROST_RESTIC_REPOSITORY:-sftp:root@10.8.0.1:/srv/restic/server-b}"
+readonly DISTRIBUTION_RESTIC_PASSWORD_FILE="${BIFROST_RESTIC_PASSWORD_FILE:-/root/.restic-server-b.pwd}"
+
 # AI domain whitelist for routing rules
 # Kept in sync with configs/whitelist/ai-domains.txt
 readonly -a AI_WHITELIST_DOMAINS=(
@@ -2126,6 +2153,723 @@ test_connectivity_b() {
 }
 
 # ==============================================================================
+# 6c. Distribution stack helpers
+# ==============================================================================
+
+_distribution_state_dir() {
+    printf '%s\n' "${DISTRIBUTION_STATE_DIR}"
+}
+
+_distribution_state_file() {
+    printf '%s\n' "${DISTRIBUTION_STATE_FILE}"
+}
+
+_distribution_step_state_file() {
+    printf '%s\n' "${DISTRIBUTION_STEP_STATE_FILE}"
+}
+
+_distribution_state_get() {
+    local key="${1:?}"
+    local value=""
+    if [[ -f "${DISTRIBUTION_STATE_FILE}" ]]; then
+        value="$(grep -E "^${key}=" "${DISTRIBUTION_STATE_FILE}" 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
+    fi
+    [[ -n "${value}" ]] || return 1
+    printf '%s\n' "${value}"
+}
+
+_distribution_state_set() {
+    local key="${1:?}"
+    local value="${2:-}"
+    install -d -m 0750 "${DISTRIBUTION_STATE_DIR}"
+
+    local tmp_file
+    tmp_file="$(mktemp "${DISTRIBUTION_STATE_FILE}.XXXXXX")"
+    if [[ -f "${DISTRIBUTION_STATE_FILE}" ]]; then
+        grep -Ev "^${key}=" "${DISTRIBUTION_STATE_FILE}" > "${tmp_file}" || true
+    fi
+    printf '%s=%s\n' "${key}" "${value}" >> "${tmp_file}"
+    mv "${tmp_file}" "${DISTRIBUTION_STATE_FILE}"
+    chmod 600 "${DISTRIBUTION_STATE_FILE}"
+}
+
+_distribution_step_done() {
+    local step_name="${1:?}"
+    [[ -f "${DISTRIBUTION_STEP_STATE_FILE}" ]] || return 1
+    grep -Fxq "${step_name}" "${DISTRIBUTION_STEP_STATE_FILE}"
+}
+
+_distribution_mark_step_done() {
+    local step_name="${1:?}"
+    install -d -m 0750 "${DISTRIBUTION_STATE_DIR}"
+    if ! _distribution_step_done "${step_name}"; then
+        printf '%s\n' "${step_name}" >> "${DISTRIBUTION_STEP_STATE_FILE}"
+    fi
+}
+
+_distribution_reset_step_state() {
+    install -d -m 0750 "${DISTRIBUTION_STATE_DIR}"
+    : > "${DISTRIBUTION_STEP_STATE_FILE}"
+    chmod 600 "${DISTRIBUTION_STEP_STATE_FILE}"
+}
+
+_distribution_template_render() {
+    local template="${1:?}"
+    local output="${2:?}"
+    local ssh_allow_cidrs="${3:-}"
+    local wg_port="${4:-${DISTRIBUTION_WG_PORT}}"
+
+    sed \
+        -e "s|{{SERVER_B_WG_IP}}|${DISTRIBUTION_WG_IP}|g" \
+        -e "s|{{WG_CLIENTS_CIDR}}|${DISTRIBUTION_WG_CLIENTS_CIDR}|g" \
+        -e "s|{{SSH_PUBNET_ALLOW_CIDRS}}|${ssh_allow_cidrs}|g" \
+        -e "s|{{WG_PORT}}|${wg_port}|g" \
+        "${template}" > "${output}"
+}
+
+_distribution_require_wg0() {
+    if ip link show wg0 &>/dev/null; then
+        return 0
+    fi
+    if systemctl is-active --quiet wg-quick@wg0 2>/dev/null; then
+        return 0
+    fi
+    log_error "wg0 is not active. Server B private distribution requires WireGuard before enabling private services."
+    return 1
+}
+
+_distribution_ensure_docker() {
+    if check_docker; then
+        return 0
+    fi
+
+    log_info "Docker is not installed or not running. Installing Docker CE..."
+    if type -t install_docker_china_aware &>/dev/null; then
+        install_docker_china_aware
+    else
+        install_docker
+    fi
+    check_docker
+}
+
+_distribution_ensure_user() {
+    if ! id "${DISTRIBUTION_GIT_MIRROR_USER}" &>/dev/null; then
+        useradd -r -s /usr/sbin/nologin -d "${DISTRIBUTION_GIT_MIRROR_DIR}" -m "${DISTRIBUTION_GIT_MIRROR_USER}"
+    fi
+    if ! id "${DISTRIBUTION_READONLY_USER}" &>/dev/null; then
+        useradd -r -m -d /var/lib/${DISTRIBUTION_READONLY_USER} -s /bin/bash "${DISTRIBUTION_READONLY_USER}"
+    else
+        usermod -s /bin/bash "${DISTRIBUTION_READONLY_USER}" 2>/dev/null || true
+    fi
+}
+
+_distribution_prepare_dirs() {
+    install -d -m 0750 "${DISTRIBUTION_STATE_DIR}"
+    install -d -m 0750 "${DISTRIBUTION_ETC_DIR}"
+    install -d -m 0750 "${DISTRIBUTION_VERDACCIO_DIR}/storage" "${DISTRIBUTION_VERDACCIO_DIR}/config"
+    install -d -m 0755 "${DISTRIBUTION_NEW_API_DIR}" /var/lib/new-api/data
+    install -d -m 0750 /var/lib/new-api-pg /var/lib/new-api-redis
+    install -d -m 0750 "${DISTRIBUTION_GIT_MIRROR_DIR}" "${DISTRIBUTION_GIT_TREE_DIR}"
+    install -d -m 0755 "${DISTRIBUTION_GIT_DIST_DIR}"
+    install -d -m 0750 /var/log/git-mirror
+    install -d -m 0755 /var/log/caddy
+    chown -R 10001:65533 "${DISTRIBUTION_VERDACCIO_DIR}" 2>/dev/null || true
+    chown -R 999:999 /var/lib/new-api-pg /var/lib/new-api-redis 2>/dev/null || true
+    chown -R "${DISTRIBUTION_GIT_MIRROR_USER}:${DISTRIBUTION_GIT_MIRROR_USER}" \
+        "${DISTRIBUTION_GIT_MIRROR_DIR}" "${DISTRIBUTION_GIT_TREE_DIR}" "${DISTRIBUTION_GIT_DIST_DIR}" /var/log/git-mirror 2>/dev/null || true
+    chmod 0755 "${DISTRIBUTION_GIT_DIST_DIR}" 2>/dev/null || true
+    chmod 0750 "${DISTRIBUTION_VERDACCIO_DIR}" "${DISTRIBUTION_NEW_API_DIR}" 2>/dev/null || true
+}
+
+_distribution_write_verdaccio_config() {
+    local target="${DISTRIBUTION_VERDACCIO_DIR}/config/config.yaml"
+    local template="${PROJECT_ROOT}/configs/verdaccio/config.yaml.tpl"
+    if [[ -f "${template}" ]]; then
+        cp "${template}" "${target}"
+    else
+        cat > "${target}" <<'EOF'
+storage: /verdaccio/storage
+url_prefix: /
+listen: 0.0.0.0:4873
+EOF
+    fi
+    chmod 0644 "${target}"
+}
+
+_distribution_init_verdaccio_bootstrap() {
+    local htpasswd_path="${DISTRIBUTION_VERDACCIO_DIR}/storage/htpasswd"
+    local bootstrap_pwd
+
+    if [[ -f "${htpasswd_path}" ]]; then
+        return 0
+    fi
+
+    bootstrap_pwd="${BIFROST_VERDACCIO_BOOTSTRAP_PASSWORD:-$(openssl rand -hex 16)}"
+
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx verdaccio; then
+        if ! docker exec verdaccio sh -lc "htpasswd -cBb /verdaccio/storage/htpasswd team '${bootstrap_pwd}'" 2>/dev/null; then
+            log_error "Verdaccio container did not provide htpasswd. Cannot initialize bootstrap account safely."
+            return 1
+        fi
+    elif command -v htpasswd &>/dev/null; then
+        htpasswd -cBb "${htpasswd_path}" team "${bootstrap_pwd}"
+    else
+        log_error "htpasswd is unavailable and Verdaccio is not running. Cannot write a safe htpasswd file."
+        return 1
+    fi
+    chmod 0640 "${htpasswd_path}"
+    chown 10001:65533 "${htpasswd_path}" 2>/dev/null || true
+
+    umask 077
+    printf '%s\n' "${bootstrap_pwd}" > "${DISTRIBUTION_VERDACCIO_BOOTSTRAP_FILE}"
+    chmod 0400 "${DISTRIBUTION_VERDACCIO_BOOTSTRAP_FILE}"
+
+    _distribution_state_set "VERDACCIO_HTPASSWD_FILE" "${htpasswd_path}"
+    _distribution_state_set "VERDACCIO_BOOTSTRAP_INITIALIZED" "1"
+
+    log_info "Verdaccio bootstrap account initialized."
+    log_info "  username: team"
+    log_info "  password: ${bootstrap_pwd}"
+    log_info "  saved to: ${DISTRIBUTION_VERDACCIO_BOOTSTRAP_FILE} (0400 root)"
+}
+
+_distribution_rotate_verdaccio_bootstrap() {
+    rm -f "${DISTRIBUTION_VERDACCIO_BOOTSTRAP_FILE}" "${DISTRIBUTION_VERDACCIO_DIR}/storage/htpasswd"
+    _distribution_init_verdaccio_bootstrap
+}
+
+_distribution_write_new_api_env() {
+    install -d -m 0755 "${DISTRIBUTION_NEW_API_DIR}"
+    local existing_postgres_password=""
+    local existing_session_secret=""
+
+    if [[ -f "${DISTRIBUTION_NEW_API_ENV_FILE}" ]]; then
+        existing_postgres_password="$(grep -E '^BIFROST_NEW_API_POSTGRES_PASSWORD=' "${DISTRIBUTION_NEW_API_ENV_FILE}" | tail -n1 | cut -d= -f2- || true)"
+        existing_session_secret="$(grep -E '^SESSION_SECRET=' "${DISTRIBUTION_NEW_API_ENV_FILE}" | tail -n1 | cut -d= -f2- || true)"
+    fi
+
+    local postgres_password="${BIFROST_NEW_API_POSTGRES_PASSWORD:-${existing_postgres_password:-$(openssl rand -hex 32)}}"
+    local session_secret="${BIFROST_NEW_API_SESSION_SECRET:-${existing_session_secret:-$(openssl rand -hex 32)}}"
+
+    umask 077
+    cat > "${DISTRIBUTION_NEW_API_ENV_FILE}" <<EOF
+BIFROST_SERVER_B_WG_IP=${DISTRIBUTION_WG_IP}
+BIFROST_NEW_API_IMAGE=${DISTRIBUTION_NEW_API_IMAGE}
+BIFROST_NEW_API_POSTGRES_DB=${DISTRIBUTION_NEW_API_POSTGRES_DB}
+BIFROST_NEW_API_POSTGRES_USER=${DISTRIBUTION_NEW_API_POSTGRES_USER}
+BIFROST_NEW_API_POSTGRES_PASSWORD=${postgres_password}
+SESSION_SECRET=${session_secret}
+BIFROST_RESTIC_REPOSITORY=${DISTRIBUTION_RESTIC_REPOSITORY}
+EOF
+    chmod 0600 "${DISTRIBUTION_NEW_API_ENV_FILE}"
+
+    _distribution_state_set "BIFROST_NEW_API_POSTGRES_PASSWORD" "${postgres_password}"
+    _distribution_state_set "SESSION_SECRET" "${session_secret}"
+}
+
+_distribution_render_new_api_compose() {
+    local source_template="${PROJECT_ROOT}/configs/new-api/docker-compose.yml.tpl"
+    local target="${DISTRIBUTION_NEW_API_DIR}/docker-compose.yml"
+    cp "${source_template}" "${target}"
+    chmod 0644 "${target}"
+
+    local pg_init_template="${PROJECT_ROOT}/configs/new-api/pg-init.sh"
+    cp "${pg_init_template}" "${DISTRIBUTION_NEW_API_DIR}/pg-init.sh"
+    chmod 0755 "${DISTRIBUTION_NEW_API_DIR}/pg-init.sh"
+}
+
+_distribution_render_nftables() {
+    local allow_cidrs
+    allow_cidrs="$(bifrost_admin_allowed_ranges | tr ' ' '\n' | sed '/^$/d' | grep -v ':' | paste -sd, -)"
+    allow_cidrs="${allow_cidrs:-127.0.0.1/32}"
+    local bootstrap_ip=""
+    bootstrap_ip="$(_distribution_state_get BOOTSTRAP_PUBLIC_IP || true)"
+    if [[ "${bootstrap_ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        allow_cidrs="${allow_cidrs},${bootstrap_ip}/32"
+    fi
+    local template="${PROJECT_ROOT}/configs/nftables/bifrost-distribution.nft.tpl"
+    local target="/etc/nftables.d/bifrost-distribution.nft"
+    _distribution_template_render "${template}" "${target}" "${allow_cidrs}" "${DISTRIBUTION_WG_PORT}"
+    chmod 0644 "${target}"
+}
+
+_distribution_apply_docker_user_rules() {
+    local port
+    for port in 3000 4873 8081 8082; do
+        if iptables -C DOCKER-USER -i eth0 -p tcp --dport "${port}" -j DROP 2>/dev/null; then
+            continue
+        fi
+        iptables -I DOCKER-USER -i eth0 -p tcp --dport "${port}" -j DROP
+    done
+
+    if command -v netfilter-persistent &>/dev/null; then
+        netfilter-persistent save || true
+    elif command -v iptables-save &>/dev/null && [[ -d /etc/iptables ]]; then
+        iptables-save > /etc/iptables/rules.v4 || true
+    fi
+}
+
+_distribution_render_caddy() {
+    local template="${PROJECT_ROOT}/configs/caddy/Caddyfile-b-distribution.tpl"
+    local target="/etc/caddy/Caddyfile"
+    local allow_cidrs
+    allow_cidrs="$(bifrost_admin_allowed_ranges | tr ' ' '\n' | sed '/^$/d' | paste -sd, -)"
+    _distribution_template_render "${template}" "${target}" "${allow_cidrs}" "${DISTRIBUTION_WG_PORT}"
+    chmod 0644 "${target}"
+}
+
+_distribution_render_systemd_units() {
+    install -d -m 0755 /etc/systemd/system/caddy.service.d
+    cp "${PROJECT_ROOT}/configs/systemd/caddy-wg-after.conf" /etc/systemd/system/caddy.service.d/wg-after.conf
+    cp "${PROJECT_ROOT}/configs/systemd/verdaccio.service" /etc/systemd/system/verdaccio.service
+    cp "${PROJECT_ROOT}/configs/systemd/git-mirror@.service" /etc/systemd/system/git-mirror@.service
+    cp "${PROJECT_ROOT}/configs/systemd/git-mirror@.timer" /etc/systemd/system/git-mirror@.timer
+    cp "${PROJECT_ROOT}/configs/restic/restic-to-a.service" /etc/systemd/system/restic-to-a.service
+    cp "${PROJECT_ROOT}/configs/restic/restic-to-a.timer" /etc/systemd/system/restic-to-a.timer
+    # spec.md section 4.3 / PR-2: marketplace render + upstream LICENSE watchdog units.
+    cp "${PROJECT_ROOT}/configs/systemd/marketplace-render.path" /etc/systemd/system/marketplace-render.path
+    cp "${PROJECT_ROOT}/configs/systemd/marketplace-render.service" /etc/systemd/system/marketplace-render.service
+    cp "${PROJECT_ROOT}/configs/systemd/upstream-schema-check.timer" /etc/systemd/system/upstream-schema-check.timer
+    cp "${PROJECT_ROOT}/configs/systemd/upstream-schema-check.service" /etc/systemd/system/upstream-schema-check.service
+    chmod 0644 /etc/systemd/system/caddy.service.d/wg-after.conf \
+        /etc/systemd/system/verdaccio.service \
+        /etc/systemd/system/git-mirror@.service \
+        /etc/systemd/system/git-mirror@.timer \
+        /etc/systemd/system/restic-to-a.service \
+        /etc/systemd/system/restic-to-a.timer \
+        /etc/systemd/system/marketplace-render.path \
+        /etc/systemd/system/marketplace-render.service \
+        /etc/systemd/system/upstream-schema-check.timer \
+        /etc/systemd/system/upstream-schema-check.service
+}
+
+_distribution_render_readonly_router() {
+    install -m 0755 "${PROJECT_ROOT}/scripts/bifrost-readonly-router.sh" /usr/local/bin/bifrost-readonly-router.sh
+}
+
+_distribution_render_restic_script() {
+    install -m 0755 "${PROJECT_ROOT}/scripts/bifrost-restic-backup.sh" /usr/local/bin/bifrost-restic-backup.sh
+}
+
+_distribution_render_git_mirror_script() {
+    install -m 0755 "${PROJECT_ROOT}/scripts/git-mirror-sync.sh" /usr/local/bin/git-mirror-sync.sh
+}
+
+# spec.md section 9.1 step 06: install marketplace render + upstream LICENSE watchdog
+# scripts. bifrost-admin-router.sh is intentionally NOT installed here; it ships
+# with PR-5a once the admin SSH channel is in scope.
+_distribution_render_marketplace_scripts() {
+    install -m 0755 "${PROJECT_ROOT}/scripts/render-marketplace-json.sh" /usr/local/bin/render-marketplace-json.sh
+    install -m 0755 "${PROJECT_ROOT}/scripts/check-upstream-schema.sh" /usr/local/bin/check-upstream-schema.sh
+}
+
+# spec.md section 9.2 / M6: marketplace directories must be owned by git-mirror so
+# render-marketplace-json.sh (User=git-mirror) can write into them.
+_distribution_prepare_marketplace_dirs() {
+    install -d -m 0750 -o "${DISTRIBUTION_GIT_MIRROR_USER}" -g "${DISTRIBUTION_GIT_MIRROR_USER}" \
+        /var/log/marketplace \
+        /var/lib/dist/plugins \
+        /etc/bifrost-api/marketplace
+}
+
+# spec.md section 9.2 / section 5.3: emit the canonical LICENSE / NOTICE text into a worktree
+# before the initial commit. Kept as a helper so the marketplace-render service
+# (and any future re-seed path) can produce byte-identical files.
+_distribution_render_marketplace_license_notice() {
+    local work="${1:?worktree path required}"
+    cat > "${work}/LICENSE" <<'BIFROST_LICENSE_EOF'
+# bifrost-internal Plugin Marketplace
+# Copyright (c) 2026 Bifrost Team. All rights reserved.
+#
+# Each plugin under `plugins/<name>/` may carry its own LICENSE file.
+# Default policy: ALL-RIGHTS-RESERVED unless otherwise stated.
+# Distribution restricted to authenticated Bifrost team members.
+BIFROST_LICENSE_EOF
+    cat > "${work}/NOTICE" <<'BIFROST_NOTICE_EOF'
+This marketplace is an internal distribution channel for Bifrost team.
+It does NOT mirror anthropic/claude-code or any other proprietary upstream.
+Plugin submissions are subject to admin review via panel.uuhfn.cloud
+(see docs/SECURITY.md section marketplace once PR-7 lands).
+BIFROST_NOTICE_EOF
+}
+
+_distribution_init_marketplace_bare() {
+    local bare="${DISTRIBUTION_GIT_MIRROR_DIR}/bifrost-internal-plugins.git"
+    if [[ -f "${bare}/HEAD" ]] && git --git-dir="${bare}" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+        return 0
+    fi
+
+    install -d -m 0755 "${DISTRIBUTION_GIT_MIRROR_DIR}"
+
+    if [[ ! -f "${bare}/HEAD" ]]; then
+        git init --bare --initial-branch=main "${bare}" >/dev/null
+    fi
+    chown -R "${DISTRIBUTION_GIT_MIRROR_USER}:${DISTRIBUTION_GIT_MIRROR_USER}" "${bare}" 2>/dev/null || true
+
+    local work
+    work="$(mktemp -d /tmp/marketplace-seed.XXXXXX)"
+    (
+        cd "${work}"
+        git init --quiet --initial-branch=main
+        git config user.name "marketplace-render"
+        git config user.email "render@uuhfn.cloud"
+        install -d -m 0755 .claude-plugin
+        cat > .claude-plugin/marketplace.json <<'BIFROST_SEED_MP_EOF'
+{
+  "name": "bifrost-internal",
+  "owner": {
+    "name": "Bifrost Team",
+    "email": "bifrost-admin@uuhfn.cloud"
+  },
+  "description": "Bifrost team internal Claude Code plugin marketplace (seed; no plugins yet)",
+  "version": "0.0.0",
+  "metadata": {
+    "pluginRoot": "./plugins",
+    "license_id": "ALL-RIGHTS-RESERVED",
+    "upstream_url": null,
+    "render_script_version": "v1.0.0-seed"
+  },
+  "plugins": []
+}
+BIFROST_SEED_MP_EOF
+        _distribution_render_marketplace_license_notice "${work}"
+        git add . >/dev/null
+        git commit --quiet -m "Seed bifrost-internal-plugins (PR-2 step 07)"
+        git push --quiet "${bare}" "main:main"
+    )
+    rm -rf "${work}"
+    chown -R "${DISTRIBUTION_GIT_MIRROR_USER}:${DISTRIBUTION_GIT_MIRROR_USER}" "${bare}" 2>/dev/null || true
+}
+
+_distribution_init_upstream_schema_baseline() {
+    local baseline_file="/etc/bifrost-api/marketplace/upstream-license-baseline.sha256"
+    install -d -m 0750 /etc/bifrost-api/marketplace
+    if [[ -s "${baseline_file}" ]]; then
+        return 0
+    fi
+    local sha=""
+    if sha="$(curl -fsSL --max-time 30 "https://github.com/anthropics/claude-code/raw/main/LICENSE.md" 2>/dev/null | sha256sum | awk '{print $1}')" && [[ "${sha}" =~ ^[0-9a-f]{64}$ ]]; then
+        printf '%s' "${sha}" > "${baseline_file}"
+        chmod 0644 "${baseline_file}"
+        log_info "Initialised upstream LICENSE baseline sha256: ${sha}"
+    else
+        : > "${baseline_file}"
+        chmod 0644 "${baseline_file}"
+        log_warn "Could not fetch upstream LICENSE during baseline init (offline?). check-upstream-schema.sh will retry on its next timer fire."
+    fi
+}
+
+_distribution_configure_readonly_ssh() {
+    local public_key="${BIFROST_READONLY_SSH_PUBLIC_KEY:-}"
+    local public_key_file="${BIFROST_READONLY_SSH_PUBLIC_KEY_FILE:-}"
+    if [[ -z "${public_key}" && -n "${public_key_file}" && -f "${public_key_file}" ]]; then
+        public_key="$(tr -d '\r\n' < "${public_key_file}")"
+    fi
+
+    if [[ -z "${public_key}" ]]; then
+        log_warn "BIFROST_READONLY_SSH_PUBLIC_KEY not provided; /mirrors/logs SSH pull channel is not enabled yet."
+        _distribution_state_set "BIFROST_READONLY_SSH_CONFIGURED" "0"
+        return 0
+    fi
+
+    local home_dir="/var/lib/${DISTRIBUTION_READONLY_USER}"
+    install -d -m 0700 -o "${DISTRIBUTION_READONLY_USER}" -g "${DISTRIBUTION_READONLY_USER}" "${home_dir}/.ssh"
+    cat > "${home_dir}/.ssh/authorized_keys" <<EOF
+command="/usr/local/bin/bifrost-readonly-router.sh \${SSH_ORIGINAL_COMMAND}",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ${public_key}
+EOF
+    chmod 0600 "${home_dir}/.ssh/authorized_keys"
+    chown "${DISTRIBUTION_READONLY_USER}:${DISTRIBUTION_READONLY_USER}" "${home_dir}/.ssh/authorized_keys"
+    _distribution_state_set "BIFROST_READONLY_SSH_CONFIGURED" "1"
+}
+
+_distribution_ensure_caddy_service() {
+    if systemctl list-unit-files caddy.service &>/dev/null || [[ -f /etc/systemd/system/caddy.service ]]; then
+        return 0
+    fi
+
+    cat > /etc/systemd/system/caddy.service <<'CADDYSVC_EOF'
+[Unit]
+Description=Caddy Web Server
+Documentation=https://caddyserver.com/docs/
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=caddy
+Group=caddy
+ExecStart=/usr/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+LimitNPROC=512
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
+CADDYSVC_EOF
+    if ! id caddy &>/dev/null; then
+        useradd --system --home "${CADDY_DATA_DIR}" --shell /usr/sbin/nologin caddy 2>/dev/null || true
+    fi
+}
+
+_distribution_write_restic_env() {
+    local target="${DISTRIBUTION_RESTIC_ENV_FILE}"
+    install -d -m 0750 "${DISTRIBUTION_ETC_DIR}"
+    if [[ ! -f "${DISTRIBUTION_RESTIC_PASSWORD_FILE}" ]]; then
+        umask 077
+        openssl rand -base64 32 > "${DISTRIBUTION_RESTIC_PASSWORD_FILE}"
+        chmod 0400 "${DISTRIBUTION_RESTIC_PASSWORD_FILE}"
+    fi
+
+    cat > "${target}" <<EOF
+RESTIC_REPOSITORY=${DISTRIBUTION_RESTIC_REPOSITORY}
+RESTIC_PASSWORD_FILE=${DISTRIBUTION_RESTIC_PASSWORD_FILE}
+EOF
+    chmod 0600 "${target}"
+}
+
+_distribution_verify() {
+    local failures=0
+
+    if ! docker compose -f "${DISTRIBUTION_NEW_API_DIR}/docker-compose.yml" config --quiet; then
+        log_error "New API compose validation failed."
+        failures=$((failures + 1))
+    fi
+
+    if ! grep -q 'VERDACCIO_PUBLIC_URL=https://npm.uuhfn.cloud' /etc/systemd/system/verdaccio.service; then
+        log_error "Verdaccio systemd unit does not pin VERDACCIO_PUBLIC_URL."
+        failures=$((failures + 1))
+    fi
+
+    if ! grep -q 'sslmode=disable' "${DISTRIBUTION_NEW_API_DIR}/docker-compose.yml"; then
+        log_error "New API compose file does not force sslmode=disable."
+        failures=$((failures + 1))
+    fi
+
+    if ! grep -q 'git push disabled on mirror' /etc/caddy/Caddyfile; then
+        log_error "Distribution Caddyfile does not block git push on the mirror endpoint."
+        failures=$((failures + 1))
+    fi
+
+    if ! grep -q 'Requires=wg-quick@wg0.service' /etc/systemd/system/caddy.service.d/wg-after.conf; then
+        log_error "Caddy systemd drop-in does not depend on wg-quick@wg0."
+        failures=$((failures + 1))
+    fi
+
+    # spec.md section 9.2 PR-2 additions: marketplace bootstrap must be visible at the
+    # bare repo's HEAD and the systemd trigger units must be active.
+    local bare="${DISTRIBUTION_GIT_MIRROR_DIR}/bifrost-internal-plugins.git"
+    if [[ -d "${bare}" ]]; then
+        if ! git --git-dir="${bare}" show HEAD:.claude-plugin/marketplace.json >/dev/null 2>&1; then
+            log_error "bifrost-internal-plugins bare repo missing .claude-plugin/marketplace.json at HEAD."
+            failures=$((failures + 1))
+        fi
+    else
+        log_error "bifrost-internal-plugins bare repo not initialised at ${bare}."
+        failures=$((failures + 1))
+    fi
+    if ! systemctl is-active --quiet marketplace-render.path 2>/dev/null; then
+        log_error "marketplace-render.path is not active."
+        failures=$((failures + 1))
+    fi
+    if [[ ! -f /var/lib/dist/plugins/state.json ]]; then
+        log_error "/var/lib/dist/plugins/state.json is missing (marketplace-render did not write state)."
+        failures=$((failures + 1))
+    fi
+
+    if [[ "${failures}" -gt 0 ]]; then
+        return 1
+    fi
+
+    log_success "Distribution stack verification passed."
+}
+
+enable_distribution() {
+    log_info "=========================================="
+    log_info "  Enabling Server B Private Distribution"
+    log_info "=========================================="
+
+    if [[ -z "${PKG_MGR:-}" || "${PKG_MGR:-}" == "unknown" ]]; then
+        detect_system
+    fi
+    if declare -f _install_base_dependencies &>/dev/null; then
+        _install_base_dependencies
+    fi
+
+    _distribution_require_wg0
+    _distribution_ensure_docker
+    if ! command -v caddy &>/dev/null; then
+        _install_caddy
+    fi
+    _distribution_ensure_caddy_service
+    _distribution_ensure_user
+    install_packages nftables iptables git fcgiwrap restic
+    if ! command -v htpasswd &>/dev/null; then
+        case "${PKG_MGR}" in
+            apt) install_packages apache2-utils ;;
+            dnf|yum) install_packages httpd-tools ;;
+            *) log_warn "Unknown package manager; htpasswd must already be available before Verdaccio bootstrap." ;;
+        esac
+    fi
+
+    _distribution_prepare_dirs
+
+    local bootstrap_ip=""
+    bootstrap_ip="$(get_public_ip || true)"
+    if [[ -n "${bootstrap_ip}" && "${bootstrap_ip}" != "unknown" ]]; then
+        _distribution_state_set "BOOTSTRAP_PUBLIC_IP" "${bootstrap_ip}"
+    fi
+
+    local step_id
+
+    step_id="01_render_verdaccio"
+    if ! _distribution_step_done "${step_id}"; then
+        _distribution_write_verdaccio_config
+        _distribution_mark_step_done "${step_id}"
+    fi
+
+    step_id="02_render_new_api"
+    if ! _distribution_step_done "${step_id}"; then
+        _distribution_write_new_api_env
+        _distribution_render_new_api_compose
+        _distribution_mark_step_done "${step_id}"
+    fi
+
+    step_id="03_render_caddy"
+    if ! _distribution_step_done "${step_id}"; then
+        _distribution_render_caddy
+        _distribution_mark_step_done "${step_id}"
+    fi
+
+    step_id="04_render_nftables"
+    if ! _distribution_step_done "${step_id}"; then
+        _distribution_render_nftables
+        nft -f /etc/nftables.d/bifrost-distribution.nft
+        _distribution_apply_docker_user_rules
+        _distribution_mark_step_done "${step_id}"
+    fi
+
+    step_id="05_render_systemd"
+    if ! _distribution_step_done "${step_id}"; then
+        _distribution_render_systemd_units
+        systemctl daemon-reload
+        _distribution_mark_step_done "${step_id}"
+    fi
+
+    step_id="06_render_scripts"
+    if ! _distribution_step_done "${step_id}"; then
+        _distribution_render_git_mirror_script
+        _distribution_render_marketplace_scripts
+        _distribution_render_readonly_router
+        _distribution_render_restic_script
+        _distribution_configure_readonly_ssh
+        _distribution_write_restic_env
+        _distribution_mark_step_done "${step_id}"
+    fi
+
+    step_id="07_render_marketplace"
+    if ! _distribution_step_done "${step_id}"; then
+        _distribution_prepare_marketplace_dirs
+        _distribution_init_marketplace_bare
+        _distribution_init_upstream_schema_baseline
+        # spec.md M19: explicitly enable systemd triggers; the path unit becomes
+        # active only after the bare repo exists (we just created it above).
+        systemctl enable --now marketplace-render.path
+        systemctl enable --now upstream-schema-check.timer
+        # Trigger an initial render so state.json exists for _distribution_verify
+        # and the panel status endpoint (PR-4). Ignore failure here so a
+        # first-boot transient does not short-circuit the step machine; the
+        # path unit will retry on any subsequent change.
+        systemctl start marketplace-render.service || true
+        _distribution_mark_step_done "${step_id}"
+    fi
+
+    step_id="08_git_mirror"
+    if ! _distribution_step_done "${step_id}"; then
+        systemctl enable --now fcgiwrap.socket
+        systemctl enable --now git-mirror@claude-for-legal-zh.timer
+        systemctl start git-mirror@claude-for-legal-zh.service
+        _distribution_mark_step_done "${step_id}"
+    fi
+
+    step_id="09_new_api"
+    if ! _distribution_step_done "${step_id}"; then
+        (
+            cd "${DISTRIBUTION_NEW_API_DIR}"
+            docker compose config --quiet
+            docker compose pull
+            docker compose up -d
+        )
+        _distribution_mark_step_done "${step_id}"
+    fi
+
+    step_id="10_verdaccio"
+    if ! _distribution_step_done "${step_id}"; then
+        systemctl enable --now verdaccio.service
+        _distribution_mark_step_done "${step_id}"
+    fi
+
+    step_id="11_verdaccio_bootstrap"
+    if ! _distribution_step_done "${step_id}"; then
+        _distribution_init_verdaccio_bootstrap
+        _distribution_mark_step_done "${step_id}"
+    fi
+
+    step_id="12_caddy"
+    if ! _distribution_step_done "${step_id}"; then
+        systemctl enable --now caddy.service
+        systemctl restart caddy.service
+        _distribution_mark_step_done "${step_id}"
+    fi
+
+    step_id="13_restic"
+    if ! _distribution_step_done "${step_id}"; then
+        systemctl enable --now restic-to-a.timer
+        _distribution_mark_step_done "${step_id}"
+    fi
+
+    _distribution_verify
+    _distribution_state_set "DISTRIBUTION_ENABLED" "1"
+
+    log_info "=========================================="
+    log_info "  Server B private distribution enabled"
+    log_info "=========================================="
+}
+
+disable_distribution() {
+    log_info "=========================================="
+    log_info "  Disabling Server B Private Distribution"
+    log_info "=========================================="
+
+    # spec.md section 9.4 M12: disable marketplace triggers FIRST so subsequent
+    # packed-refs writes during teardown do not fire a late path-unit
+    # invocation. marketplace-render.service is oneshot; nothing to disable.
+    systemctl disable --now marketplace-render.path 2>/dev/null || true
+    systemctl disable --now upstream-schema-check.timer 2>/dev/null || true
+    systemctl disable --now restic-to-a.timer 2>/dev/null || true
+    systemctl disable --now git-mirror@claude-for-legal-zh.timer 2>/dev/null || true
+    systemctl stop git-mirror@claude-for-legal-zh.service 2>/dev/null || true
+    systemctl disable --now verdaccio.service 2>/dev/null || true
+    systemctl disable --now caddy.service 2>/dev/null || true
+    if [[ -d "${DISTRIBUTION_NEW_API_DIR}" ]]; then
+        (cd "${DISTRIBUTION_NEW_API_DIR}" && docker compose down) 2>/dev/null || true
+    fi
+    _distribution_state_set "DISTRIBUTION_ENABLED" "0"
+
+    log_success "Server B private distribution stopped. Data directories were preserved."
+}
+
+rotate_verdaccio_bootstrap_pwd() {
+    log_info "Rotating Verdaccio bootstrap password..."
+    _distribution_rotate_verdaccio_bootstrap
+}
+
+# ==============================================================================
 # 7. deploy_server_b()
 # ==============================================================================
 # Main orchestration function for complete Server B deployment.
@@ -2609,3 +3353,47 @@ _save_final_connection_info() {
     log_info "All connection info saved to ${CONNECTION_INFO_FILE}"
     log_info "Deploy state saved to ${DEPLOY_STATE_DIR}/state.env"
 }
+
+server_b_usage() {
+    cat <<'EOF'
+Bifrost Server B deployment helper
+
+Usage:
+  scripts/server-b.sh --deploy
+  scripts/server-b.sh --enable-distribution
+  scripts/server-b.sh --disable-distribution
+  scripts/server-b.sh --rotate-bootstrap-pwd
+  scripts/server-b.sh --help
+
+Commands:
+  --deploy                 Run the existing interactive Server B deployment.
+  --enable-distribution    Enable the private distribution stack on Server B.
+  --disable-distribution   Stop distribution services without deleting data.
+  --rotate-bootstrap-pwd   Rotate Verdaccio bootstrap account password.
+EOF
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    case "${1:-}" in
+        --deploy|deploy)
+            deploy_server_b
+            ;;
+        --enable-distribution)
+            enable_distribution
+            ;;
+        --disable-distribution)
+            disable_distribution
+            ;;
+        --rotate-bootstrap-pwd)
+            rotate_verdaccio_bootstrap_pwd
+            ;;
+        --help|-h|help|"")
+            server_b_usage
+            ;;
+        *)
+            log_error "Unknown Server B command: ${1}"
+            server_b_usage
+            exit 1
+            ;;
+    esac
+fi

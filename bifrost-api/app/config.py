@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     # Registration state persistence
     registration_state_file: str = "/data/registration-state.json"
 
+    # Server B private distribution observability.
+    server_b_wg_ip: str = "10.8.0.2"
+    readonly_ssh_key: str = "/etc/bifrost-api/ssh/bifrost-readonly.ed25519"
+    readonly_user: str = "bifrost-readonly"
+    readonly_ssh_timeout_sec: float = 8.0
+
     # Optional cross-origin access. Leave empty for same-origin only access.
     cors_allow_origins: str = ""
     cors_allow_credentials: bool = False

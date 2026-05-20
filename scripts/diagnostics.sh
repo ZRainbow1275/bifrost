@@ -15,6 +15,8 @@
 #   bash scripts/diagnostics.sh              # Interactive menu
 #   bash scripts/diagnostics.sh full         # Full diagnostic
 #   bash scripts/diagnostics.sh gfw          # GFW detection test
+#   bash scripts/diagnostics.sh --check distribution
+#                                               # Server B distribution health
 #   bash scripts/diagnostics.sh report       # Generate JSON report
 #
 # Dependencies: scripts/common.sh, curl, jq (optional)
@@ -116,6 +118,7 @@ declare -A DIAG_NETWORK=()
 declare -A DIAG_DNS=()
 declare -A DIAG_SPEED=()
 declare -A DIAG_GFW=()
+declare -A DIAG_DISTRIBUTION=()
 DIAG_TIMESTAMP=""
 DIAG_OVERALL="healthy"
 
@@ -153,6 +156,7 @@ _record_result() {
         dns)      DIAG_DNS["${key}"]="${value}" ;;
         speed)    DIAG_SPEED["${key}"]="${value}" ;;
         gfw)      DIAG_GFW["${key}"]="${value}" ;;
+        distribution) DIAG_DISTRIBUTION["${key}"]="${value}" ;;
     esac
 }
 
@@ -237,6 +241,7 @@ _reset_diagnostic_results() {
     DIAG_DNS=()
     DIAG_SPEED=()
     DIAG_GFW=()
+    DIAG_DISTRIBUTION=()
 }
 
 ###############################################################################
@@ -997,7 +1002,8 @@ generate_diagnostic_report() {
     json+="$(_append_assoc_json_section "network" DIAG_NETWORK),"
     json+="$(_append_assoc_json_section "dns" DIAG_DNS),"
     json+="$(_append_assoc_json_section "speed" DIAG_SPEED),"
-    json+="$(_append_assoc_json_section "gfw_detection" DIAG_GFW)"
+    json+="$(_append_assoc_json_section "gfw_detection" DIAG_GFW),"
+    json+="$(_append_assoc_json_section "distribution" DIAG_DISTRIBUTION)"
     json+="}"
 
     if ! _write_report_json "${json}" "${report_file}"; then
@@ -1027,6 +1033,168 @@ generate_diagnostic_report() {
 }
 
 ###############################################################################
+# check_distribution()
+#
+# Check the Server B private distribution stack. This is safe to run repeatedly:
+# it only reads process, systemd, socket, disk, and config state.
+###############################################################################
+check_distribution() {
+    log_step "Server B private distribution health"
+    echo ""
+
+    local failures=0
+    local warnings=0
+
+    _distribution_ok() {
+        local key="${1:?}"
+        local message="${2:?}"
+        echo -e "  ${GREEN}[PASS]${NC} ${message}"
+        _record_result distribution "${key}" "pass"
+    }
+
+    _distribution_warn() {
+        local key="${1:?}"
+        local message="${2:?}"
+        echo -e "  ${YELLOW}[WARN]${NC} ${message}"
+        _record_result distribution "${key}" "warn"
+        warnings=$(( warnings + 1 ))
+    }
+
+    _distribution_fail() {
+        local key="${1:?}"
+        local message="${2:?}"
+        echo -e "  ${RED}[FAIL]${NC} ${message}"
+        _record_result distribution "${key}" "fail"
+        failures=$(( failures + 1 ))
+    }
+
+    if ip link show wg0 >/dev/null 2>&1; then
+        _distribution_ok "wg0_link" "wg0 link exists"
+    else
+        _distribution_fail "wg0_link" "wg0 link is missing; private distribution services must not be exposed directly"
+    fi
+
+    if command_exists ss; then
+        local leaked_ports
+        leaked_ports="$(ss -ltn 2>/dev/null | grep -E ':(3000|4873|8081|8082)\b' | grep -Ev '10\.8\.0\.2:(3000|4873|8081|8082)\b' || true)"
+        if [[ -z "${leaked_ports}" ]]; then
+            _distribution_ok "public_bindings" "distribution ports are not publicly bound outside 10.8.0.2"
+        else
+            _distribution_fail "public_bindings" "distribution port leak detected outside 10.8.0.2"
+            printf '%s\n' "${leaked_ports}" | sed 's/^/    /'
+        fi
+    else
+        _distribution_warn "public_bindings" "ss is unavailable; skipped port binding check"
+    fi
+
+    local systemd_units=(
+        "verdaccio.service"
+        "git-mirror@claude-for-legal-zh.timer"
+        "restic-to-a.timer"
+        "caddy.service"
+    )
+    local unit
+    for unit in "${systemd_units[@]}"; do
+        if systemctl is-enabled "${unit}" >/dev/null 2>&1 || systemctl is-active --quiet "${unit}" 2>/dev/null; then
+            _distribution_ok "unit_${unit//[^A-Za-z0-9]/_}" "${unit} is enabled or active"
+        else
+            _distribution_fail "unit_${unit//[^A-Za-z0-9]/_}" "${unit} is neither enabled nor active"
+        fi
+    done
+
+    if [[ -f /etc/systemd/system/caddy.service.d/wg-after.conf ]] && \
+        grep -Fq 'Requires=wg-quick@wg0.service' /etc/systemd/system/caddy.service.d/wg-after.conf; then
+        _distribution_ok "caddy_wg_requires" "Caddy has wg-quick@wg0.service dependency"
+    else
+        _distribution_fail "caddy_wg_requires" "Caddy missing wg-quick@wg0.service dependency"
+    fi
+
+    if [[ -f /etc/systemd/system/verdaccio.service ]] && \
+        grep -Fq 'VERDACCIO_PUBLIC_URL=https://npm.uuhfn.cloud' /etc/systemd/system/verdaccio.service; then
+        _distribution_ok "verdaccio_public_url" "Verdaccio public URL is pinned to https://npm.uuhfn.cloud"
+    else
+        _distribution_fail "verdaccio_public_url" "Verdaccio public URL is missing or incorrect"
+    fi
+
+    if [[ -f /opt/new-api/docker-compose.yml ]] && \
+        grep -Fq 'sslmode=disable' /opt/new-api/docker-compose.yml; then
+        _distribution_ok "newapi_pg_sslmode" "NewAPI PostgreSQL DSN has sslmode=disable"
+    else
+        _distribution_fail "newapi_pg_sslmode" "NewAPI PostgreSQL DSN missing sslmode=disable"
+    fi
+
+    if [[ -f /etc/caddy/Caddyfile ]] && \
+        grep -Fq 'git push disabled on mirror' /etc/caddy/Caddyfile; then
+        _distribution_ok "git_push_denied" "Caddy mirror route denies git receive-pack"
+    else
+        _distribution_fail "git_push_denied" "Caddy mirror route does not deny git receive-pack"
+    fi
+
+    if command_exists iptables && iptables -S DOCKER-USER >/dev/null 2>&1; then
+        local missing_docker_user=0
+        local port
+        for port in 3000 4873 8081 8082; do
+            if ! iptables -C DOCKER-USER -i eth0 -p tcp --dport "${port}" -j DROP >/dev/null 2>&1; then
+                missing_docker_user=$(( missing_docker_user + 1 ))
+            fi
+        done
+        if [[ "${missing_docker_user}" -eq 0 ]]; then
+            _distribution_ok "docker_user_drop" "DOCKER-USER blocks public eth0 access to distribution ports"
+        else
+            _distribution_fail "docker_user_drop" "DOCKER-USER is missing DROP rules for ${missing_docker_user} distribution port(s)"
+        fi
+    else
+        _distribution_warn "docker_user_drop" "iptables DOCKER-USER chain unavailable; skipped Docker bypass check"
+    fi
+
+    local disk_paths=(
+        "/var/lib/verdaccio"
+        "/var/lib/new-api-pg"
+        "/var/lib/new-api-redis"
+        "/var/lib/git-mirrors"
+        "/var/lib/dist"
+    )
+    for path in "${disk_paths[@]}"; do
+        if [[ -d "${path}" ]]; then
+            local usage
+            usage="$(du -sh "${path}" 2>/dev/null | awk '{print $1}' || echo unknown)"
+            _distribution_ok "disk_${path//[^A-Za-z0-9]/_}" "${path} exists (${usage})"
+        else
+            _distribution_fail "disk_${path//[^A-Za-z0-9]/_}" "${path} is missing"
+        fi
+    done
+
+    local endpoints=(
+        "Verdaccio:http://10.8.0.2:4873/-/ping"
+        "NewAPI:http://10.8.0.2:3000/api/status"
+        "Files:http://10.8.0.2:8081/"
+        "Git:http://10.8.0.2:8082/git/claude-for-legal-zh.git/info/refs?service=git-upload-pack"
+    )
+    local entry
+    for entry in "${endpoints[@]}"; do
+        local label="${entry%%:*}"
+        local url="${entry#*:}"
+        if command_exists curl; then
+            if curl -fsS --connect-timeout 3 --max-time 8 "${url}" >/dev/null 2>&1; then
+                _distribution_ok "endpoint_${label}" "${label} endpoint is reachable on wg0"
+            else
+                _distribution_fail "endpoint_${label}" "${label} endpoint is not reachable on wg0"
+            fi
+        else
+            _distribution_warn "endpoint_${label}" "curl unavailable; skipped ${label} endpoint probe"
+        fi
+    done
+
+    echo ""
+    if [[ "${failures}" -gt 0 ]]; then
+        log_error "Distribution check failed: ${failures} failure(s), ${warnings} warning(s)."
+        return 1
+    fi
+
+    log_success "Distribution check passed with ${warnings} warning(s)."
+}
+
+###############################################################################
 # manage_diagnostics()
 #
 # Interactive menu for diagnostics.
@@ -1041,16 +1209,18 @@ manage_diagnostics() {
         echo "  1) Run full diagnostic"
         echo "  2) GFW detection test only"
         echo "  3) Generate JSON report"
-        echo "  4) View latest report"
+        echo "  4) Server B distribution check"
+        echo "  5) View latest report"
         echo "  0) Exit"
         echo ""
-        read -r -p "Select option [0-4]: " choice
+        read -r -p "Select option [0-5]: " choice
 
         case "${choice}" in
             1) echo ""; run_full_diagnostic ;;
             2) echo ""; test_gfw_detection ;;
             3) echo ""; generate_diagnostic_report ;;
-            4)
+            4) echo ""; check_distribution ;;
+            5)
                 echo ""
                 local latest
                 latest="$(_resolve_report_dir)/diagnostic-report.json"
@@ -1083,6 +1253,23 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         full)
             run_full_diagnostic
             ;;
+        --check)
+            case "${2:-}" in
+                distribution)
+                    check_distribution
+                    ;;
+                "")
+                    log_error "Missing check name."
+                    echo "Usage: $0 --check distribution"
+                    exit 2
+                    ;;
+                *)
+                    log_error "Unknown check: $2"
+                    echo "Usage: $0 --check distribution"
+                    exit 2
+                    ;;
+            esac
+            ;;
         gfw)
             test_gfw_detection
             ;;
@@ -1095,6 +1282,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             echo "Usage:"
             echo "  $0              # Interactive menu"
             echo "  $0 full         # Run full diagnostic"
+            echo "  $0 --check distribution"
+            echo "                  # Check Server B private distribution stack"
             echo "  $0 gfw          # GFW detection test"
             echo "  $0 report       # Generate JSON report"
             echo "  $0 help         # Show this help"

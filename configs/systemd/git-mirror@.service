@@ -1,0 +1,13 @@
+[Unit]
+Description=Mirror upstream git repo: %i
+Requires=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=git-mirror
+Group=git-mirror
+WorkingDirectory=/var/lib/git-mirrors
+ExecStart=/usr/local/bin/git-mirror-sync.sh %i
+StandardOutput=append:/var/log/git-mirror/%i.log
+StandardError=append:/var/log/git-mirror/%i.log

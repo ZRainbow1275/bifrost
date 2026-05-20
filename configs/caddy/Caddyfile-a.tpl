@@ -244,6 +244,48 @@
 }
 
 # =============================================================================
+# Server B private distribution endpoints
+# =============================================================================
+(server_b_proxy) {
+	reverse_proxy {args[0]} {
+		header_up Host {host}
+		header_up X-Forwarded-Proto https
+		header_up X-Real-IP {client_ip}
+		lb_try_duration 2s
+		fail_duration 30s
+	}
+}
+
+api.{{DOMAIN}} {
+	tls {{TLS_CERT_FILE}} {{TLS_KEY_FILE}}
+	encode gzip
+	import server_b_proxy http://10.8.0.2:3000
+}
+
+npm.{{DOMAIN}} {
+	tls {{TLS_CERT_FILE}} {{TLS_KEY_FILE}}
+	encode gzip
+	handle {
+		request_body {
+			max_size 100MB
+		}
+		import server_b_proxy http://10.8.0.2:4873
+	}
+}
+
+files.{{DOMAIN}} {
+	tls {{TLS_CERT_FILE}} {{TLS_KEY_FILE}}
+	encode gzip
+	@git path /git/*
+	handle @git {
+		import server_b_proxy http://10.8.0.2:8082
+	}
+	handle {
+		import server_b_proxy http://10.8.0.2:8081
+	}
+}
+
+# =============================================================================
 # HTTP to HTTPS redirect (automatic with Caddy, but explicit for clarity)
 # =============================================================================
 http://{{DOMAIN}} {
