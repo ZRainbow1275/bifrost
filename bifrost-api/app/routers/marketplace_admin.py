@@ -32,21 +32,15 @@ Exit-code mapping (spec.md section 7.2):
 
 Timeouts surface as 504. Missing key file surfaces as 503.
 
-DRY note: helpers in marketplace.py (_run_readonly_command / _probe_http /
-_ssh_key_path) are deliberately *not* reused here because the user, key path
-and timeout are all different. PR-7 cleanup will lift the common SSH wrapper
-into a shared module; PR-5a keeps the duplication local to honour the
-"禁区: 不许改 marketplace.py" constraint.
+DRY note: read/write routers keep separate users and exit-code mappings, while
+the shared subprocess/key/timeout mechanics live in app.utils.ssh_runner.
 """
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
-import logging
 import uuid
-from pathlib import Path
 from typing import Any
 
 import yaml
@@ -56,8 +50,7 @@ from pydantic import BaseModel, Field
 from ..config import Settings
 from ..dependencies import get_settings, require_admin
 from ..schemas import ApiResponse
-
-logger = logging.getLogger(__name__)
+from ..utils.ssh_runner import SshChannel, run_ssh_command
 
 router = APIRouter(
     prefix="/marketplace/admin",
@@ -92,10 +85,6 @@ class CurateBody(BaseModel):
     action: str = Field(..., pattern=r"^(feature|deprecate|remove)$")
 
 
-def _admin_ssh_key_path(settings: Settings) -> Path:
-    return Path(settings.admin_ssh_key)
-
-
 def _actor_token(x_admin_key: str) -> str:
     """Short non-secret identifier for audit log attribution.
 
@@ -122,50 +111,24 @@ async def _run_admin_command(
             detail=f"admin-router 拒绝未授权 verb: {verb}",
         )
 
-    key_path = _admin_ssh_key_path(settings)
-    if not key_path.is_file():
-        raise HTTPException(
-            status_code=503,
-            detail="Server B 管理 SSH 通道未配置",
-        )
-
-    ssh_target = f"{settings.admin_user}@{settings.server_b_wg_ip}"
     remote_command_parts = [verb, *(args or [])]
     remote_command = " ".join(remote_command_parts)
-    ssh_args = [
-        "ssh",
-        "-i",
-        str(key_path),
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
-        "-o",
-        "ConnectTimeout=5",
-        ssh_target,
+
+    result = await run_ssh_command(
+        SshChannel(
+            label=f"admin verb={verb}",
+            user=settings.admin_user,
+            host=settings.server_b_wg_ip,
+            key_path=settings.admin_ssh_key,
+            timeout_sec=settings.admin_ssh_timeout_sec,
+            missing_key_detail="Server B 管理 SSH 通道未配置",
+            timeout_detail="Server B 管理 SSH 请求超时",
+            unavailable_detail="Server B 管理 SSH 通道不可用",
+        ),
         remote_command,
-    ]
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *ssh_args,
-            stdin=asyncio.subprocess.PIPE if stdin_bytes is not None else None,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(input=stdin_bytes),
-            timeout=settings.admin_ssh_timeout_sec,
-        )
-    except TimeoutError as exc:
-        raise HTTPException(status_code=504, detail="Server B 管理 SSH 请求超时") from exc
-    except OSError as exc:
-        logger.warning("Unable to run admin SSH command (verb=%s): %s", verb, exc)
-        raise HTTPException(status_code=503, detail="Server B 管理 SSH 通道不可用") from exc
-
-    stdout = stdout_bytes.decode("utf-8", errors="replace")
-    stderr = stderr_bytes.decode("utf-8", errors="replace")
-    return proc.returncode if proc.returncode is not None else -1, stdout, stderr
+        stdin_bytes=stdin_bytes,
+    )
+    return result.returncode, result.stdout, result.stderr
 
 
 def _map_admin_exit_code(returncode: int, stdout: str, stderr: str) -> None:

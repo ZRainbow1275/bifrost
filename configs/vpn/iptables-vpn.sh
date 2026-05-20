@@ -12,7 +12,7 @@
 #   WG_INTERFACE    - WireGuard interface name (wg0)
 #
 # Architecture:
-#   Internet --[51820/udp]--> WireGuard --> VPN Clients (10.8.0.0/24)
+#   Internet --[BIFROST_WG_PORT/udp]--> WireGuard --> VPN Clients (10.8.0.0/24)
 #                                                |
 #                                                v
 #                                        Services (172.16.0.0/24)
@@ -26,6 +26,9 @@
 # =============================================================================
 
 set -euo pipefail
+
+[[ -f /etc/bifrost.env ]] && source /etc/bifrost.env
+WG_PORT="${BIFROST_WG_PORT:-51820}"
 
 # =============================================================================
 # Validate required environment variables
@@ -188,7 +191,7 @@ iptables -A VPN_INPUT \
 
 # WireGuard endpoint
 iptables -A VPN_INPUT \
-    -p udp --dport 51820 \
+    -p udp --dport "${WG_PORT}" \
     -j ACCEPT \
     -m comment --comment "VPN: WireGuard endpoint (public)"
 
@@ -411,7 +414,7 @@ echo ""
 echo "[iptables-vpn] ============================================"
 echo "[iptables-vpn] VPN Network Isolation Rules Applied"
 echo "[iptables-vpn] ============================================"
-echo "[iptables-vpn] PUBLIC ports  : 51820/udp (WG), 443/tcp (HTTPS), 80/tcp (HTTP)"
+echo "[iptables-vpn] PUBLIC ports  : ${WG_PORT}/udp (WG), 443/tcp (HTTPS), 80/tcp (HTTP)"
 echo "[iptables-vpn] VPN-ONLY ports: 3000 (API), 19999 (Netdata), 13000 (Firezone)"
 echo "[iptables-vpn]                 8080 (Headscale), 9090 (Prometheus), 3001 (Grafana)"
 echo "[iptables-vpn] BLOCKED       : External -> Service subnet (${SERVICE_SUBNET})"

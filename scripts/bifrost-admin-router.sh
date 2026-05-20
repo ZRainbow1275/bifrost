@@ -41,23 +41,39 @@ readonly RENDER_TRIGGER_FILE="${BARE_REPO}/packed-refs"
 readonly GIT_AUTHOR_NAME="bifrost-admin"
 readonly GIT_AUTHOR_EMAIL="bifrost-admin@uuhfn.cloud"
 
+# Build a compact JSON object with jq so caller-controlled fields never rely on
+# shell string interpolation for escaping.
+audit_json() {
+    jq -cn "$@"
+}
+
 # Print a one-line JSON record to stderr (journalctl) and to the audit log.
-# Args: action success(true|false) [extra-json-fragment]
+# Args: action success(true|false) [extra-json-object]
 audit_log() {
     local action="$1"
     local success="$2"
-    local extra="${3:-}"
+    local extra="${3:-{}}"
     local ts
     ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     local audit_id="${AUDIT_ID:-unknown}"
     local actor="${ACTOR:-unknown}"
     local line
-    if [[ -n "${extra}" ]]; then
-        line=$(printf '{"ts":"%s","audit_id":"%s","action":"%s","actor":"%s","success":%s,%s}' \
-            "${ts}" "${audit_id}" "${action}" "${actor}" "${success}" "${extra}")
-    else
-        line=$(printf '{"ts":"%s","audit_id":"%s","action":"%s","actor":"%s","success":%s}' \
-            "${ts}" "${audit_id}" "${action}" "${actor}" "${success}")
+
+    if ! line="$(jq -cn \
+        --arg ts "${ts}" \
+        --arg audit_id "${audit_id}" \
+        --arg action "${action}" \
+        --arg actor "${actor}" \
+        --argjson success "${success}" \
+        --argjson extra "${extra}" \
+        '{ts:$ts,audit_id:$audit_id,action:$action,actor:$actor,success:$success}
+         + ($extra | del(.ts,.audit_id,.action,.actor,.success))' 2>/dev/null)"; then
+        line="$(jq -cn \
+            --arg ts "${ts}" \
+            --arg audit_id "${audit_id}" \
+            --arg action "${action}" \
+            --arg actor "${actor}" \
+            '{ts:$ts,audit_id:$audit_id,action:$action,actor:$actor,success:false,err:"invalid audit extra JSON"}')"
     fi
     if [[ -w "${AUDIT_LOG}" || ( ! -e "${AUDIT_LOG}" && -w "$(dirname "${AUDIT_LOG}")" ) ]]; then
         printf '%s\n' "${line}" >> "${AUDIT_LOG}"
@@ -71,9 +87,23 @@ bail() {
     local code="$1"
     local action="$2"
     local message="$3"
-    audit_log "${action}" "false" "\"err\":\"${message//\"/\\\"}\""
+    audit_log "${action}" "false" "$(audit_json --arg err "${message}" '{err:$err}')"
     printf 'admin-router: %s\n' "${message}" >&2
     exit "${code}"
+}
+
+validate_tarball_entries() {
+    local tarball="$1"
+    local entry
+
+    while IFS= read -r entry; do
+        [[ -z "${entry}" ]] && continue
+        case "${entry}" in
+            /*|..|../*|*/../*|*/..)
+                return 1
+                ;;
+        esac
+    done < <(tar -tzf "${tarball}") || return 1
 }
 
 verb="${1:-}"
@@ -108,6 +138,8 @@ case "${verb}" in
         cd "${work}"
         printf '%s' "${tarball_b64}" | base64 -d > plugin.tar.gz \
             || bail 1 "upload" "tarball base64 decode failed"
+        validate_tarball_entries "${work}/plugin.tar.gz" \
+            || bail 2 "upload" "tarball contains unsafe absolute or parent-relative paths"
         git clone --quiet "${BARE_REPO}" repo \
             || bail 1 "upload" "git clone bare failed"
         cd repo
@@ -115,7 +147,7 @@ case "${verb}" in
             bail 9 "upload" "tag plugins/${plugin}/v${version} already exists"
         fi
         install -d "plugins/${plugin}"
-        tar -xzf "${work}/plugin.tar.gz" -C "plugins/${plugin}" \
+        tar --no-same-owner --no-same-permissions -xzf "${work}/plugin.tar.gz" -C "plugins/${plugin}" \
             || bail 1 "upload" "tarball extract failed"
         git add -A "plugins/${plugin}"
         if ! git diff --cached --quiet; then
@@ -130,7 +162,8 @@ case "${verb}" in
         git push --quiet origin HEAD:main --tags \
             || bail 1 "upload" "git push failed"
         audit_log "upload" "true" \
-            "\"plugin\":\"${plugin}\",\"version\":\"${version}\",\"tag\":\"plugins/${plugin}/v${version}\""
+            "$(audit_json --arg plugin "${plugin}" --arg version "${version}" --arg tag "plugins/${plugin}/v${version}" \
+                '{plugin:$plugin,version:$version,tag:$tag}')"
         printf '{"tag":"plugins/%s/v%s"}\n' "${plugin}" "${version}"
         exit 0
         ;;
@@ -158,7 +191,8 @@ case "${verb}" in
         git push --quiet origin "plugins/${plugin}/v${version}" \
             || bail 1 "tag-create" "git push failed"
         audit_log "tag-create" "true" \
-            "\"plugin\":\"${plugin}\",\"version\":\"${version}\",\"target\":\"${target_ref}\""
+            "$(audit_json --arg plugin "${plugin}" --arg version "${version}" --arg target "${target_ref}" \
+                '{plugin:$plugin,version:$version,target:$target}')"
         exit 0
         ;;
 
@@ -174,7 +208,8 @@ case "${verb}" in
             *) bail 2 "approve" "invalid decision: ${decision}" ;;
         esac
         audit_log "approve" "true" \
-            "\"plugin\":\"${plugin}\",\"version\":\"${version}\",\"decision\":\"${decision}\""
+            "$(audit_json --arg plugin "${plugin}" --arg version "${version}" --arg decision "${decision}" \
+                '{plugin:$plugin,version:$version,decision:$decision}')"
         exit 0
         ;;
 
@@ -202,7 +237,8 @@ case "${verb}" in
         git add .claude-plugin/marketplace.json
         if git diff --cached --quiet; then
             audit_log "curate" "true" \
-                "\"plugin\":\"${plugin}\",\"action\":\"${action}\",\"noop\":true"
+                "$(audit_json --arg plugin "${plugin}" --arg action "${action}" \
+                    '{plugin:$plugin,action:$action,noop:true}')"
             exit 0
         fi
         git -c user.email="${GIT_AUTHOR_EMAIL}" -c user.name="${GIT_AUTHOR_NAME}" \
@@ -211,7 +247,8 @@ case "${verb}" in
         git push --quiet origin HEAD:main \
             || bail 1 "curate" "git push failed"
         audit_log "curate" "true" \
-            "\"plugin\":\"${plugin}\",\"action\":\"${action}\""
+            "$(audit_json --arg plugin "${plugin}" --arg action "${action}" \
+                '{plugin:$plugin,action:$action}')"
         exit 0
         ;;
 
@@ -226,7 +263,7 @@ case "${verb}" in
         ;;
 
     *)
-        audit_log "${verb:-empty}" "false" "\"err\":\"forbidden verb\""
+        audit_log "${verb:-empty}" "false" "$(audit_json '{err:"forbidden verb"}')"
         printf 'forbidden\n' >&2
         exit 2
         ;;

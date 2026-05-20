@@ -22,6 +22,7 @@
 #   {{TLS_KEY_FILE}}         - IP certificate private key path in IP mode
 #   {{CLOUDFLARE_ORIGIN_CERT_FILE}} - Cloudflare Origin CA certificate path
 #   {{CLOUDFLARE_ORIGIN_KEY_FILE}}  - Cloudflare Origin CA private key path
+#   {{BIND_ADDRESS}}         - Optional wg0 bind address for vpn-first (10.8.0.1)
 #
 # Place the rendered file at: /etc/caddy/Caddyfile
 # =============================================================================
@@ -51,6 +52,7 @@
 # Main site: API Gateway + Decoy Website
 # =============================================================================
 {{DOMAIN}} {
+	# vpn-first runtime rendering adds: bind 10.8.0.1
 	# --------------------------------------------------
 	# TLS Configuration
 	# --------------------------------------------------
@@ -67,6 +69,10 @@
 	# tls {{CLOUDFLARE_ORIGIN_CERT_FILE}} {{CLOUDFLARE_ORIGIN_KEY_FILE}} {
 	# 	protocols tls1.2 tls1.3
 	# 	ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+	# }
+	# Internal CA mode (BIFROST_SERVER_A_TLS_MODE=internal, vpn-first recommended):
+	# tls internal {
+	# 	protocols tls1.2 tls1.3
 	# }
 
 	# --------------------------------------------------
@@ -282,6 +288,43 @@ files.{{DOMAIN}} {
 	}
 	handle {
 		import server_b_proxy http://10.8.0.2:8081
+	}
+}
+
+panel.{{DOMAIN}} {
+	tls {{TLS_CERT_FILE}} {{TLS_KEY_FILE}}
+	encode gzip
+
+	@panel_private {
+		remote_ip {{ADMIN_ALLOWED_RANGES}}
+	}
+	@panel_public {
+		not remote_ip {{ADMIN_ALLOWED_RANGES}}
+	}
+	handle @panel_public {
+		respond "Bifrost marketplace panel requires VPN/private access in vpn-first profile" 403
+	}
+	handle @panel_private {
+		@api_or_marketplace path /api/* /marketplace/*
+		handle @api_or_marketplace {
+			reverse_proxy 127.0.0.1:8000 {
+				header_up X-Real-IP {remote_host}
+				header_up X-Forwarded-For {remote_host}
+				header_up X-Forwarded-Proto {scheme}
+				header_up Host {host}
+				transport http {
+					dial_timeout 5s
+					response_header_timeout 30s
+				}
+			}
+		}
+		handle {
+			root * /var/www/bifrost-api-web/dist
+			try_files {path} /index.html
+			file_server
+			@assets path /assets/*
+			header @assets Cache-Control "public, max-age=31536000, immutable"
+		}
 	}
 }
 

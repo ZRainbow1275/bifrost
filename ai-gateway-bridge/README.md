@@ -114,7 +114,7 @@ export OPENAI_API_KEY=sk-xxxxx
 |------|----------------|----------------|
 | 系统 | Ubuntu 22.04+, Debian 12+, CentOS 9+ | 同左 |
 | 配置 | 2C4G, 5M+ 带宽 | 2C2G |
-| 端口 | 80, 443, 51820/UDP (VPN) | 443 |
+| 端口 | 80, 443, WireGuard UDP (`BIFROST_WG_PORT`) | 443 |
 
 ## 技术栈
 

@@ -36,6 +36,46 @@ readonly _VPN_SH_LOADED=1
 # Source shared utilities
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
+_vpn_generate_wg_port() {
+    if command -v shuf >/dev/null 2>&1; then
+        shuf -i 30000-65000 -n 1
+    else
+        awk 'BEGIN { srand(); print int(30000 + rand() * 35001) }'
+    fi
+}
+
+_vpn_resolve_wg_port() {
+    bifrost_env_load
+    if [[ -n "${BIFROST_WG_PORT:-}" ]]; then
+        echo "${BIFROST_WG_PORT}"
+        return 0
+    fi
+
+    local persisted
+    persisted="$(bifrost_env_get BIFROST_WG_PORT 2>/dev/null || true)"
+    if [[ -n "${persisted}" ]]; then
+        echo "${persisted}"
+        return 0
+    fi
+
+    local current_port
+    current_port="$(wg show wg0 listen-port 2>/dev/null || true)"
+    if [[ -n "${current_port}" ]]; then
+        if [[ "$(id -u 2>/dev/null || echo 1)" == "0" ]]; then
+            bifrost_env_set "BIFROST_WG_PORT" "${current_port}" || true
+        fi
+        echo "${current_port}"
+        return 0
+    fi
+
+    local generated
+    generated="$(_vpn_generate_wg_port)"
+    if [[ "$(id -u 2>/dev/null || echo 1)" == "0" ]]; then
+        bifrost_env_set "BIFROST_WG_PORT" "${generated}" || true
+    fi
+    echo "${generated}"
+}
+
 # =============================================================================
 # Constants
 # =============================================================================
@@ -48,7 +88,7 @@ readonly SERVICE_SUBNET="172.16.0.0/24"
 readonly SERVICE_GATEWAY="172.16.0.1"
 
 # WireGuard
-readonly WG_PORT=51820
+readonly WG_PORT="$(_vpn_resolve_wg_port)"
 readonly WG_INTERFACE="wg0"
 
 # Firezone
@@ -311,7 +351,7 @@ NETWORK
 # =============================================================================
 
 # Configure iptables rules for VPN network isolation.
-# - 51820/udp: WireGuard endpoint (allow from anywhere)
+# - ${WG_PORT}/udp: WireGuard endpoint (allow from anywhere)
 # - 443/tcp: HTTPS endpoint (allow from anywhere)
 # - Service ports: ONLY accessible from VPN subnet (10.8.0.0/24)
 # - External -> service ports: DENY
@@ -361,11 +401,11 @@ setup_vpn_firewall() {
     # Previously this disabled UFW entirely, which undid all security.sh hardening.
     # UFW and iptables can coexist: UFW manages INPUT/OUTPUT default policies while
     # VPN iptables rules use custom chains (VPN_FORWARD, VPN_NAT) that don't conflict.
-    # security.sh already opens port 51820/udp for WireGuard.
+    # security.sh already opens ${WG_PORT}/udp for WireGuard.
     if check_command ufw && ufw status 2>/dev/null | grep -q "active"; then
         log_info "UFW is active. VPN iptables rules use custom chains and coexist with UFW."
         log_info "Ensuring WireGuard port is open in UFW..."
-        ufw allow 51820/udp comment "WireGuard VPN" 2>/dev/null || true
+        ufw allow "${WG_PORT}/udp" comment "WireGuard VPN" 2>/dev/null || true
     fi
 
     _vpn_save_state "FIREWALL_CONFIGURED" "1"
@@ -908,6 +948,10 @@ _create_wireguard_user() {
 
     local server_endpoint
     server_endpoint="${PUBLIC_IP}:${WG_PORT}"
+    local client_allowed_ips="10.8.0.0/24"
+    if [[ -n "${SERVER_B_IP:-}" && "${SERVER_B_IP}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        client_allowed_ips="${client_allowed_ips},${SERVER_B_IP}/32"
+    fi
 
     # Generate client config from template
     local client_conf="${user_dir}/wg-${username}.conf"
@@ -921,7 +965,7 @@ _create_wireguard_user() {
             "SERVER_PUBLIC_KEY=${server_pubkey}" \
             "PRESHARED_KEY=${preshared_key}" \
             "SERVER_ENDPOINT=${server_endpoint}" \
-            "ALLOWED_IPS=10.8.0.0/24,172.16.0.0/24" \
+            "ALLOWED_IPS=${client_allowed_ips}" \
             "PERSISTENT_KEEPALIVE=25"
     else
         # Inline fallback
@@ -935,7 +979,7 @@ DNS = 10.8.0.1
 PublicKey = ${server_pubkey}
 PresharedKey = ${preshared_key}
 Endpoint = ${server_endpoint}
-AllowedIPs = 10.8.0.0/24, 172.16.0.0/24
+AllowedIPs = ${client_allowed_ips}
 PersistentKeepalive = 25
 CONF
     fi

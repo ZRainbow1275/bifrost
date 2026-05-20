@@ -100,7 +100,7 @@ Bifrost 支持三种暴露面 profile，并默认采用 `vpn-first`：
 
 | 面 | 允许 | 禁止 |
 |----|------|------|
-| Server B 公网入站 | `22/tcp` 双通道维护入口、`51820/udp` WireGuard、既有 Xray Reality 端口 | `3000/4873/8081/8082` 从公网直接访问 |
+| Server B 公网入站 | `22/tcp` 双通道维护入口、配置的 WireGuard UDP 端口、既有 Xray Reality 端口 | `3000/4873/8081/8082` 从公网直接访问 |
 | Server B wg0 入站 | A 和白名单 peer 访问 `3000/4873/8081/8082` | 团队成员绕过 A 直连 B 的服务端口 |
 | Docker 端口 | 绑定 `10.8.0.2:<port>`，并用 `DOCKER-USER` drop 公网 eth0 | `0.0.0.0:<port>` 或仅依赖 nftables 主链 |
 | bifrost-api 日志读取 | `bifrost-readonly` 专用用户 + forced-command 白名单 | root SSH 私钥、任意命令 SSH、交互 shell |

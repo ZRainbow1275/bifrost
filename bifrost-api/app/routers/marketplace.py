@@ -12,17 +12,13 @@ of scripts/bifrost-readonly-router.sh:
 * marketplace:disk-report    -> du -sh over the three marketplace paths
 * logs:marketplace-render    -> journalctl -u marketplace-render.service
 * logs:upstream-schema-check -> journalctl -u upstream-schema-check.service
-
-The optional admin-audit log service is intentionally absent until PR-5a
-ships, so requests for it return 422 (spec section 7.2 error mapping).
+* logs:admin-audit           -> tail -n 200 /var/log/marketplace/admin-audit.log
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -32,6 +28,7 @@ from fastapi.responses import PlainTextResponse
 from ..config import Settings
 from ..dependencies import get_settings, require_admin
 from ..schemas import ApiResponse
+from ..utils.ssh_runner import SshChannel, run_ssh_command
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +43,7 @@ _HTTP_TIMEOUT_SECONDS = 3.0
 _LOG_SERVICE_COMMANDS: dict[str, str] = {
     "render": "logs:marketplace-render",
     "schema-check": "logs:upstream-schema-check",
+    "admin-audit": "logs:admin-audit",
 }
 
 _DISK_PATH_TO_KEY: dict[str, str] = {
@@ -69,60 +67,32 @@ async def _probe_http(url: str) -> dict[str, Any]:
         return {"up": False, "status_code": 0}
 
 
-def _ssh_key_path(settings: Settings) -> Path:
-    return Path(settings.readonly_ssh_key)
-
-
 async def _run_readonly_command(settings: Settings, command: str) -> str:
     """Run a whitelisted forced-command SSH action against Server B."""
-    key_path = _ssh_key_path(settings)
-    if not key_path.is_file():
-        raise HTTPException(
-            status_code=503,
-            detail="Server B 只读 SSH 通道未配置",
-        )
-
-    ssh_target = f"{settings.readonly_user}@{settings.server_b_wg_ip}"
-    ssh_args = [
-        "ssh",
-        "-i",
-        str(key_path),
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
-        "-o",
-        "ConnectTimeout=5",
-        ssh_target,
+    result = await run_ssh_command(
+        SshChannel(
+            label="readonly",
+            user=settings.readonly_user,
+            host=settings.server_b_wg_ip,
+            key_path=settings.readonly_ssh_key,
+            timeout_sec=settings.readonly_ssh_timeout_sec,
+            missing_key_detail="Server B 只读 SSH 通道未配置",
+            timeout_detail="Server B 只读 SSH 请求超时",
+            unavailable_detail="Server B 只读 SSH 通道不可用",
+        ),
         command,
-    ]
+    )
 
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *ssh_args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(),
-            timeout=settings.readonly_ssh_timeout_sec,
-        )
-    except TimeoutError as exc:
-        raise HTTPException(status_code=504, detail="Server B 只读 SSH 请求超时") from exc
-    except OSError as exc:
-        logger.warning("Unable to run readonly SSH command: %s", exc)
-        raise HTTPException(status_code=503, detail="Server B 只读 SSH 通道不可用") from exc
-
-    if proc.returncode != 0:
+    if result.returncode != 0:
         logger.warning(
             "Readonly SSH command failed: command=%s code=%s stderr=%s",
             command,
-            proc.returncode,
-            stderr.decode("utf-8", errors="replace")[:300],
+            result.returncode,
+            result.stderr[:300],
         )
         raise HTTPException(status_code=502, detail="Server B 只读 SSH 命令失败")
 
-    return stdout.decode("utf-8", errors="replace")
+    return result.stdout
 
 
 def _tail_text(text: str, tail: int) -> str:
@@ -260,9 +230,6 @@ async def marketplace_logs(
     settings: Settings = Depends(get_settings),
 ) -> PlainTextResponse:
     """Return tailed marketplace logs through the readonly-router SSH channel.
-
-    service=admin-audit is accepted by the validator pattern but not yet
-    wired into the readonly-router (PR-5a), so it returns 422 (spec section 7.2).
     """
     command = _LOG_SERVICE_COMMANDS.get(service)
     if command is None:

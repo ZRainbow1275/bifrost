@@ -39,7 +39,7 @@ Step 4: 员工入职 — 安装 WireGuard → 连 VPN → 配置 AI 工具
 ### 网络要求
 - Server A 能访问 Server B 的 443 端口
 - Server A 的 80/443 端口对用户开放
-- Server A 的 51820/UDP 端口对 VPN 客户端开放（部署 VPN 时需要）
+- Server A 的 WireGuard UDP 端口对 VPN 客户端开放（部署 VPN 时需要；当前值写入 `/etc/bifrost.env` 的 `BIFROST_WG_PORT`，旧安装可能为 `51820`）
 - 两台服务器最好是全新安装的系统（推荐；如需 DD 重装，仅在首次部署前且完成备份/云依赖审查后使用）
 
 ---
@@ -584,6 +584,19 @@ export BIFROST_EXPOSURE_PROFILE=public-managed
 export BIFROST_NEW_API_IMAGE="calciumion/new-api:<fixed-version-or-digest>"
 ```
 
+## Server A v0.6 hardening
+
+Server A v0.6 keeps the existing `domain`, `cloudflare-origin`, and `ip` TLS modes for compatibility, but the recommended hardened path is:
+
+```bash
+export BIFROST_EXPOSURE_PROFILE=vpn-first
+export BIFROST_SERVER_A_TLS_MODE=internal
+export BIFROST_ADMIN_ALLOWED_RANGES="10.8.0.0/24,127.0.0.1"
+bash ./install.sh --server-a
+```
+
+Runtime values that must survive upgrades are persisted in `/etc/bifrost.env`, including `BIFROST_WG_PORT` and optional `BIFROST_FIREWALL_BACKEND`. Migration details are in `docs/MIGRATION-v0.6.md`; internal CA distribution and rotation are in `docs/CA-MANAGEMENT.md`.
+
 ---
 
 ## Server B 私有分发栈
@@ -689,7 +702,7 @@ bash scripts/e2e-distribution-rehearsal.sh --execute
 - `curl -I https://npm.uuhfn.cloud/` 返回 Verdaccio。
 - `git ls-remote https://files.uuhfn.cloud/git/claude-for-legal-zh.git` 成功。
 - `curl https://api.uuhfn.cloud/api/status` 返回 NewAPI 状态。
-- `nmap -p- <SERVER_B_PUBLIC_IP>` 只剩 `22/tcp` 与 `51820/udp` 这类预期入口。
+- `nmap -p- <SERVER_B_PUBLIC_IP>` 只剩 `22/tcp` 与配置的 WireGuard UDP 端口（如 `${BIFROST_SERVER_B_WG_PORT:-51820}`）这类预期入口。
 - `restic snapshots` 在 Server A 备份仓库能看到 Server B 来源快照。
 
 ### 回滚
@@ -749,7 +762,7 @@ pwsh -File scripts/legacy-vps-final-snapshot.ps1 `
 ### 部署前置条件
 
 1. Server B 私有分发栈（上一节）已经启用：`bash scripts/server-b.sh --enable-distribution` 跑过，`/var/lib/git-mirrors`、`/var/lib/dist`、`/var/log/marketplace` 三个目录存在。
-2. DNS：在域名提供商把 `panel.uuhfn.cloud` 的 `A` 记录指向 Server A 公网 IP（Caddy 反代到 bifrost-api）。**注意：DNS 步骤只在 PR-3 panel.uuhfn.cloud Caddy 配置落地后生效**；在 PR-3 合并前，DNS 可以先解析，但浏览器访问会落到默认 vhost。
+2. DNS：在域名提供商把 `panel.uuhfn.cloud` 的 `A` 记录指向 Server A 公网 IP（Caddy 反代到 bifrost-api）。`panel.uuhfn.cloud` 已由 Server A Caddy 合同接管：非 `{{ADMIN_ALLOWED_RANGES}}` 来源会直接 403，VPN/管理网段内访问 SPA；`/marketplace/*` 和 `/api/*` 作为后端 API 路由反代到 bifrost-api。
 3. bifrost-api 已经配置 `BIFROST_ADMIN_KEY`（参考"暴露面 Profile"小节），并且独立的 `bifrost-admin` SSH key 已经写入 Server B 的 `~bifrost-admin/.ssh/authorized_keys`。
 4. `prompts/0519-1/team-config/.claude/settings.json.template` 中的 `extraKnownMarketplaces.bifrost-internal.source.url` 应该是 `https://files.uuhfn.cloud/git/bifrost-internal-plugins.git`（PR-6 默认值，无 `git+` 前缀；`source.source = "url"`）。
 
@@ -770,6 +783,25 @@ ls /var/lib/git-mirrors/bifrost-internal-plugins.git/HEAD
 cat /var/lib/dist/plugins/state.json | jq .
 dig +short panel.uuhfn.cloud
 ```
+
+### Server A 部署可视化面板
+
+面板源码在 `bifrost-api-web/`，构建产物由 Server A Caddy 从 `/var/www/bifrost-api-web/dist/` 提供：
+
+```bash
+cd bifrost-api-web
+pnpm install --frozen-lockfile
+pnpm lint
+pnpm test
+pnpm build
+
+cd ..
+bash ./install.sh --deploy-panel
+# 或直接：
+bash ./scripts/server-a.sh --deploy-panel
+```
+
+`--deploy-panel` 默认复制 `bifrost-api-web/dist/` 到 `/var/www/bifrost-api-web/dist/`，可用 `BIFROST_PANEL_SOURCE_DIR` 和 `BIFROST_PANEL_DIST_DIR` 覆盖。部署后从 VPN/管理网段内访问 `https://panel.uuhfn.cloud/`，使用 `X-Admin-Key` 登录。
 
 ### Admin 上传 plugin SOP
 
@@ -802,7 +834,7 @@ YAML
 # 3. 本地测试通过后打 tarball
 tar czf my-plugin-v0.1.0.tar.gz -C plugins/my-plugin .
 
-# 4. 浏览器走 VPN/管理网段访问 https://panel.uuhfn.cloud/marketplace/upload
+# 4. 浏览器走 VPN/管理网段访问 https://panel.uuhfn.cloud/upload
 #    上传 tarball + manifest.yaml；X-Admin-Key 来自管理员
 
 # 4'. 或者直接 curl（脚本化场景）
@@ -831,7 +863,7 @@ curl -X POST \
 }
 ```
 
-所有动作落到 `/var/log/marketplace/admin-audit.log`（Server B），可通过 bifrost-api `/marketplace/logs?service=admin-audit` 读取（PR-5a deferred 路径，PR-7 暂占位 422）。
+所有动作落到 `/var/log/marketplace/admin-audit.log`（Server B），可通过 bifrost-api `/marketplace/logs?service=admin-audit` 读取。
 
 ### 版本回退 / curate
 

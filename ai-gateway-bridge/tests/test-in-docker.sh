@@ -214,6 +214,9 @@ test_ports() {
        grep -q 'header_up X-Forwarded-Prefix /manage' "${SCRIPT_DIR}/scripts/server-a.sh" && \
        grep -Fq 'path /api/* /static/* /logo.png /dashboard' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
        grep -Fq 'path /api/* /static/* /logo.png /dashboard' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -Fq 'panel.{{DOMAIN}}' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -Fq '@panel_private' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -Fq 'root * /var/www/bifrost-api-web/dist' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
        grep -q '@manage_private' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
        grep -q '@manage_private' "${SCRIPT_DIR}/scripts/server-a.sh" && \
        grep -q 'New API static assets require VPN/private access in vpn-first profile' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \

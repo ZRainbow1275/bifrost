@@ -70,11 +70,11 @@
 
   Agent manager (admin)
   ─────────────────────
-  https://panel.uuhfn.cloud/marketplace  (Vue SPA, X-Admin-Key header)
-    ├─ Browse   (GET /marketplace/list)
-    ├─ Status   (GET /marketplace/status)
-    ├─ Upload   (POST /marketplace/admin/upload, multipart)
-    └─ Curate   (POST /marketplace/admin/curate / approve)
+  https://panel.uuhfn.cloud/  (Vue SPA, X-Admin-Key header; page routes: /plugins, /status, /upload, /curate)
+    ├─ Browse   (/plugins → GET /marketplace/list)
+    ├─ Status   (/status → GET /marketplace/status)
+    ├─ Upload   (/upload → POST /marketplace/admin/upload, multipart)
+    └─ Curate   (/curate → POST /marketplace/admin/curate / approve)
   必须先通过 @panel_private remote_ip 网络层验证（vpn-first），再过 X-Admin-Key 应用层验证。
 ```
 
@@ -625,7 +625,7 @@ bifrost-internal-plugins.git (bare on B:/var/lib/git-mirrors/)
   2. 本地写 plugins/<name>/ + 测试
   3. 构建 tarball：tar czf hello-v0.2.0.tar.gz -C plugins/hello-world-skill .
   4. 准备 manifest.yaml
-  5. 通过浏览器（在 VPN/管理网段内）访问 https://panel.uuhfn.cloud/marketplace/upload
+  5. 通过浏览器（在 VPN/管理网段内）访问 https://panel.uuhfn.cloud/upload
   6. Vue SPA 表单上传 tarball + manifest（X-Admin-Key header by login session）
   7. Bifrost-api 接收 → SSH 到 B → admin-router 拉 tag + push 回 bare
   8. marketplace-render.path 触发 → render → marketplace.json 自动更新
@@ -811,16 +811,16 @@ D:/Desktop/CREATOR FIVE/
 // src/router/index.ts (vue-router 4)
 [
   { path: '/login',                       component: Login                                    },
-  { path: '/marketplace',                 component: Browse,        meta: { requiresAdmin: true } },
-  { path: '/marketplace/plugin/:name',    component: PluginDetail,  meta: { requiresAdmin: true } },
-  { path: '/marketplace/upload',          component: Upload,        meta: { requiresAdmin: true } },
-  { path: '/marketplace/curate',          component: Curate,        meta: { requiresAdmin: true } },
-  { path: '/marketplace/status',          component: Status,        meta: { requiresAdmin: true } },
-  { path: '/:pathMatch(.*)*',             redirect: '/marketplace'                            }
+  { path: '/plugins',                     component: Browse,        meta: { requiresAdmin: true } },
+  { path: '/plugins/:name',               component: PluginDetail,  meta: { requiresAdmin: true } },
+  { path: '/upload',                      component: Upload,        meta: { requiresAdmin: true } },
+  { path: '/curate',                      component: Curate,        meta: { requiresAdmin: true } },
+  { path: '/status',                      component: Status,        meta: { requiresAdmin: true } },
+  { path: '/:pathMatch(.*)*',             redirect: '/plugins'                                }
 ]
 ```
 
-`history` 模式 + Caddy `try_files {path} /index.html`（§3.2）。
+`history` 模式 + Caddy `try_files {path} /index.html`（§3.2）。浏览器页面路由不得占用 `/marketplace/*`，该前缀保留给 bifrost-api JSON/TEXT API；否则生产 Caddy 反代会把页面刷新请求误送到 API。
 
 ### 8.4 Pinia auth store
 

@@ -39,7 +39,7 @@ Step 4: 员工入职 — 安装 WireGuard → 连 VPN → 配置 AI 工具
 ### 网络要求
 - Server A 能访问 Server B 的 443 端口
 - Server A 的 80/443 端口对用户开放
-- Server A 的 51820/UDP 端口对 VPN 客户端开放（部署 VPN 时需要）
+- Server A 的 WireGuard UDP 端口对 VPN 客户端开放（部署 VPN 时需要；当前值写入 `/etc/bifrost.env` 的 `BIFROST_WG_PORT`，旧安装可能为 `51820`）
 - 两台服务器最好是全新安装的系统（推荐；如需 DD 重装，仅在首次部署前且完成备份/云依赖审查后使用）
 
 ---
@@ -506,6 +506,19 @@ bash scripts/update.sh new-api      # 更新 New API
 bash scripts/update.sh geoip        # 更新 GeoIP 数据库
 bash scripts/update.sh all          # 更新所有组件
 ```
+
+### Server A v0.6 hardening
+
+推荐的新部署路径：
+
+```bash
+export BIFROST_EXPOSURE_PROFILE=vpn-first
+export BIFROST_SERVER_A_TLS_MODE=internal
+export BIFROST_ADMIN_ALLOWED_RANGES="10.8.0.0/24,127.0.0.1"
+bash ./install.sh --server-a
+```
+
+运行时持久化变量写入 `/etc/bifrost.env`，例如 `BIFROST_WG_PORT` 和 `BIFROST_FIREWALL_BACKEND`。迁移步骤见 `docs/MIGRATION-v0.6.md`，内部 CA 分发与轮换见 `docs/CA-MANAGEMENT.md`。
 
 ---
 

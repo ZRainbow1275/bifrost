@@ -581,12 +581,22 @@ setup_firewall() {
     local ssh_port
     ssh_port="$(_get_ssh_port)"
     local fw_type
-    fw_type="$(_detect_firewall)"
+    bifrost_env_load
+    fw_type="${BIFROST_FIREWALL_BACKEND:-}"
+    if [[ -z "${fw_type}" ]]; then
+        fw_type="$(bifrost_env_get BIFROST_FIREWALL_BACKEND 2>/dev/null || true)"
+    fi
+    if [[ -z "${fw_type}" ]]; then
+        fw_type="$(_detect_firewall)"
+    fi
 
     log_info "Detected firewall: ${fw_type}"
     log_info "SSH port: ${ssh_port}"
 
     case "${fw_type}" in
+        nftables)
+            _setup_firewall_nftables "${ssh_port}" || return 1
+            ;;
         ufw)
             _setup_firewall_ufw "${ssh_port}" || return 1
             ;;
@@ -639,11 +649,17 @@ _setup_firewall_ufw() {
     log_info "[ufw] Allowing SSH on port ${ssh_port}/tcp"
     _run_firewall_step "Failed to allow SSH port ${ssh_port}/tcp in ufw." ufw allow "${ssh_port}/tcp" comment "SSH" || return 1
 
-    log_info "[ufw] Allowing HTTPS (443/tcp)"
-    _run_firewall_step "Failed to allow HTTPS in ufw." ufw allow 443/tcp comment "HTTPS" || return 1
+    local exposure_profile
+    exposure_profile="$(bifrost_exposure_profile)" || exposure_profile="vpn-first"
+    if [[ "${exposure_profile}" == "public-managed" || "${exposure_profile}" == "lab" ]]; then
+        log_info "[ufw] Allowing HTTPS (443/tcp) [profile=${exposure_profile}]"
+        _run_firewall_step "Failed to allow HTTPS in ufw." ufw allow 443/tcp comment "HTTPS (${exposure_profile})" || return 1
 
-    log_info "[ufw] Allowing HTTP (80/tcp) for certificate issuance"
-    _run_firewall_step "Failed to allow HTTP in ufw." ufw allow 80/tcp comment "HTTP (cert renewal)" || return 1
+        log_info "[ufw] Allowing HTTP (80/tcp) for certificate issuance [profile=${exposure_profile}]"
+        _run_firewall_step "Failed to allow HTTP in ufw." ufw allow 80/tcp comment "HTTP (cert/${exposure_profile})" || return 1
+    else
+        log_info "[ufw] vpn-first profile: NOT opening 80/443 to public; Caddy binds to wg0 only"
+    fi
 
     # Netdata — restrict to localhost by default; admin can add specific IPs later
     log_info "[ufw] Allowing Netdata (19999/tcp) on localhost only"
@@ -654,8 +670,10 @@ _setup_firewall_ufw() {
 
     # WireGuard VPN port — required for enterprise VPN (deployed in later step).
     # Must be opened here so VPN deployment does not need to disable ufw.
-    log_info "[ufw] Allowing WireGuard (51820/udp)"
-    _run_firewall_step "Failed to allow WireGuard port 51820/udp in ufw." ufw allow 51820/udp comment "WireGuard VPN" || return 1
+    bifrost_env_load
+    local wg_port="${BIFROST_WG_PORT:-51820}"
+    log_info "[ufw] Allowing WireGuard (${wg_port}/udp)"
+    _run_firewall_step "Failed to allow WireGuard port ${wg_port}/udp in ufw." ufw allow "${wg_port}/udp" comment "WireGuard VPN" || return 1
 
     # NOTE: Xray proxy ports (10808 SOCKS5, 10809 HTTP) are NOT opened here.
     # They are protected by the default deny incoming policy.
@@ -707,13 +725,19 @@ _setup_firewall_firewalld() {
     _run_firewall_step "Failed to allow SSH port ${ssh_port}/tcp in firewalld." \
         firewall-cmd --permanent --zone="${zone}" --add-port="${ssh_port}/tcp" || return 1
 
-    log_info "[firewalld] Allowing HTTPS (443/tcp)"
-    _run_firewall_step "Failed to allow HTTPS in firewalld." \
-        firewall-cmd --permanent --zone="${zone}" --add-service=https || return 1
+    local exposure_profile
+    exposure_profile="$(bifrost_exposure_profile)" || exposure_profile="vpn-first"
+    if [[ "${exposure_profile}" == "public-managed" || "${exposure_profile}" == "lab" ]]; then
+        log_info "[firewalld] Allowing HTTPS (443/tcp) [profile=${exposure_profile}]"
+        _run_firewall_step "Failed to allow HTTPS in firewalld." \
+            firewall-cmd --permanent --zone="${zone}" --add-service=https || return 1
 
-    log_info "[firewalld] Allowing HTTP (80/tcp) for certificate issuance"
-    _run_firewall_step "Failed to allow HTTP in firewalld." \
-        firewall-cmd --permanent --zone="${zone}" --add-service=http || return 1
+        log_info "[firewalld] Allowing HTTP (80/tcp) for certificate issuance [profile=${exposure_profile}]"
+        _run_firewall_step "Failed to allow HTTP in firewalld." \
+            firewall-cmd --permanent --zone="${zone}" --add-service=http || return 1
+    else
+        log_info "[firewalld] vpn-first profile: NOT opening 80/443 to public; Caddy binds to wg0 only"
+    fi
 
     # Netdata — use rich rule to restrict to localhost
     log_info "[firewalld] Allowing Netdata (19999/tcp) on localhost only"
@@ -722,9 +746,11 @@ _setup_firewall_firewalld() {
         --add-rich-rule='rule family="ipv4" source address="127.0.0.1" port port="19999" protocol="tcp" accept' || return 1
 
     # WireGuard VPN port — required for enterprise VPN (deployed in later step)
-    log_info "[firewalld] Allowing WireGuard (51820/udp)"
-    _run_firewall_step "Failed to allow WireGuard port 51820/udp in firewalld." \
-        firewall-cmd --permanent --zone="${zone}" --add-port=51820/udp || return 1
+    bifrost_env_load
+    local wg_port="${BIFROST_WG_PORT:-51820}"
+    log_info "[firewalld] Allowing WireGuard (${wg_port}/udp)"
+    _run_firewall_step "Failed to allow WireGuard port ${wg_port}/udp in firewalld." \
+        firewall-cmd --permanent --zone="${zone}" --add-port="${wg_port}/udp" || return 1
 
     # Set default target to DROP for incoming connections not matching any rule
     log_info "[firewalld] Setting default target to DROP"
@@ -742,6 +768,51 @@ _setup_firewall_firewalld() {
     }
 
     return 0
+}
+
+_setup_firewall_nftables() {
+    local ssh_port="$1"
+
+    bifrost_env_load
+    local wg_port="${BIFROST_WG_PORT:-51820}"
+    local admin_ranges="${BIFROST_ADMIN_ALLOWED_RANGES:-${BIFROST_ADMIN_ALLOWED_CIDRS:-}}"
+    if [[ -z "${admin_ranges}" ]]; then
+        log_error "[nftables] BIFROST_ADMIN_ALLOWED_RANGES is required for strict mode"
+        return 1
+    fi
+
+    log_info "[nftables] Installing nftables package..."
+    if command -v apt-get >/dev/null 2>&1; then
+        _run_firewall_step "Failed to install nftables." apt-get install -y nftables || return 1
+    elif command -v dnf >/dev/null 2>&1; then
+        _run_firewall_step "Failed to install nftables." dnf install -y nftables || return 1
+    elif command -v yum >/dev/null 2>&1; then
+        _run_firewall_step "Failed to install nftables." yum install -y nftables || return 1
+    fi
+
+    local tpl="${PROJECT_ROOT}/configs/nftables/nftables-a-strict.conf.tpl"
+    local out="/etc/nftables.conf"
+    if [[ ! -f "${tpl}" ]]; then
+        log_error "[nftables] template not found: ${tpl}"
+        return 1
+    fi
+
+    log_info "[nftables] Rendering strict Server A ruleset..."
+    sed -e "s|{{SSH_PORT}}|${ssh_port}|g" \
+        -e "s|{{WG_PORT}}|${wg_port}|g" \
+        -e "s|{{ADMIN_RANGES}}|${admin_ranges}|g" \
+        "${tpl}" > "${out}"
+    chmod 600 "${out}"
+
+    log_info "[nftables] Validating ruleset..."
+    if ! nft -c -f "${out}"; then
+        log_error "[nftables] ruleset validation failed"
+        return 1
+    fi
+
+    _run_firewall_step "Failed to enable nftables." systemctl enable --now nftables || return 1
+    _run_firewall_step "Failed to apply nftables ruleset." systemctl restart nftables || return 1
+    _save_state "FIREWALL_TYPE" "nftables" || return 1
 }
 
 # ==============================================================================
@@ -779,6 +850,12 @@ setup_fail2ban() {
 
     local ssh_port
     ssh_port="$(_get_ssh_port)"
+    local exposure_profile
+    exposure_profile="$(bifrost_exposure_profile)" || exposure_profile="vpn-first"
+    local caddy_jails_enabled="false"
+    if [[ "${exposure_profile}" != "vpn-first" ]]; then
+        caddy_jails_enabled="true"
+    fi
 
     # ---- Create Caddy auth failure filter ----
     local caddy_filter_dir="${FAIL2BAN_FILTER_DIR}"
@@ -864,7 +941,7 @@ bantime  = 86400
 findtime = 600
 
 [caddy-auth]
-enabled  = true
+enabled  = ${caddy_jails_enabled}
 port     = http,https
 filter   = caddy-auth
 backend  = polling
@@ -875,7 +952,7 @@ bantime  = 3600
 findtime = 600
 
 [caddy-botsearch]
-enabled  = true
+enabled  = ${caddy_jails_enabled}
 port     = http,https
 filter   = caddy-botsearch
 backend  = polling

@@ -245,7 +245,7 @@ New API 生成的 Key 格式为 `sk-xxxxx`，与 OpenAI 原生格式相同。确
 
 ### Q: VPN 连不上？
 1. 检查 WireGuard 配置中的 Endpoint 地址是否正确
-2. 确认你的网络未封锁 UDP 51820 端口
+2. 确认你的网络未封锁 WireGuard 配置 `Endpoint` 中的 UDP 端口；管理员可在服务器 `/etc/bifrost.env` 的 `BIFROST_WG_PORT` 查看当前端口
 3. 尝试切换网络环境（部分企业/酒店 WiFi 限制 UDP）
 4. 联系管理员检查 VPN 服务状态
 

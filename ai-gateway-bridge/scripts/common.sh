@@ -35,6 +35,7 @@ readonly LOG_FILE="/var/log/ai-gateway-bridge/ai-gateway-bridge.log"
 readonly BACKUP_DIR="/var/backups/ai-gateway-bridge"
 readonly BIFROST_EXPOSURE_PROFILE_DEFAULT="vpn-first"
 readonly BIFROST_ADMIN_ALLOWED_RANGES_DEFAULT="127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,fd00::/8"
+readonly BIFROST_ENV_FILE="${BIFROST_ENV_FILE:-/etc/bifrost.env}"
 
 # Ensure the log file is actually appendable; fall back to /tmp if not writable.
 _LOG_FILE_FALLBACK="${LOG_FILE}"
@@ -86,6 +87,44 @@ bifrost_exposure_profile_description() {
             return 1
             ;;
     esac
+}
+
+bifrost_env_load() {
+    # shellcheck source=/dev/null
+    [[ -f "${BIFROST_ENV_FILE}" ]] && source "${BIFROST_ENV_FILE}"
+    return 0
+}
+
+bifrost_env_set() {
+    local key="$1"
+    local value="$2"
+
+    if [[ -z "${key}" || -z "${value}" ]]; then
+        log_error "bifrost_env_set: key and value are required"
+        return 1
+    fi
+
+    if [[ ! "${key}" =~ ^[A-Z0-9_]+$ ]]; then
+        log_error "bifrost_env_set: invalid key '${key}'"
+        return 1
+    fi
+
+    if [[ ! -f "${BIFROST_ENV_FILE}" ]]; then
+        install -m 600 -o root -g root /dev/null "${BIFROST_ENV_FILE}"
+    fi
+
+    if grep -qE "^${key}=" "${BIFROST_ENV_FILE}"; then
+        sed -i "s|^${key}=.*|${key}=${value}|" "${BIFROST_ENV_FILE}"
+    else
+        printf '%s=%s\n' "${key}" "${value}" >> "${BIFROST_ENV_FILE}"
+    fi
+    chmod 600 "${BIFROST_ENV_FILE}"
+}
+
+bifrost_env_get() {
+    local key="$1"
+    [[ -f "${BIFROST_ENV_FILE}" ]] || return 1
+    grep -E "^${key}=" "${BIFROST_ENV_FILE}" | tail -n1 | cut -d= -f2-
 }
 
 # =============================================================================

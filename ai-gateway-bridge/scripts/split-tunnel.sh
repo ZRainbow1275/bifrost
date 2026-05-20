@@ -422,8 +422,8 @@ setup_dns_split() {
 mixed-port: 7893
 socks-port: 7891
 port: 7890
-allow-lan: true
-bind-address: "*"
+allow-lan: false
+bind-address: "127.0.0.1"
 mode: rule
 log-level: warning
 ipv6: false

@@ -118,3 +118,30 @@ docker.io
 registry-1.docker.io
 production.cloudflare.docker.com
 ghcr.io
+
+# =============================================================================
+# PR-1 hardening: registry/CDN/static assets required before strict routing
+# =============================================================================
+auth.docker.io
+index.docker.io
+hub.docker.com
+pkg-containers.githubusercontent.com
+quay.io
+docker-images-prod.6aa30f8b08e16409b46e0173d6de2f56.r2.cloudflarestorage.com
+raw.githubusercontent.com
+objects.githubusercontent.com
+codeload.github.com
+github-cloud.githubusercontent.com
+gist.githubusercontent.com
+github-releases.githubusercontent.com
+release-assets.githubusercontent.com
+uploads.github.com
+registry.yarnpkg.com
+yarnpkg.com
+unpkg.com
+cdn.jsdelivr.net
+esm.sh
+oaistatic.com
+cdn.oaistatic.com
+oaiusercontent.com
+cdn-lfs-us-1.huggingface.co

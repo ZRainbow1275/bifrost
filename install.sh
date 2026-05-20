@@ -644,6 +644,11 @@ parse_args() {
                 source "${SCRIPT_DIR}/scripts/bifrost-api.sh"
                 run_cli_command "Bifrost 管理平台部署未完成，请先处理上方错误。" deploy_bifrost_api
                 ;;
+            --deploy-panel)
+                require_root
+                source "${SCRIPT_DIR}/scripts/server-a.sh"
+                run_cli_command "Bifrost marketplace panel 部署未完成，请先处理上方错误。" deploy_panel
+                ;;
             --diagnostics)
                 source "${SCRIPT_DIR}/scripts/diagnostics.sh"
                 run_cli_command "深度诊断执行失败，请先处理上方错误。" manage_diagnostics
@@ -707,6 +712,7 @@ v2.0 模块部署:
   ./install.sh --keepalive    部署连接保活 (Keepalive + Watchdog)
   ./install.sh --split-tunnel 部署网络分流 (Split Tunnel)
   ./install.sh --bifrost-api  部署管理平台 (Bifrost API 注册/监控)
+  ./install.sh --deploy-panel 部署 marketplace 可视化面板静态文件
 
 运维管理:
   ./install.sh --backup       备份与恢复管理

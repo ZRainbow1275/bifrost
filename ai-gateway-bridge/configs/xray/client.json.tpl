@@ -77,7 +77,7 @@
     {
       "tag": "http-in",
       "port": 10809,
-      "listen": "0.0.0.0",
+      "listen": "127.0.0.1",
       "protocol": "http",
       "settings": {
         "allowTransparent": false

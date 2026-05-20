@@ -13,7 +13,7 @@ The VPN is the **FIRST and mandatory gate** in the Bifrost architecture. All emp
 ```
 Employee Device
     |
-    | WireGuard (UDP 51820)
+    | WireGuard (UDP <WG_PORT>)
     v
 VPN Gateway (10.8.0.1)
     |
@@ -29,7 +29,7 @@ VPN Gateway (10.8.0.1)
 |---------|--------|---------|
 | VPN Clients | `10.8.0.0/24` | Employee VPN addresses |
 | Internal Services | `172.16.0.0/24` | New API, monitoring, admin portals |
-| WireGuard Endpoint | `<Server-IP>:51820/udp` | Public VPN entry point |
+| WireGuard Endpoint | `<Server-IP>:<WG_PORT>/udp` | Public VPN entry point; read `<WG_PORT>` from `/etc/bifrost.env` (`BIFROST_WG_PORT`) |
 
 ---
 
@@ -40,7 +40,7 @@ VPN Gateway (10.8.0.1)
 - Server running Ubuntu 22.04+, Debian 12+, CentOS 9+, or Rocky 9+
 - Root access
 - Minimum 1 CPU core, 512MB RAM, 2GB disk
-- Port 51820/UDP reachable from the internet
+- The configured WireGuard UDP port is reachable from the internet. New deployments persist it as `BIFROST_WG_PORT` in `/etc/bifrost.env`; legacy deployments may still use `51820`.
 - A domain name (recommended) for TLS on admin portal
 
 ### Quick Deployment
@@ -72,7 +72,7 @@ Firezone provides a Docker-based WireGuard management platform with a web admin 
 
 - PostgreSQL database (internal, not exposed)
 - Firezone application (admin portal on port 13000, VPN-only)
-- WireGuard kernel interface (port 51820/UDP, public)
+- WireGuard kernel interface (configured `BIFROST_WG_PORT`/UDP, public)
 
 **Post-deployment:**
 
@@ -149,7 +149,7 @@ The VPN deployment configures iptables with three categories:
 
 | Port | Protocol | Service |
 |------|----------|---------|
-| 51820 | UDP | WireGuard endpoint |
+| `<WG_PORT>` | UDP | WireGuard endpoint (`BIFROST_WG_PORT` in `/etc/bifrost.env`) |
 | 443 | TCP | HTTPS (Caddy) |
 | 80 | TCP | HTTP redirect |
 
@@ -298,12 +298,13 @@ This means your regular internet browsing, streaming, and other activities are *
 1. **Check the WireGuard endpoint is reachable:**
    ```bash
    # Should NOT timeout (UDP, so no response is expected, but no firewall block)
-   nc -u -z -w3 <server-ip> 51820
+   WG_PORT=$(sudo awk -F= '/^BIFROST_WG_PORT=/ {print $2}' /etc/bifrost.env 2>/dev/null || true)
+   nc -u -z -w3 <server-ip> "${WG_PORT:-51820}"
    ```
 
 2. **Check your configuration file:** Ensure the `Endpoint`, `PublicKey`, and `AllowedIPs` are correct.
 
-3. **Check if your network blocks UDP 51820:** Some corporate/hotel networks block non-standard UDP ports. Try a different network.
+3. **Check if your network blocks the configured UDP port:** Some corporate/hotel networks block non-standard UDP ports. Try a different network or ask the administrator for the current `BIFROST_WG_PORT`.
 
 4. **Check system logs on the server:**
    ```bash

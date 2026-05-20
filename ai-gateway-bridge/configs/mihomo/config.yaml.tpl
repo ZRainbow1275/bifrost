@@ -31,8 +31,8 @@
 # --- General Settings ---
 mixed-port: {{MIHOMO_MIXED_PORT}}
 socks-port: {{MIHOMO_SOCKS_PORT}}
-allow-lan: true
-bind-address: "*"
+allow-lan: false
+bind-address: "127.0.0.1"
 mode: rule
 log-level: info
 ipv6: false

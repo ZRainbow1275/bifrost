@@ -425,11 +425,12 @@ sudo wg show wg0
 # 2. 检查 WireGuard 服务
 sudo systemctl status wg-quick@wg0
 
-# 3. 检查 UDP 51820 端口是否开放
-sudo ss -ulnp | grep 51820
+# 3. 检查 WireGuard UDP 端口是否开放
+WG_PORT=$(sudo awk -F= '/^BIFROST_WG_PORT=/ {print $2}' /etc/bifrost.env 2>/dev/null || true)
+sudo ss -ulnp | grep "${WG_PORT:-51820}"
 
 # 4. 检查防火墙是否放行
-sudo iptables -L INPUT -n | grep 51820
+sudo iptables -L INPUT -n | grep "${WG_PORT:-51820}"
 
 # 5. 检查 Firezone 状态 (如使用 Firezone)
 docker ps | grep firezone
@@ -443,7 +444,7 @@ sudo dmesg | grep wireguard
 
 | 原因 | 解决方案 |
 |------|---------|
-| UDP 51820 被防火墙/安全组拦截 | 在云厂商安全组和本机防火墙同时放行 51820/UDP |
+| WireGuard UDP 端口被防火墙/安全组拦截 | 在云厂商安全组和本机防火墙同时放行 `/etc/bifrost.env` 中的 `BIFROST_WG_PORT`（旧安装可能为 `51820`） |
 | 客户端配置错误 | 检查 Endpoint、PublicKey、AllowedIPs 是否正确 |
 | 网络环境限制 UDP | 部分企业/酒店网络封锁非标准 UDP，换网络测试 |
 | Firezone Docker 容器崩溃 | `docker compose -f /opt/firezone/docker-compose.yml restart` |

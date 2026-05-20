@@ -30,6 +30,8 @@
 
 set -euo pipefail
 
+[[ -f /etc/bifrost.env ]] && source /etc/bifrost.env
+
 # =============================================================================
 # Configuration
 # =============================================================================
@@ -269,7 +271,8 @@ apply_rules() {
     iptables -A INPUT -p tcp --dport "${NETDATA_PORT}" -s "${SERVICE_SUBNET}" -j ACCEPT
 
     # WireGuard VPN endpoint - must be accessible from external networks
-    iptables -A INPUT -p udp --dport 51820 -j ACCEPT
+    WG_PORT="${BIFROST_WG_PORT:-51820}"
+    iptables -A INPUT -p udp --dport "${WG_PORT}" -j ACCEPT
 
     # -------------------------------------------------------------------------
     # Step 9: VPN client access to services

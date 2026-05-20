@@ -203,8 +203,11 @@ server_a_tls_mode() {
         ip|ip-cert|ip-address)
             echo "ip"
             ;;
+        internal|local-ca|caddy-internal)
+            echo "internal"
+            ;;
         *)
-            log_error "Invalid BIFROST_SERVER_A_TLS_MODE='${mode}'. Use 'domain', 'cloudflare-origin', or 'ip'."
+            log_error "Invalid BIFROST_SERVER_A_TLS_MODE='${mode}'. Use 'domain', 'cloudflare-origin', 'ip', or 'internal'."
             return 1
             ;;
     esac
@@ -521,27 +524,47 @@ server_a_caddy_tls_block() {
     local endpoint_host="$2"
     local cert_file="${3:-}"
     local key_file="${4:-}"
-    if [[ "$tls_mode" == "ip" ]]; then
-        cat <<TLSEOF
+    case "${tls_mode}" in
+        ip)
+            cat <<TLSEOF
     tls ${LETSENCRYPT_LIVE_DIR}/${endpoint_host}/fullchain.pem ${LETSENCRYPT_LIVE_DIR}/${endpoint_host}/privkey.pem {
         protocols tls1.2 tls1.3
         ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
     }
 TLSEOF
-    elif [[ "$tls_mode" == "cloudflare-origin" ]]; then
-        cat <<TLSEOF
+            ;;
+        cloudflare-origin)
+            cat <<TLSEOF
     tls ${cert_file} ${key_file} {
         protocols tls1.2 tls1.3
         ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
     }
 TLSEOF
-    else
-        cat <<'TLSEOF'
+            ;;
+        internal)
+            cat <<'TLSEOF'
+    tls internal {
+        protocols tls1.2 tls1.3
+    }
+TLSEOF
+            ;;
+        *)
+            cat <<'TLSEOF'
     tls {
         protocols tls1.2 tls1.3
         ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
     }
 TLSEOF
+            ;;
+    esac
+}
+
+server_a_caddy_bind_block() {
+    local exposure_profile="$1"
+    if [[ "${exposure_profile}" == "vpn-first" ]]; then
+        cat <<'BINDEOF'
+    bind 10.8.0.1
+BINDEOF
     fi
 }
 
@@ -770,7 +793,7 @@ install_xray_client() {
     {
       "tag": "http-in",
       "port": 10809,
-      "listen": "0.0.0.0",
+      "listen": "127.0.0.1",
       "protocol": "http",
       "settings": {
         "allowTransparent": false
@@ -1617,6 +1640,27 @@ setup_caddy_a() {
     if ! tls_mode="$(server_a_tls_mode)"; then
         return 1
     fi
+    case "${tls_mode}" in
+        domain|cloudflare-origin|ip)
+            log_warn ""
+            log_warn "============================================================"
+            log_warn "  DEPRECATION NOTICE: BIFROST_SERVER_A_TLS_MODE=${tls_mode}"
+            log_warn "============================================================"
+            log_warn "  Recommended for v0.6+:"
+            log_warn "    BIFROST_EXPOSURE_PROFILE=vpn-first"
+            log_warn "    BIFROST_SERVER_A_TLS_MODE=internal"
+            log_warn "  Migration guide: docs/MIGRATION-v0.6.md"
+            log_warn "  Continuing with legacy mode in 30 seconds."
+            log_warn "  Set BIFROST_SKIP_DEPRECATION_WAIT=1 for CI/noninteractive runs."
+            log_warn "============================================================"
+            if [[ "${BIFROST_SKIP_DEPRECATION_WAIT:-0}" != "1" && -t 0 ]]; then
+                sleep 30
+            fi
+            ;;
+        internal)
+            log_info "TLS mode: internal (Caddy local CA; vpn-first recommended)"
+            ;;
+    esac
     local new_api_mode
     if ! new_api_mode="$(server_a_new_api_mode)"; then
         return 1
@@ -1691,12 +1735,14 @@ setup_caddy_a() {
 }
 
 api.${distribution_domain} {
+$(server_a_caddy_bind_block "${exposure_profile}")
 $(server_a_caddy_tls_block "${tls_mode}" "${endpoint_host}" "${cloudflare_origin_cert_file}" "${cloudflare_origin_key_file}")
     encode gzip
     import server_b_proxy http://${server_b_wg_ip}:3000
 }
 
 npm.${distribution_domain} {
+$(server_a_caddy_bind_block "${exposure_profile}")
 $(server_a_caddy_tls_block "${tls_mode}" "${endpoint_host}" "${cloudflare_origin_cert_file}" "${cloudflare_origin_key_file}")
     encode gzip
     handle {
@@ -1708,6 +1754,7 @@ $(server_a_caddy_tls_block "${tls_mode}" "${endpoint_host}" "${cloudflare_origin
 }
 
 files.${distribution_domain} {
+$(server_a_caddy_bind_block "${exposure_profile}")
 $(server_a_caddy_tls_block "${tls_mode}" "${endpoint_host}" "${cloudflare_origin_cert_file}" "${cloudflare_origin_key_file}")
     encode gzip
     @git path /git/*
@@ -1716,6 +1763,44 @@ $(server_a_caddy_tls_block "${tls_mode}" "${endpoint_host}" "${cloudflare_origin
     }
     handle {
         import server_b_proxy http://${server_b_wg_ip}:8081
+    }
+}
+
+panel.${distribution_domain} {
+$(server_a_caddy_bind_block "${exposure_profile}")
+$(server_a_caddy_tls_block "${tls_mode}" "${endpoint_host}" "${cloudflare_origin_cert_file}" "${cloudflare_origin_key_file}")
+    encode gzip
+
+    @panel_private {
+        remote_ip ${admin_allowed_ranges}
+    }
+    @panel_public {
+        not remote_ip ${admin_allowed_ranges}
+    }
+    handle @panel_public {
+        respond "Bifrost marketplace panel requires VPN/private access in vpn-first profile" 403
+    }
+    handle @panel_private {
+        @api_or_marketplace path /api/* /marketplace/*
+        handle @api_or_marketplace {
+            reverse_proxy 127.0.0.1:8000 {
+                header_up X-Real-IP {remote_host}
+                header_up X-Forwarded-For {remote_host}
+                header_up X-Forwarded-Proto {scheme}
+                header_up Host {host}
+                transport http {
+                    dial_timeout 5s
+                    response_header_timeout 30s
+                }
+            }
+        }
+        handle {
+            root * /var/www/bifrost-api-web/dist
+            try_files {path} /index.html
+            file_server
+            @assets path /assets/*
+            header @assets Cache-Control "public, max-age=31536000, immutable"
+        }
     }
 }
 DISTRIBUTIONEOF
@@ -1733,6 +1818,7 @@ DISTRIBUTIONEOF
 # Generated on $(date '+%Y-%m-%d %H:%M:%S')
 
 ${site_address} {
+$(server_a_caddy_bind_block "${exposure_profile}")
     # ===== Normal Website (Disguise) =====
     # Serves a legitimate-looking business website at the root path.
     handle / {
@@ -2019,6 +2105,61 @@ CADDYEOF
         log_warn "  Manage: https://${endpoint_host}/manage/docs (${exposure_profile}; protect with strong auth/WAF/allowlists)"
     fi
 
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# deploy_panel
+# ---------------------------------------------------------------------------
+# Copy the built Vue admin panel to the Server A static root consumed by the
+# panel.<domain> Caddy site. This is intentionally separate from deploy_server_a:
+# PR-5b can rebuild and redeploy the SPA without reinstalling Caddy/NewAPI.
+# ---------------------------------------------------------------------------
+deploy_panel() {
+    local project_root
+    project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    local source_dir="${BIFROST_PANEL_SOURCE_DIR:-${project_root}/bifrost-api-web/dist}"
+    local target_dir="${BIFROST_PANEL_DIST_DIR:-/var/www/bifrost-api-web/dist}"
+    local staging_dir
+    staging_dir="${target_dir}.tmp.$$"
+
+    if [[ ! -d "${source_dir}" || ! -f "${source_dir}/index.html" ]]; then
+        log_error "Panel build output missing: ${source_dir}/index.html"
+        log_error "Run: cd ${project_root}/bifrost-api-web && pnpm install && pnpm build"
+        return 1
+    fi
+
+    log_info "Deploying Bifrost marketplace panel..."
+    log_info "  Source: ${source_dir}"
+    log_info "  Target: ${target_dir}"
+
+    rm -rf "${staging_dir}"
+    install -d -m 0755 "$(dirname "${target_dir}")" "${staging_dir}"
+
+    if command -v rsync >/dev/null 2>&1; then
+        rsync -a --delete "${source_dir}/" "${staging_dir}/"
+    else
+        (cd "${source_dir}" && tar cf - .) | (cd "${staging_dir}" && tar xf -)
+    fi
+
+    if [[ ! -f "${staging_dir}/index.html" ]]; then
+        rm -rf "${staging_dir}"
+        log_error "Panel deploy staging did not produce index.html"
+        return 1
+    fi
+
+    rm -rf "${target_dir}.previous"
+    if [[ -d "${target_dir}" ]]; then
+        mv "${target_dir}" "${target_dir}.previous"
+    fi
+    mv "${staging_dir}" "${target_dir}"
+    chmod -R a+rX "${target_dir}"
+
+    if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files caddy.service >/dev/null 2>&1; then
+        systemctl reload caddy 2>/dev/null || systemctl restart caddy 2>/dev/null || true
+    fi
+
+    log_success "Panel deployed to ${target_dir}"
     return 0
 }
 
@@ -3421,3 +3562,26 @@ _LOGROTATE_MINIMAL
 
     return 0
 }
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    case "${1:-}" in
+        --deploy-panel)
+            require_root
+            deploy_panel
+            ;;
+        --help|-h)
+            cat <<'HELP'
+Usage:
+  bash scripts/server-a.sh --deploy-panel
+
+Deploy the built bifrost-api-web/dist panel bundle to /var/www/bifrost-api-web/dist.
+Set BIFROST_PANEL_SOURCE_DIR or BIFROST_PANEL_DIST_DIR to override paths.
+HELP
+            ;;
+        *)
+            log_error "Unknown server-a.sh command: ${1:-}"
+            log_error "Use --deploy-panel or --help"
+            exit 1
+            ;;
+    esac
+fi

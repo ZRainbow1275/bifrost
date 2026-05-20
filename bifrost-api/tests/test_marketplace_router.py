@@ -4,8 +4,7 @@ Coverage strategy:
 * Auth: 401 missing X-Admin-Key, 403 wrong key, 503 unconfigured admin_key.
 * SSH plumbing: 503 when readonly SSH key file is absent, 504 on timeout,
   502 when readonly-router rejects the verb.
-* Validation: 422 for the admin-audit log service (not yet in PR-2/PR-4
-  whitelist) and 422 for an out-of-pattern service value (FastAPI built-in).
+* Validation: 422 for an out-of-pattern service value (FastAPI built-in).
 * Happy paths: 200 status / list / disk / logs each with a mocked
   ``_run_readonly_command`` return value that mirrors the real PR-2
   readonly-router output shapes.
@@ -183,21 +182,6 @@ def test_readonly_router_rejected_returns_502(endpoint, monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 # Validation tests (422 mapping for log service param)
 # ---------------------------------------------------------------------------
-
-
-def test_logs_admin_audit_service_returns_422(monkeypatch, tmp_path):
-    """spec section 7.2: admin-audit pattern is accepted but not yet wired (PR-5a).
-
-    The Query validator pattern allows the value, but _LOG_SERVICE_COMMANDS
-    omits it, so the handler raises 422.
-    """
-    _make_ssh_key_available(monkeypatch, tmp_path)
-    response = client.get(
-        "/marketplace/logs?service=admin-audit",
-        headers={"X-Admin-Key": "test-admin-key"},
-    )
-    assert response.status_code == 422
-    assert "PR-5a" in response.json()["detail"]
 
 
 def test_logs_out_of_pattern_service_returns_422(monkeypatch, tmp_path):
@@ -410,6 +394,22 @@ def test_logs_schema_check_happy_path(monkeypatch, tmp_path):
     assert response.headers["content-type"].startswith("text/plain")
     assert "LICENSE-OK" in response.text
     assert "UPSTREAM-CHANGED" in response.text
+
+
+def test_logs_admin_audit_happy_path(monkeypatch, tmp_path):
+    """logs:admin-audit returns plain-text audit tail."""
+    _make_ssh_key_available(monkeypatch, tmp_path)
+    log_body = '{"action":"upload","success":true}\n{"action":"curate","success":true}\n'
+    _patch_run_readonly_command(monkeypatch, return_value=log_body)
+
+    response = client.get(
+        "/marketplace/logs?service=admin-audit&tail=50",
+        headers={"X-Admin-Key": "test-admin-key"},
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert '"action":"upload"' in response.text
+    assert '"action":"curate"' in response.text
 
 
 def test_logs_tail_truncates_when_lines_exceed_request(monkeypatch, tmp_path):

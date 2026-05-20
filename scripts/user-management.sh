@@ -565,6 +565,130 @@ _rollback_user_creation() {
     [[ "${rollback_failed}" == "false" ]]
 }
 
+_render_onboarding_readme() {
+    local username="$1"
+    local out="$2"
+
+    cat > "${out}" <<README_EOF
+# Bifrost onboarding for ${username}
+
+## Files
+
+- wg0.conf: WireGuard client configuration.
+- bifrost-root.crt: Caddy internal root CA, present only in internal TLS mode.
+- install-ca-*.sh / install-ca-windows.ps1: CA install or uninstall helpers.
+
+## Steps
+
+1. Import wg0.conf into WireGuard and activate the tunnel.
+2. If bifrost-root.crt exists, run the CA installer for your operating system.
+3. Test the gateway from VPN:
+
+\`\`\`bash
+curl https://10.8.0.1/api/status
+\`\`\`
+
+## Removal
+
+Deactivate and remove the WireGuard tunnel. If a CA was installed, run the
+matching installer with --uninstall.
+README_EOF
+}
+
+_render_ca_install_scripts() {
+    local stage="$1"
+
+    cat > "${stage}/install-ca-linux.sh" <<'LIN_EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CA="${SCRIPT_DIR}/bifrost-root.crt"
+[[ -f "${CA}" ]] || { echo "bifrost-root.crt not found" >&2; exit 1; }
+if [[ "${1:-}" == "--uninstall" ]]; then
+    rm -f /usr/local/share/ca-certificates/bifrost-root.crt
+else
+    install -m 644 "${CA}" /usr/local/share/ca-certificates/bifrost-root.crt
+fi
+update-ca-certificates
+echo "OK"
+LIN_EOF
+
+    cat > "${stage}/install-ca-macos.sh" <<'MAC_EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CA="${SCRIPT_DIR}/bifrost-root.crt"
+[[ -f "${CA}" ]] || { echo "bifrost-root.crt not found" >&2; exit 1; }
+if [[ "${1:-}" == "--uninstall" ]]; then
+    sudo security delete-certificate -c "Caddy Local Authority" /Library/Keychains/System.keychain || true
+else
+    sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "${CA}"
+fi
+echo "OK"
+MAC_EOF
+
+    cat > "${stage}/install-ca-windows.ps1" <<'WIN_EOF'
+$ErrorActionPreference = "Stop"
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$CA = Join-Path $ScriptDir "bifrost-root.crt"
+if (-not (Test-Path $CA)) { Write-Error "bifrost-root.crt not found"; exit 1 }
+if ($args -contains "--uninstall") {
+    Get-ChildItem -Path Cert:\LocalMachine\Root |
+        Where-Object { $_.Subject -like "*Caddy Local Authority*" } |
+        Remove-Item
+} else {
+    Import-Certificate -FilePath $CA -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+}
+Write-Host "OK"
+WIN_EOF
+
+    chmod +x "${stage}/install-ca-linux.sh" "${stage}/install-ca-macos.sh"
+}
+
+_generate_client_bundle() {
+    local username="$1"
+    local user_dir="$2"
+    local wg_config_file="$3"
+
+    if ! command -v zip >/dev/null 2>&1; then
+        log_warn "zip command not found; skipping client bundle generation"
+        return 0
+    fi
+
+    mkdir -p "${user_dir}"
+    chmod 700 "${user_dir}"
+
+    local stage
+    stage="$(mktemp -d)"
+    local out="${user_dir}/${username}-bundle.zip"
+    rm -f "${out}"
+
+    if [[ -n "${wg_config_file}" && -f "${wg_config_file}" ]]; then
+        cp -a "${wg_config_file}" "${stage}/wg0.conf"
+    fi
+    _render_onboarding_readme "${username}" "${stage}/README-onboarding.md"
+
+    if [[ "${BIFROST_SERVER_A_TLS_MODE:-domain}" == "internal" ]]; then
+        local ca_src="/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt"
+        if [[ -f "${ca_src}" ]]; then
+            cp -a "${ca_src}" "${stage}/bifrost-root.crt"
+            _render_ca_install_scripts "${stage}"
+        else
+            log_warn "Caddy local CA not found at ${ca_src}; refresh bundle after Caddy starts"
+        fi
+    fi
+
+    if [[ "${BIFROST_MIRROR_MODE:-0}" == "1" ]]; then
+        printf 'registry=https://npm.mirror.lan/\nalways-auth=false\n' > "${stage}/npmrc.snippet"
+        printf '{\n  "registry-mirrors": ["https://docker.mirror.lan"]\n}\n' > "${stage}/daemon.json.snippet"
+    fi
+
+    (cd "${stage}" && zip -q -r "${out}" .)
+    chmod 600 "${out}"
+    rm -rf "${stage}"
+    log_success "Bundle generated: ${out}"
+}
+
 ###############################################################################
 # create_user()
 #
@@ -719,6 +843,8 @@ create_user() {
 
     # Generate onboarding guide
     _generate_user_guide "${username}" "${user_uuid}" "${api_token_key}" "${email}"
+    local user_bundle_dir="${USER_REGISTRY_DIR}/${username}"
+    _generate_client_bundle "${username}" "${user_bundle_dir}" "${wg_config_file}" || true
 
     # Summary
     echo ""
@@ -737,6 +863,9 @@ create_user() {
     fi
     echo "  Credentials: ${user_creds_file}"
     echo "  Guide:       ${USER_GUIDES_DIR}/${username}-guide.md"
+    if [[ -f "${user_bundle_dir}/${username}-bundle.zip" ]]; then
+        echo "  Bundle:      ${user_bundle_dir}/${username}-bundle.zip"
+    fi
     echo "==========================================="
     echo ""
     log_warn "Share the guide file with the user. Credentials file should remain on server."
@@ -905,6 +1034,71 @@ disable_user() {
         log_info "  API: none"
     fi
     log_info "  Status: disabled (${disabled_date})"
+    if [[ "${BIFROST_SERVER_A_TLS_MODE:-}" == "internal" ]]; then
+        log_warn ""
+        log_warn "============================================================"
+        log_warn "  IMPORTANT: '${username}' may still trust the Bifrost CA"
+        log_warn "============================================================"
+        log_warn "  Caddy local CA has no revocation channel on user devices."
+        log_warn "  Ask the user to run install-ca-* --uninstall."
+        log_warn "  If the device is hostile or unavailable, rotate the root CA:"
+        log_warn "    ./scripts/user-management.sh rotate-ca"
+        log_warn "============================================================"
+    fi
+}
+
+refresh_user_bundle() {
+    local username="${1:-}"
+    log_step "Refresh User Bundle"
+    _ensure_user_dirs
+
+    if [[ -z "${username}" ]]; then
+        read -r -p "Username: " username
+    fi
+    if ! _user_exists "${username}"; then
+        log_error "User '${username}' not found."
+        return 1
+    fi
+
+    local wg_config_file="/etc/bifrost/vpn/users/${username}/wg-${username}.conf"
+    local creds_file="${USER_REGISTRY_DIR}/${username}.credentials"
+    if [[ -f "${creds_file}" ]]; then
+        wg_config_file="$(grep '^WG_CONFIG=' "${creds_file}" 2>/dev/null | cut -d= -f2- || true)"
+        wg_config_file="${wg_config_file:-/etc/bifrost/vpn/users/${username}/wg-${username}.conf}"
+    fi
+
+    _generate_client_bundle "${username}" "${USER_REGISTRY_DIR}/${username}" "${wg_config_file}"
+}
+
+rotate_root_ca() {
+    log_step "Rotate Caddy Local CA"
+    log_warn "This invalidates every employee CA install and requires redistributing bundles."
+    if [[ "${BIFROST_NONINTERACTIVE:-0}" != "1" ]]; then
+        read -r -p "Type ROTATE to confirm: " ans
+        [[ "${ans}" == "ROTATE" ]] || { log_info "Aborted."; return 1; }
+    fi
+
+    local ca_dir="/var/lib/caddy/.local/share/caddy/pki/authorities/local"
+    local backup="${ca_dir}.bak.$(date +%s)"
+    if [[ -d "${ca_dir}" ]]; then
+        mv "${ca_dir}" "${backup}"
+        log_info "Old CA archived: ${backup}"
+    fi
+
+    systemctl restart caddy
+    sleep 5
+    if [[ ! -f "${ca_dir}/root.crt" ]]; then
+        log_error "Caddy did not generate a new root.crt"
+        if [[ -d "${backup}" ]]; then
+            rm -rf "${ca_dir}"
+            mv "${backup}" "${ca_dir}"
+            systemctl restart caddy || true
+        fi
+        return 1
+    fi
+
+    log_success "New CA generated: ${ca_dir}/root.crt"
+    log_warn "Refresh and redistribute all user bundles."
 }
 
 ###############################################################################
@@ -1316,15 +1510,19 @@ manage_users() {
         echo "  2) Disable user"
         echo "  3) List all users"
         echo "  4) Export user onboarding guide"
+        echo "  5) Refresh user bundle"
+        echo "  6) Rotate internal CA"
         echo "  0) Exit"
         echo ""
-        read -r -p "Select option [0-4]: " choice
+        read -r -p "Select option [0-6]: " choice
 
         case "${choice}" in
             1) echo ""; create_user ;;
             2) echo ""; disable_user ;;
             3) echo ""; list_users ;;
             4) echo ""; export_user_guide ;;
+            5) echo ""; refresh_user_bundle ;;
+            6) echo ""; rotate_root_ca ;;
             0|q|Q|exit)
                 log_info "Exiting user management."
                 break
@@ -1353,6 +1551,12 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         guide)
             export_user_guide "${2:-}"
             ;;
+        refresh-bundle)
+            refresh_user_bundle "${2:-}"
+            ;;
+        rotate-ca)
+            rotate_root_ca
+            ;;
         help|--help|-h)
             echo "Bifrost - User Management"
             echo ""
@@ -1362,6 +1566,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             echo "  $0 disable [username]   # Disable user"
             echo "  $0 list                 # List all users"
             echo "  $0 guide [username]     # Export onboarding guide"
+            echo "  $0 refresh-bundle <u>   # Rebuild WireGuard/CA bundle"
+            echo "  $0 rotate-ca            # Rotate Caddy internal root CA"
             echo "  $0 help                 # Show this help"
             ;;
         "")

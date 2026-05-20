@@ -88,6 +88,8 @@ run curl -fsSI "https://npm.${DOMAIN}/"
 run curl -fsS "https://files.${DOMAIN}/team-config/.claude.json.template" -o /tmp/bifrost-team-config-check.json
 run git ls-remote "https://files.${DOMAIN}/git/claude-for-legal-zh.git" HEAD
 run curl -fsS "https://api.${DOMAIN}/api/status" -o /tmp/bifrost-newapi-status.json
+run dig +short "panel.${DOMAIN}"
+run curl -fsSI "https://panel.${DOMAIN}/"
 
 echo "Rehearsal command list completed."
 
@@ -256,21 +258,20 @@ if (( ac14_ok == 1 )); then
     mk_pass "AC-14: docs/USAGE.md + docs/SECURITY.md contain marketplace section markers"
 fi
 
-mk_section "Section B: deferred AC (PR-3 / PR-5b / real-server cutover pending)"
+mk_section "Section B: deferred AC (real-server cutover pending)"
 
-mk_skip "AC-2: git clone bifrost-internal-plugins.git -- needs PR-3 Caddy /git/ + production deploy"
+mk_skip "AC-2: git clone bifrost-internal-plugins.git -- needs production Server A/B deploy"
 mk_skip "AC-3: git ls-remote remote contract -- same upstream dependency as AC-2"
-mk_skip "AC-5: claude --headless plugin install -- needs PR-3 panel + real client laptop"
+mk_skip "AC-5: claude --headless plugin install -- needs real client laptop and deployed marketplace"
 mk_skip "AC-6: claude --headless plugin install --version v0.1.0 -- depends on AC-5 environment"
-mk_skip "AC-10 (live): real bifrost-api upload + tag creation on Server B -- mock above; live needs PR-3 panel + SSH to B"
-mk_skip "AC-13: dig +short panel.${DOMAIN} + allowlist gating -- needs PR-3 panel.uuhfn.cloud Caddy config"
+mk_skip "AC-10 (live): real bifrost-api upload + tag creation on Server B -- mock above; live needs deployed panel + SSH to B"
+mk_skip "AC-13: dig +short panel.${DOMAIN} + allowlist gating -- code contract landed; live DNS/inside-allowlist curl needs --execute from an allowed network"
 
 mk_section "Summary"
 printf '[marketplace e2e] %d pass / %d fail / %d skip\n' "${MK_PASS}" "${MK_FAIL}" "${MK_SKIP}"
 printf '[marketplace e2e] deferred ACs unblock when:\n'
-printf '  - PR-3 (panel.uuhfn.cloud Caddy + @panel_private) lands\n'
-printf '  - PR-5b (Vue 3 SPA upload UI) lands\n'
 printf '  - Server A + Server B are deployed and DNS panel.uuhfn.cloud resolves\n'
+printf '  - --execute is run from a VPN/private source allowed by @panel_private\n'
 
 if (( MK_FAIL > 0 )); then
     printf '[marketplace e2e] FAIL: %d scriptable AC(s) failed\n' "${MK_FAIL}" >&2

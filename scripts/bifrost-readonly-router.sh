@@ -57,6 +57,9 @@ case "${action}" in
     logs:upstream-schema-check)
         exec journalctl -u upstream-schema-check.service --no-pager -n 200
         ;;
+    logs:admin-audit)
+        exec tail -n 200 /var/log/marketplace/admin-audit.log
+        ;;
     disk:report)
         exec du -sh /var/lib/verdaccio /var/lib/new-api-pg /var/lib/new-api-redis /var/lib/git-mirrors /var/lib/dist 2>/dev/null
         ;;

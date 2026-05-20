@@ -397,6 +397,19 @@ main() {
 
         rm -f "${XRAY_CONFIG_BACKUP}"
         log_success "Rotation complete: ${current_dest:-<none>} -> ${new_dest}"
+        local new_host
+        new_host="$(echo "${new_dest}" | cut -d':' -f1)"
+        log_warn "SERVER A SNI SYNC REQUIRED: new SNI is '${new_host}'"
+        log_warn "Run on Server A: bash /opt/bifrost/scripts/sync-sni-to-a.sh --new-sni '${new_host}'"
+
+        if [[ -d /etc/anti-dpi/post-rotate.d ]]; then
+            local hook
+            for hook in /etc/anti-dpi/post-rotate.d/*.sh; do
+                [[ -x "${hook}" ]] || continue
+                log_info "Running post-rotate hook: ${hook}"
+                "${hook}" "${new_host}" "${new_dest}" || log_warn "Hook ${hook} exited non-zero"
+            done
+        fi
         log_info "===== Dest rotation finished successfully ====="
         exit 0
     else

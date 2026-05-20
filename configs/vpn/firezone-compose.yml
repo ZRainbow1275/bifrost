@@ -19,7 +19,7 @@
 #   {{ADMIN_EMAIL}}              - Initial admin email
 #   {{EXTERNAL_URL}}             - External URL (https://vpn.yourdomain.com)
 #   {{VPN_SUBNET}}               - VPN subnet (10.8.0.0/24)
-#   {{WG_PORT}}                  - WireGuard listen port (51820)
+#   {{WG_PORT}}                  - WireGuard listen port (random 30000-65000)
 # =============================================================================
 
 services:

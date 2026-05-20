@@ -5833,24 +5833,35 @@ test_distribution_contracts() {
        grep -Fq 'api.{{DOMAIN}}' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
        grep -Fq 'npm.{{DOMAIN}}' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
        grep -Fq 'files.{{DOMAIN}}' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -Fq 'panel.{{DOMAIN}}' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -Fq '@panel_private' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -Fq '@api_or_marketplace path /api/* /marketplace/*' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       ! grep -Fq '@api_or_marketplace path /api/* /marketplace/* /marketplace' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
+       grep -Fq 'root * /var/www/bifrost-api-web/dist' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
        grep -Fq 'http://10.8.0.2:3000' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
        grep -Fq 'http://10.8.0.2:4873' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl"; then
-        record_pass "Server A Caddy 模板包含 api/npm/files 到 Server B 的反代"
+        record_pass "Server A Caddy 模板包含 api/npm/files + panel 到 Server B/API 的反代"
     else
-        record_fail "Server A Caddy 模板缺少 api/npm/files 到 Server B 的反代"
+        record_fail "Server A Caddy 模板缺少 api/npm/files + panel 反代"
     fi
 
     if grep -Fq 'server_a_new_api_mode()' "${SCRIPT_DIR}/scripts/server-a.sh" && \
        grep -Fq 'BIFROST_SERVER_A_NEWAPI_MODE' "${SCRIPT_DIR}/scripts/server-a.sh" && \
        grep -Fq 'BIFROST_DISTRIBUTION_DOMAIN' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -Fq 'panel.${distribution_domain}' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -Fq '@panel_private' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -Fq '@api_or_marketplace path /api/* /marketplace/*' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       ! grep -Fq '@api_or_marketplace path /api/* /marketplace/* /marketplace' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -Fq 'deploy_panel()' "${SCRIPT_DIR}/scripts/server-a.sh" && \
+       grep -Fq -- '--deploy-panel' "${SCRIPT_DIR}/install.sh" && \
        grep -Fq 'api.*|npm.*|files.*|legacy.*)' "${SCRIPT_DIR}/scripts/server-a.sh" && \
        grep -Fq 'distribution_domain="${domain#*.}"' "${SCRIPT_DIR}/scripts/server-a.sh" && \
        ! grep -Fq 'health_uri /-/ping' "${SCRIPT_DIR}/scripts/server-a.sh" && \
        ! grep -Fq 'health_uri /-/ping' "${SCRIPT_DIR}/configs/caddy/Caddyfile-a.tpl" && \
        grep -Fq 'Skipping local New API install; Server A is running distribution gateway mode' "${SCRIPT_DIR}/scripts/server-a.sh"; then
-        record_pass "Server A NewAPI 默认路径已转 distribution/legacy 显式模式且分发域名/健康检查合同正确"
+        record_pass "Server A NewAPI distribution/legacy、panel 部署入口与分发域名合同正确"
     else
-        record_fail "Server A NewAPI distribution/legacy 模式或分发反代合同缺失"
+        record_fail "Server A NewAPI distribution/legacy、panel 或分发反代合同缺失"
     fi
 
     # === spec.md PR-2 contract assertions (marketplace + step 07 + admin-router) ===
@@ -5968,11 +5979,39 @@ test_distribution_contracts() {
     fi
 
     if grep -Fq 'audit_log' "${SCRIPT_DIR}/scripts/bifrost-admin-router.sh" \
+       && grep -Fq 'audit_json' "${SCRIPT_DIR}/scripts/bifrost-admin-router.sh" \
+       && grep -Fq 'jq -cn' "${SCRIPT_DIR}/scripts/bifrost-admin-router.sh" \
        && grep -Fq '/var/log/marketplace/admin-audit.log' "${SCRIPT_DIR}/scripts/bifrost-admin-router.sh" \
        && grep -Fq 'sync' "${SCRIPT_DIR}/scripts/bifrost-admin-router.sh"; then
-        record_pass "bifrost-admin-router.sh writes audit log + sync (spec section 6.3)"
+        record_pass "bifrost-admin-router.sh writes jq-safe audit log + sync (spec section 6.3)"
     else
-        record_fail "bifrost-admin-router.sh missing audit log + sync chain"
+        record_fail "bifrost-admin-router.sh missing jq-safe audit log + sync chain"
+    fi
+
+    if grep -Fq 'validate_tarball_entries' "${SCRIPT_DIR}/scripts/bifrost-admin-router.sh" \
+       && grep -Fq 'tar -tzf' "${SCRIPT_DIR}/scripts/bifrost-admin-router.sh" \
+       && grep -Fq '*/../*|*/..' "${SCRIPT_DIR}/scripts/bifrost-admin-router.sh" \
+       && grep -Fq -- '--no-same-owner --no-same-permissions -xzf' "${SCRIPT_DIR}/scripts/bifrost-admin-router.sh"; then
+        record_pass "bifrost-admin-router.sh rejects tar path traversal before extraction"
+    else
+        record_fail "bifrost-admin-router.sh missing tar path traversal hardening"
+    fi
+
+    if grep -Fq 'logs:admin-audit)' "${SCRIPT_DIR}/scripts/bifrost-readonly-router.sh" \
+       && grep -Fq 'tail -n 200 /var/log/marketplace/admin-audit.log' "${SCRIPT_DIR}/scripts/bifrost-readonly-router.sh" \
+       && grep -Fq '"admin-audit": "logs:admin-audit"' "${SCRIPT_DIR}/bifrost-api/app/routers/marketplace.py"; then
+        record_pass "readonly-router and marketplace API expose admin-audit log tail"
+    else
+        record_fail "readonly-router or marketplace API missing admin-audit log tail"
+    fi
+
+    if [[ -f "${SCRIPT_DIR}/bifrost-api/app/utils/ssh_runner.py" ]] \
+       && grep -Fq 'async def run_ssh_command' "${SCRIPT_DIR}/bifrost-api/app/utils/ssh_runner.py" \
+       && grep -Fq 'from ..utils.ssh_runner import SshChannel, run_ssh_command' "${SCRIPT_DIR}/bifrost-api/app/routers/marketplace.py" \
+       && grep -Fq 'from ..utils.ssh_runner import SshChannel, run_ssh_command' "${SCRIPT_DIR}/bifrost-api/app/routers/marketplace_admin.py"; then
+        record_pass "marketplace read/write routers share app.utils.ssh_runner (TD-1)"
+    else
+        record_fail "marketplace read/write routers missing shared ssh_runner abstraction (TD-1)"
     fi
 
     if ! grep -E '(^[[:space:]]*eval |^[[:space:]]*exec sh |^[[:space:]]*bash -c )' "${SCRIPT_DIR}/scripts/bifrost-admin-router.sh" >/dev/null 2>&1; then
@@ -6070,6 +6109,79 @@ test_distribution_contracts() {
         record_fail "enable_distribution mock 验证失败"
     fi
     rm -rf "${temp_root}"
+}
+
+# --- Test: Server A hardening v2 contracts ---
+test_server_a_hardening_v2_contracts() {
+    info "=== Server A hardening v2 contracts ==="
+
+    for prefix in "" "ai-gateway-bridge/"; do
+        local label="${prefix:-root}"
+
+        if grep -Fq 'allow-lan: false' "${SCRIPT_DIR}/${prefix}configs/mihomo/config.yaml.tpl" \
+           && grep -Fq 'bind-address: "127.0.0.1"' "${SCRIPT_DIR}/${prefix}configs/mihomo/config.yaml.tpl" \
+           && grep -Fq 'allow-lan: false' "${SCRIPT_DIR}/${prefix}scripts/mihomo.sh" \
+           && grep -Fq 'bind-address: "127.0.0.1"' "${SCRIPT_DIR}/${prefix}scripts/mihomo.sh" \
+           && grep -Fq 'allow-lan: false' "${SCRIPT_DIR}/${prefix}scripts/split-tunnel.sh"; then
+            record_pass "${label} Mihomo local-only proxy surface"
+        else
+            record_fail "${label} Mihomo local-only proxy surface"
+        fi
+
+        if grep -A4 '"tag": "http-in"' "${SCRIPT_DIR}/${prefix}configs/xray/client.json.tpl" | grep -Fq '"listen": "127.0.0.1"' \
+           && grep -A4 '"tag": "http-in"' "${SCRIPT_DIR}/${prefix}scripts/server-a.sh" | grep -Fq '"listen": "127.0.0.1"'; then
+            record_pass "${label} Xray http-in localhost listen"
+        else
+            record_fail "${label} Xray http-in localhost listen"
+        fi
+
+        if test -x "${SCRIPT_DIR}/${prefix}scripts/sync-sni-to-a.sh" \
+           && grep -Fq 'SERVER A SNI SYNC REQUIRED' "${SCRIPT_DIR}/${prefix}configs/anti-dpi/rotate-dest.sh" \
+           && grep -Fq '/etc/anti-dpi/post-rotate.d' "${SCRIPT_DIR}/${prefix}configs/anti-dpi/rotate-dest.sh"; then
+            record_pass "${label} SNI sync helper and rotate warning"
+        else
+            record_fail "${label} SNI sync helper and rotate warning"
+        fi
+
+        if grep -Fq 'auth.docker.io' "${SCRIPT_DIR}/${prefix}configs/whitelist/ai-domains.txt" \
+           && grep -Fq 'raw.githubusercontent.com' "${SCRIPT_DIR}/${prefix}configs/whitelist/ai-domains.txt" \
+           && grep -Fq 'oaistatic.com' "${SCRIPT_DIR}/${prefix}configs/whitelist/ai-domains.txt" \
+           && ! grep -Eq '^(registry\.npmjs\.com|anthropic-api\.com)$' "${SCRIPT_DIR}/${prefix}configs/whitelist/ai-domains.txt"; then
+            record_pass "${label} AI/dev whitelist expanded without known bad domains"
+        else
+            record_fail "${label} AI/dev whitelist expanded without known bad domains"
+        fi
+
+        if grep -Fq 'BIFROST_ENV_FILE' "${SCRIPT_DIR}/${prefix}scripts/common.sh" \
+           && grep -Fq 'BIFROST_WG_PORT' "${SCRIPT_DIR}/${prefix}scripts/vpn.sh" \
+           && grep -Fq 'BIFROST_FIREWALL_BACKEND' "${SCRIPT_DIR}/${prefix}scripts/security.sh" \
+           && test -f "${SCRIPT_DIR}/${prefix}configs/nftables/nftables-a-strict.conf.tpl" \
+           && grep -Fq 'enabled  = ${caddy_jails_enabled}' "${SCRIPT_DIR}/${prefix}scripts/security.sh"; then
+            record_pass "${label} env/WG/firewall/fail2ban hardening contracts"
+        else
+            record_fail "${label} env/WG/firewall/fail2ban hardening contracts"
+        fi
+
+        if grep -Fq 'internal|local-ca|caddy-internal' "${SCRIPT_DIR}/${prefix}scripts/server-a.sh" \
+           && grep -Fq 'tls internal' "${SCRIPT_DIR}/${prefix}scripts/server-a.sh" \
+           && grep -Fq 'bind 10.8.0.1' "${SCRIPT_DIR}/${prefix}scripts/server-a.sh" \
+           && grep -Fq 'BIFROST_SKIP_DEPRECATION_WAIT' "${SCRIPT_DIR}/${prefix}scripts/server-a.sh"; then
+            record_pass "${label} TLS internal + vpn-first Caddy bind"
+        else
+            record_fail "${label} TLS internal + vpn-first Caddy bind"
+        fi
+
+        if grep -Fq '_generate_client_bundle()' "${SCRIPT_DIR}/${prefix}scripts/user-management.sh" \
+           && grep -Fq 'refresh-bundle' "${SCRIPT_DIR}/${prefix}scripts/user-management.sh" \
+           && grep -Fq 'rotate_root_ca()' "${SCRIPT_DIR}/${prefix}scripts/user-management.sh" \
+           && grep -Fq 'SERVER_B_IP/32' "${SCRIPT_DIR}/${prefix}configs/vpn/wg-client.conf.tpl" \
+           && test -f "${SCRIPT_DIR}/${prefix}docs/CA-MANAGEMENT.md" \
+           && test -f "${SCRIPT_DIR}/${prefix}docs/MIGRATION-v0.6.md"; then
+            record_pass "${label} user bundle and CA lifecycle contracts"
+        else
+            record_fail "${label} user bundle and CA lifecycle contracts"
+        fi
+    done
 }
 
 # --- Test: Bifrost API contracts ---
@@ -6811,6 +6923,7 @@ main() {
         bifrost)    test_bifrost_api_contracts; test_bifrost_shell_contracts ;;
         distribution) test_distribution_contracts ;;
         marketplace_skeleton) test_marketplace_skeleton_contracts ;;
+        hardening_v2) test_server_a_hardening_v2_contracts ;;
         docker)     test_in_container ;;
         all)
             test_syntax
@@ -6913,10 +7026,12 @@ main() {
             echo ""
             test_marketplace_skeleton_contracts
             echo ""
+            test_server_a_hardening_v2_contracts
+            echo ""
             test_in_container
             ;;
         *)
-            echo "用法: $0 [syntax|functions|configs|security|mihomo|xray|deploy|keepalive|multi|user|whitelist|monitoring|diagnostics|update|backup|uninstall|supply|panel|ports|menu|docs|bifrost|distribution|marketplace_skeleton|docker|all]"
+            echo "用法: $0 [syntax|functions|configs|security|mihomo|xray|deploy|keepalive|multi|user|whitelist|monitoring|diagnostics|update|backup|uninstall|supply|panel|ports|menu|docs|bifrost|distribution|marketplace_skeleton|hardening_v2|docker|all]"
             exit 1
             ;;
     esac

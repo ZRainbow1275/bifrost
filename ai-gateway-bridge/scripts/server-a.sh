@@ -203,8 +203,11 @@ server_a_tls_mode() {
         ip|ip-cert|ip-address)
             echo "ip"
             ;;
+        internal|local-ca|caddy-internal)
+            echo "internal"
+            ;;
         *)
-            log_error "Invalid BIFROST_SERVER_A_TLS_MODE='${mode}'. Use 'domain', 'cloudflare-origin', or 'ip'."
+            log_error "Invalid BIFROST_SERVER_A_TLS_MODE='${mode}'. Use 'domain', 'cloudflare-origin', 'ip', or 'internal'."
             return 1
             ;;
     esac
@@ -505,27 +508,47 @@ server_a_caddy_tls_block() {
     local endpoint_host="$2"
     local cert_file="${3:-}"
     local key_file="${4:-}"
-    if [[ "$tls_mode" == "ip" ]]; then
-        cat <<TLSEOF
+    case "${tls_mode}" in
+        ip)
+            cat <<TLSEOF
     tls ${LETSENCRYPT_LIVE_DIR}/${endpoint_host}/fullchain.pem ${LETSENCRYPT_LIVE_DIR}/${endpoint_host}/privkey.pem {
         protocols tls1.2 tls1.3
         ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
     }
 TLSEOF
-    elif [[ "$tls_mode" == "cloudflare-origin" ]]; then
-        cat <<TLSEOF
+            ;;
+        cloudflare-origin)
+            cat <<TLSEOF
     tls ${cert_file} ${key_file} {
         protocols tls1.2 tls1.3
         ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
     }
 TLSEOF
-    else
-        cat <<'TLSEOF'
+            ;;
+        internal)
+            cat <<'TLSEOF'
+    tls internal {
+        protocols tls1.2 tls1.3
+    }
+TLSEOF
+            ;;
+        *)
+            cat <<'TLSEOF'
     tls {
         protocols tls1.2 tls1.3
         ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
     }
 TLSEOF
+            ;;
+    esac
+}
+
+server_a_caddy_bind_block() {
+    local exposure_profile="$1"
+    if [[ "${exposure_profile}" == "vpn-first" ]]; then
+        cat <<'BINDEOF'
+    bind 10.8.0.1
+BINDEOF
     fi
 }
 
@@ -754,7 +777,7 @@ install_xray_client() {
     {
       "tag": "http-in",
       "port": 10809,
-      "listen": "0.0.0.0",
+      "listen": "127.0.0.1",
       "protocol": "http",
       "settings": {
         "allowTransparent": false
@@ -1601,6 +1624,27 @@ setup_caddy_a() {
     if ! tls_mode="$(server_a_tls_mode)"; then
         return 1
     fi
+    case "${tls_mode}" in
+        domain|cloudflare-origin|ip)
+            log_warn ""
+            log_warn "============================================================"
+            log_warn "  DEPRECATION NOTICE: BIFROST_SERVER_A_TLS_MODE=${tls_mode}"
+            log_warn "============================================================"
+            log_warn "  Recommended for v0.6+:"
+            log_warn "    BIFROST_EXPOSURE_PROFILE=vpn-first"
+            log_warn "    BIFROST_SERVER_A_TLS_MODE=internal"
+            log_warn "  Migration guide: docs/MIGRATION-v0.6.md"
+            log_warn "  Continuing with legacy mode in 30 seconds."
+            log_warn "  Set BIFROST_SKIP_DEPRECATION_WAIT=1 for CI/noninteractive runs."
+            log_warn "============================================================"
+            if [[ "${BIFROST_SKIP_DEPRECATION_WAIT:-0}" != "1" && -t 0 ]]; then
+                sleep 30
+            fi
+            ;;
+        internal)
+            log_info "TLS mode: internal (Caddy local CA; vpn-first recommended)"
+            ;;
+    esac
     local domain=""
     local public_ip=""
     local endpoint_host=""
@@ -1649,6 +1693,7 @@ setup_caddy_a() {
 # Generated on $(date '+%Y-%m-%d %H:%M:%S')
 
 ${site_address} {
+$(server_a_caddy_bind_block "${exposure_profile}")
     # ===== Normal Website (Disguise) =====
     # Serves a legitimate-looking business website at the root path.
     handle / {

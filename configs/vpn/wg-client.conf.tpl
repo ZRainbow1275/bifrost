@@ -9,8 +9,8 @@
 #   {{DNS_SERVERS}}          - DNS servers (e.g., 10.8.0.1)
 #   {{SERVER_PUBLIC_KEY}}    - Server's WireGuard public key
 #   {{PRESHARED_KEY}}        - Per-peer preshared key (post-quantum defense)
-#   {{SERVER_ENDPOINT}}      - Server IP:Port (e.g., 1.2.3.4:51820)
-#   {{ALLOWED_IPS}}          - Routed subnets (10.8.0.0/24,172.16.0.0/24)
+#   {{SERVER_ENDPOINT}}      - Server IP:Port (e.g., 1.2.3.4:<random 30000-65000>)
+#   {{ALLOWED_IPS}}          - Routed subnets (10.8.0.0/24[,SERVER_B_IP/32])
 #   {{PERSISTENT_KEEPALIVE}} - Keepalive interval in seconds (25)
 # =============================================================================
 # SECURITY NOTICE: This file contains your private key.
@@ -48,7 +48,7 @@ Endpoint = {{SERVER_ENDPOINT}}
 
 # Networks routed through the VPN tunnel:
 #   10.8.0.0/24   - VPN peer network (communicate with other VPN clients)
-#   172.16.0.0/24  - Internal services (New API, monitoring, etc.)
+#   SERVER_B_IP/32 - Server B direct path (optional, for failover)
 # NOTE: Only company traffic is routed through VPN (split tunneling).
 #       Your regular internet traffic goes through your normal connection.
 AllowedIPs = {{ALLOWED_IPS}}
