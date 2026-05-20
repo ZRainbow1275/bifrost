@@ -16,6 +16,10 @@ __pycache__/
 .agents/
 .trellis/
 .claude/
+# PR-6 team-config seed: the templates under prompts/0519-1/team-config/.claude/
+# are intentional checked-in artifacts (not a developer-local .claude/ dir).
+!prompts/0519-1/team-config/.claude/
+!prompts/0519-1/team-config/.claude/**
 
 # Logs
 *.log

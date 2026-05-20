@@ -1,0 +1,97 @@
+# <PROJECT_NAME> - Claude Code Team Conventions
+
+> **How to use this template**
+> 1. Copy this file to your project root as `CLAUDE.md`.
+> 2. Replace `<PROJECT_NAME>` with your project's display name.
+> 3. Pair it with the sibling `.claude/settings.json.template` (copy that one
+>    to `~/.claude/settings.json` -- or to `<project>/.claude/settings.json`
+>    for project-scoped overrides).
+> 4. New to the team? Read
+>    `prompts/0519-1/marketplace-bootstrap/seed/README.md` for the 10-minute
+>    onboarding walkthrough.
+
+This project participates in the Bifrost team's internal Claude Code plugin
+marketplace (`bifrost-internal`). Plugins are distributed **LAN-only** via
+`https://files.uuhfn.cloud/git/bifrost-internal-plugins.git` and curated by
+the marketplace admin pipeline on Server B.
+
+## Always Do
+
+- **Use the internal marketplace** for shared skills, hooks, and MCP servers:
+  `/plugin install <name>@bifrost-internal`. Never fetch plugins from
+  ad-hoc GitHub URLs at runtime.
+- **Refresh before installing** to catch new releases:
+  `/plugin marketplace update bifrost-internal`. Requires WireGuard / LAN
+  reachability to Server A (`files.uuhfn.cloud`).
+- **Pin versions** when reproducibility matters:
+  `/plugin install hello-world-skill@bifrost-internal --version v0.1.0`.
+- **Route npm / pip through the internal mirrors** (Verdaccio at
+  `npm.uuhfn.cloud`, git mirrors at `files.uuhfn.cloud/git/...`). The
+  `permissions.deny` block in `.claude/settings.json` is a hard fallback;
+  do not loosen it without security review.
+- **Report upstream changes** to the marketplace admin via
+  `panel.uuhfn.cloud` when a plugin needs a new release.
+
+## When Authoring a New Plugin
+
+1. Clone the marketplace bare read-only:
+   `git clone https://files.uuhfn.cloud/git/bifrost-internal-plugins.git`
+   (push is 403 by design -- see `spec.md` section 6.3 for the upload SOP).
+2. Add `plugins/<your-plugin>/` with `.claude-plugin/plugin.json`,
+   `manifest.yaml`, `SKILL.md` (or hook/MCP file), `LICENSE`, `README.md`.
+3. Build a release tarball locally:
+   `tar czf <plugin>-vX.Y.Z.tar.gz -C plugins/<plugin> .`
+4. Upload via `panel.uuhfn.cloud/marketplace/upload` (browser, while on
+   the management VPN). The admin pipeline cuts the `plugins/<name>/vX.Y.Z`
+   annotated tag and the render service refreshes `marketplace.json`.
+5. Verify: `/plugin marketplace update bifrost-internal` then
+   `/plugin install <name>@bifrost-internal --version vX.Y.Z`.
+
+## When Offline (no VPN / no internet)
+
+Use the seed tarball produced by `scripts/build-marketplace-seed.sh`:
+
+```bash
+tar xzf marketplace-seed.tar.gz -C /tmp/seed
+export CLAUDE_CODE_PLUGIN_SEED_DIR=/tmp/seed/bifrost-internal-plugins
+claude
+# /plugin browse -> bifrost-internal -> hello-world-skill should appear
+```
+
+See `prompts/0519-1/marketplace-bootstrap/seed/README.md` for the full
+offline workflow and SHA-256 verification.
+
+## Never Do
+
+- NEVER add `extraKnownMarketplaces` entries that point at public GitHub
+  repos. All marketplace traffic MUST flow through `files.uuhfn.cloud`.
+- NEVER paste `X-Admin-Key` / Anthropic API keys / Verdaccio bootstrap
+  passwords into `settings.json`. Use environment variables sourced from
+  a credential manager.
+- NEVER remove items from `permissions.deny` without a documented
+  exception approved in the team security review.
+- NEVER bypass the upload pipeline (e.g. trying to `git push` to the bare
+  repo). The Caddy mirror returns 403 on `git-receive-pack`; pushes will
+  fail loudly.
+- NEVER mirror upstream Claude-Code plugin sources into this marketplace
+  (ADR-4 in `spec.md` section 5.2 -- LICENSE compliance).
+
+## Tools Quick Reference
+
+| Command | When to use |
+|---|---|
+| `/plugin browse` | List plugins available across all known marketplaces |
+| `/plugin install <name>@bifrost-internal` | Install latest version of a team plugin |
+| `/plugin install <name>@bifrost-internal --version vX.Y.Z` | Pin a specific version |
+| `/plugin marketplace update bifrost-internal` | Refresh the index from Server A |
+| `/plugin marketplace remove bifrost-internal` | (Emergency) drop the marketplace locally |
+
+## Onboarding Checklist
+
+- [ ] Wireguard tunnel up; `dig +short files.uuhfn.cloud` returns Server A.
+- [ ] `~/.claude/settings.json` populated from the template.
+- [ ] `claude` starts without warnings about unknown marketplaces.
+- [ ] `/plugin browse` lists `bifrost-internal` with at least one plugin.
+- [ ] `/plugin install hello-world-skill@bifrost-internal` succeeds.
+- [ ] You have read `docs/SECURITY.md` (Server B marketplace section) once
+      it lands in PR-7.
