@@ -1,0 +1,16 @@
+[Unit]
+Description=Watch bifrost-internal-plugins bare refs for changes (triggers marketplace-render)
+# spec.md C6: bifrost-internal-plugins does NOT join the git-mirror-sync matrix,
+# therefore no Requires=git-mirror@... here. The bare repo is created by
+# scripts/server-b.sh _distribution_init_marketplace_bare in step 07.
+After=local-fs.target
+
+[Path]
+# spec.md M5: PathModified fires on actual writes (PathChanged misses overwrites)
+PathModified=/var/lib/git-mirrors/bifrost-internal-plugins.git/packed-refs
+PathModified=/var/lib/git-mirrors/bifrost-internal-plugins.git/refs
+MakeDirectory=true
+Unit=marketplace-render.service
+
+[Install]
+WantedBy=multi-user.target

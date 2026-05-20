@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily check for Anthropic LICENSE / marketplace protocol changes (ADR-4 monitor)
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=30m
+Persistent=true
+Unit=upstream-schema-check.service
+
+[Install]
+WantedBy=timers.target

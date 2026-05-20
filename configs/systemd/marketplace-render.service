@@ -1,0 +1,17 @@
+[Unit]
+Description=Render bifrost-internal marketplace.json into git tree
+# spec.md M7: render-marketplace-json.sh future-proofs against remote bare; for now
+# the bare repo is local but we still gate on network-online.target for parity with
+# upstream-schema-check.service.
+Requires=network-online.target
+After=network-online.target
+ConditionPathExists=/var/lib/git-mirrors/bifrost-internal-plugins.git/HEAD
+
+[Service]
+Type=oneshot
+User=git-mirror
+Group=git-mirror
+ExecStart=/usr/local/bin/render-marketplace-json.sh bifrost-internal-plugins /var/lib/git-mirrors/bifrost-internal-plugins.git
+StandardOutput=append:/var/log/marketplace/render.log
+StandardError=append:/var/log/marketplace/render.log
+TimeoutStartSec=120

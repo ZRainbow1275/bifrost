@@ -1,0 +1,15 @@
+[Unit]
+Description=Check upstream Anthropic LICENSE for changes (ADR-4 fallback trigger)
+# spec.md M7: this service performs an HTTPS GET to github.com so network-online.target
+# is required.
+Requires=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=git-mirror
+Group=git-mirror
+ExecStart=/usr/local/bin/check-upstream-schema.sh
+StandardOutput=append:/var/log/marketplace/schema-check.log
+StandardError=append:/var/log/marketplace/schema-check.log
+TimeoutStartSec=60
