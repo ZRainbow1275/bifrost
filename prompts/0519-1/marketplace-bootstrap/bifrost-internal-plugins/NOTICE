@@ -1,0 +1,12 @@
+This marketplace is an internal distribution channel for Bifrost team.
+It does NOT mirror anthropic/claude-code or any other proprietary upstream
+(see ADR-4 in spec.md section 5.2 for the LICENSE-compliance reasoning).
+
+Plugin submissions are subject to admin review via panel.uuhfn.cloud
+(see docs/SECURITY.md section marketplace once PR-7 lands).
+
+Authoritative bare repository:
+  https://files.uuhfn.cloud/git/bifrost-internal-plugins.git
+
+Audit log:
+  /var/log/marketplace/admin-audit.log on Server B

@@ -1,0 +1,41 @@
+{
+  "name": "bifrost-internal",
+  "owner": {
+    "name": "Bifrost Team",
+    "email": "bifrost-admin@uuhfn.cloud"
+  },
+  "description": "Bifrost 团队内部 Claude Code plugin marketplace (team-only distribution, no upstream mirror)",
+  "version": "1.0.0",
+  "metadata": {
+    "pluginRoot": "./plugins",
+    "license_id": "ALL-RIGHTS-RESERVED",
+    "upstream_url": null,
+    "rendered_at": "2026-05-20T00:00:00Z",
+    "render_script_version": "v1.0.0",
+    "git_head_sha": "0000000000000000000000000000000000000000"
+  },
+  "plugins": [
+    {
+      "name": "hello-world-skill",
+      "source": "./plugins/hello-world-skill",
+      "description": "Sample skill demonstrating marketplace plumbing",
+      "version": "0.1.0",
+      "author": {
+        "name": "Bifrost Team",
+        "email": "bifrost-admin@uuhfn.cloud"
+      },
+      "license": "ALL-RIGHTS-RESERVED",
+      "keywords": ["sample", "internal"],
+      "category": "demo",
+      "strict": true,
+      "metadata": {
+        "manifest_version": "0.1.0",
+        "license_id": "ALL-RIGHTS-RESERVED",
+        "declared_skills": ["hello"],
+        "declared_hooks": [],
+        "declared_mcp_servers": [],
+        "tag": "plugins/hello-world-skill/v0.1.0"
+      }
+    }
+  ]
+}

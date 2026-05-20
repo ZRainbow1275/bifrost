@@ -1,0 +1,10 @@
+# bifrost-internal Plugin Marketplace
+# Copyright (c) 2026 Bifrost Team. All rights reserved.
+#
+# Each plugin under `plugins/<name>/` may carry its own LICENSE file.
+# Default policy: ALL-RIGHTS-RESERVED unless otherwise stated.
+# Distribution restricted to authenticated Bifrost team members.
+#
+# This file is also reproduced into the published marketplace artifact by
+# scripts/render-marketplace-json.sh (see spec.md §4.2 step 5) and into the
+# emergency read-only copy at /var/lib/dist/plugins/LICENSE.md on Server B.

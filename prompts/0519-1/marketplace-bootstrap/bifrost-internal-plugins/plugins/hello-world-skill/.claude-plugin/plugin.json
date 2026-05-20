@@ -1,0 +1,12 @@
+{
+  "name": "hello-world-skill",
+  "version": "0.1.0",
+  "description": "Sample skill demonstrating marketplace plumbing",
+  "author": {
+    "name": "Bifrost Team",
+    "email": "bifrost-admin@uuhfn.cloud"
+  },
+  "license": "ALL-RIGHTS-RESERVED",
+  "keywords": ["sample", "internal"],
+  "skills": ["./skills/hello"]
+}

@@ -1,0 +1,21 @@
+# Bifrost-internal additional metadata for hello-world-skill.
+# Authoritative schema: spec.md section 6.4.
+# `version` MUST equal the semver portion of the git tag plugins/hello-world-skill/v<X.Y.Z>
+# (render-marketplace-json.sh exits 3 on mismatch).
+version: "0.1.0"
+description: "Sample skill demonstrating marketplace plumbing"
+license_id: "ALL-RIGHTS-RESERVED"
+maintainers:
+  - name: "Bifrost Team"
+    email: "bifrost-admin@uuhfn.cloud"
+requires:
+  claude_code_min_version: "2.1.0"
+  os:
+    - "linux"
+    - "darwin"
+    - "windows"
+permissions:
+  declared_hooks: []
+  declared_mcp_servers: []
+  declared_skills:
+    - "hello"

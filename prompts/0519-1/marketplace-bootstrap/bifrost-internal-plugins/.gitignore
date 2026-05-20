@@ -1,0 +1,26 @@
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Bash artifacts
+*.tmp
+*.bak
+
+# Build outputs
+dist/
+build/
+node_modules/
+
+# Local test scratch
+/tmp/
+/.render-work/
