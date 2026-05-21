@@ -4061,6 +4061,36 @@ EOF
         record_fail "Root install_security_tools 在子安装器失败时会返回失败且不宣称已完成"
     fi
 
+    if grep -Fq "apt-get install -y -qq --no-install-recommends rkhunter" "${workdir}/security.sh"; then
+        record_pass "Root _install_rkhunter avoids installing recommended mail stack packages"
+    else
+        record_fail "Root _install_rkhunter should install rkhunter with --no-install-recommends"
+    fi
+
+    if BIFROST_TRACE_COMMON_LOAD=0 \
+        SECURITY_SH="${workdir}/security.sh" \
+        RKHUNTER_CONF_FILE="${temp_root}/rkhunter.conf" \
+        RKHUNTER_CRON_FILE="${temp_root}/cron/rkhunter-config-scan" \
+        bash -c '
+            set -euo pipefail
+            cat > "${RKHUNTER_CONF_FILE}" <<EOF
+ALLOW_SSH_ROOT_USER=no
+WEB_CMD="/bin/false"
+SCRIPTWHITELIST=/usr/bin/lwp-request
+EOF
+            source "$SECURITY_SH"
+            rkhunter() { return 0; }
+            _install_rkhunter >/dev/null 2>&1
+            grep -Fxq "WEB_CMD=/bin/false" "${RKHUNTER_CONF_FILE}"
+            if [[ ! -e /usr/bin/lwp-request ]]; then
+                grep -Fxq "#SCRIPTWHITELIST=/usr/bin/lwp-request" "${RKHUNTER_CONF_FILE}"
+            fi
+        '; then
+        record_pass "Root _install_rkhunter normalizes rkhunter config for missing lwp-request"
+    else
+        record_fail "Root _install_rkhunter should normalize WEB_CMD and missing SCRIPTWHITELIST"
+    fi
+
     if BIFROST_TRACE_COMMON_LOAD=0 \
         SECURITY_SH="${workdir}/security.sh" \
         RKHUNTER_CRON_FILE="${temp_root}/cron/rkhunter-scan" \
@@ -4217,6 +4247,31 @@ EOF
         record_pass "Root audit_ports 在 firewalld reload 失败时会返回失败且不宣称端口已封禁"
     else
         record_fail "Root audit_ports 在 firewalld reload 失败时会返回失败且不宣称端口已封禁"
+    fi
+
+    if BIFROST_TRACE_COMMON_LOAD=0 \
+        SECURITY_SH="${workdir}/security.sh" \
+        bash -c '
+            set -euo pipefail
+            output="$(mktemp)"
+            trap "rm -f \"${output}\"" EXIT
+            source "$SECURITY_SH"
+            _get_ssh_port() { echo 22; }
+            ss() {
+                cat <<'\''EOF'\''
+State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
+LISTEN 0 4096 127.0.0.53%lo:53 0.0.0.0:* users:(("systemd-resolve",pid=1,fd=14))
+LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=2,fd=3))
+EOF
+            }
+            netstat() { return 1; }
+            audit_ports >"${output}" 2>&1
+            grep -q "All listening ports are whitelisted" "${output}"
+            ! grep -q "The following ports are NOT in the whitelist" "${output}"
+        '; then
+        record_pass "Root audit_ports ignores loopback-only DNS listeners"
+    else
+        record_fail "Root audit_ports should ignore loopback-only DNS listeners"
     fi
 
     if BIFROST_TRACE_COMMON_LOAD=0 \

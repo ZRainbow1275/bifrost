@@ -1061,6 +1061,14 @@ audit_ports() {
         local local_addr
         local port
         local_addr=$(echo "${line}" | awk '{print $4}')
+
+        # Loopback-only listeners, such as systemd-resolved on 127.0.0.53:53,
+        # are not externally exposed and should not be treated as port-audit
+        # findings.
+        if [[ "${local_addr}" == 127.* || "${local_addr}" == "[::1]:"* || "${local_addr}" == "::1:"* || "${local_addr}" == localhost:* ]]; then
+            continue
+        fi
+
         port="${local_addr##*:}"
 
         # Skip non-numeric
@@ -1515,7 +1523,7 @@ _install_rkhunter() {
                 log_error "Failed to update apt package index while installing rkhunter."
                 return 1
             }
-            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rkhunter || {
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends rkhunter || {
                 log_error "Failed to install rkhunter via apt-get."
                 return 1
             }
@@ -1559,11 +1567,33 @@ _install_rkhunter() {
             return 1
         }
 
-        # Allow script replacements during package updates (Debian/Ubuntu)
-        sed -i 's/^#*\s*SCRIPTWHITELIST=\/usr\/bin\/lwp-request/SCRIPTWHITELIST=\/usr\/bin\/lwp-request/' "${rkhunter_conf}" 2>/dev/null || {
-            log_error "Failed to configure SCRIPTWHITELIST in ${rkhunter_conf}."
-            return 1
-        }
+        # Ubuntu packages may ship WEB_CMD="/bin/false"; rkhunter treats the
+        # quotes as part of the path and reports an invalid relative pathname.
+        if grep -qE '^#*[[:space:]]*WEB_CMD=' "${rkhunter_conf}" 2>/dev/null; then
+            sed -i 's|^#*[[:space:]]*WEB_CMD=.*|WEB_CMD=/bin/false|' "${rkhunter_conf}" 2>/dev/null || {
+                log_error "Failed to normalize WEB_CMD in ${rkhunter_conf}."
+                return 1
+            }
+        else
+            echo "WEB_CMD=/bin/false" >> "${rkhunter_conf}" || {
+                log_error "Failed to append WEB_CMD to ${rkhunter_conf}."
+                return 1
+            }
+        fi
+
+        # Only whitelist lwp-request when it exists. Enabling a non-existent
+        # SCRIPTWHITELIST path makes rkhunter fail before it can scan.
+        if [[ -e /usr/bin/lwp-request ]]; then
+            sed -i 's|^#*[[:space:]]*SCRIPTWHITELIST=/usr/bin/lwp-request|SCRIPTWHITELIST=/usr/bin/lwp-request|' "${rkhunter_conf}" 2>/dev/null || {
+                log_error "Failed to configure SCRIPTWHITELIST in ${rkhunter_conf}."
+                return 1
+            }
+        else
+            sed -i 's|^[[:space:]]*SCRIPTWHITELIST=/usr/bin/lwp-request|#SCRIPTWHITELIST=/usr/bin/lwp-request|' "${rkhunter_conf}" 2>/dev/null || {
+                log_error "Failed to disable missing SCRIPTWHITELIST in ${rkhunter_conf}."
+                return 1
+            }
+        fi
 
         # Reduce false positives: allow /dev/.udev and similar
         if ! grep -q "ALLOWDEVFILE=/dev/.udev" "${rkhunter_conf}" 2>/dev/null; then
