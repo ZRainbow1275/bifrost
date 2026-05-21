@@ -15,13 +15,13 @@
 | Server A 初始登录方式 | 腾讯云控制台给你的密码或密钥 | 不要写进文档 |
 | Server A 新 SSH 端口 | 建议先固定一个，不要随机 | `22222` |
 | Server B 公网 IP | 海外 VPS 的公网 IPv4 | `8.8.8.8` |
-| 仓库地址 | 这个项目的 Git 地址 | `https://github.com/.../bifrost.git` |
+| 仓库地址 | 这个项目的 Git 地址 | `https://github.com/ZRainbow1275/bifrost.git` |
 | 你的本机 | 你现在操作的 Windows 电脑 | PowerShell |
 
 文档里的 `<SERVER_A_IP>` 要替换成 Server A 的公网 IP。  
 文档里的 `<SERVER_A_LOGIN_USER>` 默认先写 `ubuntu`。  
 文档里的 `<SERVER_B_IP>` 要替换成 Server B 的公网 IP。  
-文档里的 `<REPO_URL>` 要替换成真实仓库地址。  
+仓库地址已经写成你的远端仓库：`https://github.com/ZRainbow1275/bifrost.git`。
 输入命令时不要保留尖括号。
 
 ## 1. 在你的 Windows 电脑上准备 SSH key
@@ -177,7 +177,7 @@ dnf install -y git curl ca-certificates
 然后拉项目：
 
 ```bash
-git clone <REPO_URL> /opt/bifrost
+git clone https://github.com/ZRainbow1275/bifrost.git /opt/bifrost
 cd /opt/bifrost
 chmod +x install.sh scripts/*.sh
 ```
