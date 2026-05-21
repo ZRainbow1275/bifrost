@@ -174,10 +174,127 @@ apt install -y git curl ca-certificates
 dnf install -y git curl ca-certificates
 ```
 
-然后拉项目：
+然后先尝试从 GitHub 拉项目：
 
 ```bash
 git clone https://github.com/ZRainbow1275/bifrost.git /opt/bifrost
+cd /opt/bifrost
+chmod +x install.sh scripts/*.sh
+```
+
+如果这里出现类似下面的错误：
+
+```text
+fatal: unable to access 'https://github.com/ZRainbow1275/bifrost.git/': GnuTLS recv error (-110): The TLS connection was non-properly terminated.
+```
+
+不要继续反复 `git clone`。这通常不是仓库地址错，而是腾讯云到 GitHub 的 TLS 连接被中途断开。
+
+先试 `/etc/hosts` 方案。
+如果还是失败，再用后面的“本机打包上传”方案。
+
+### 4.1 腾讯云拉不动 GitHub 时：先修改 /etc/hosts
+
+这个方案就是你截图里的思路：手动告诉服务器 `github.com` 和 `raw.githubusercontent.com` 应该访问哪个 IP。
+注意：截图里的 IP 只是当时可用，不一定永远可用。你要先查最新 IP，再写进服务器。
+
+先在你的 Windows 浏览器里打开：
+
+```text
+https://www.ipaddress.com/
+```
+
+在网站里分别查询这两个域名：
+
+```text
+github.com
+raw.githubusercontent.com
+```
+
+你会查到类似这样的 IPv4 地址：
+
+```text
+140.82.112.4 github.com
+185.199.108.133 raw.githubusercontent.com
+```
+
+上面只是示例。你实际操作时，以你当场查到的结果为准。
+
+回到 Server A 的 SSH 窗口，确认你已经是 root：
+
+```bash
+whoami
+```
+
+如果输出不是 `root`，先执行：
+
+```bash
+sudo -i
+```
+
+然后执行下面命令。
+它会让你输入两次 IP，把你刚才查到的 IP 粘贴进去：
+
+```bash
+read -rp "请输入 github.com 的 IPv4: " GITHUB_IP
+read -rp "请输入 raw.githubusercontent.com 的 IPv4: " RAW_GITHUB_IP
+
+cp /etc/hosts "/etc/hosts.bak.$(date +%Y%m%d-%H%M%S)"
+sed -i '/[[:space:]]github\.com$/d; /[[:space:]]raw\.githubusercontent\.com$/d' /etc/hosts
+printf '\n# GitHub workaround for Bifrost install\n%s github.com\n%s raw.githubusercontent.com\n' "$GITHUB_IP" "$RAW_GITHUB_IP" >> /etc/hosts
+getent hosts github.com
+getent hosts raw.githubusercontent.com
+```
+
+确认 `getent hosts` 能显示你刚写进去的 IP 后，再重新拉项目：
+
+```bash
+rm -rf /opt/bifrost
+git clone https://github.com/ZRainbow1275/bifrost.git /opt/bifrost
+cd /opt/bifrost
+chmod +x install.sh scripts/*.sh
+```
+
+如果这次成功，继续往下做。
+如果还是同样的 `GnuTLS recv error (-110)`，不要在这里卡住，直接走下一节的本机上传方案。
+
+### 4.2 腾讯云改 hosts 后仍然拉不动：从 Windows 本机上传项目
+
+这一步分成两边做。
+
+先在你的 Windows PowerShell 里执行。这里假设你的本机项目目录是：
+
+```text
+D:\Desktop\CREATOR FIVE
+```
+
+执行：
+
+```powershell
+cd "D:\Desktop\CREATOR FIVE"
+git archive --format=tar.gz -o "$env:USERPROFILE\Desktop\bifrost-main.tar.gz" HEAD
+scp "$env:USERPROFILE\Desktop\bifrost-main.tar.gz" ubuntu@<SERVER_A_IP>:/tmp/bifrost-main.tar.gz
+```
+
+如果你的腾讯云第一次登录本来就是密钥登录，`scp` 也要加 `-i`，例如：
+
+```powershell
+scp -i "$env:USERPROFILE\.ssh\你的腾讯云密钥文件" "$env:USERPROFILE\Desktop\bifrost-main.tar.gz" ubuntu@<SERVER_A_IP>:/tmp/bifrost-main.tar.gz
+```
+
+上传完成后，回到 Server A 的 SSH 窗口。
+确认你已经是 root，如果不是，先执行：
+
+```bash
+sudo -i
+```
+
+然后在 Server A 上执行：
+
+```bash
+rm -rf /opt/bifrost
+mkdir -p /opt/bifrost
+tar -xzf /tmp/bifrost-main.tar.gz -C /opt/bifrost
 cd /opt/bifrost
 chmod +x install.sh scripts/*.sh
 ```

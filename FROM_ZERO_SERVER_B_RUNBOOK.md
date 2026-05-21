@@ -90,10 +90,103 @@ Rocky / AlmaLinux / CentOS：
 dnf install -y git curl ca-certificates wireguard-tools
 ```
 
-拉项目：
+先尝试从 GitHub 拉项目：
 
 ```bash
 git clone https://github.com/ZRainbow1275/bifrost.git /opt/bifrost
+cd /opt/bifrost
+chmod +x install.sh scripts/*.sh
+```
+
+如果 Server B 是海外 VPS，通常这一步能成功。
+如果它也出现类似下面的错误：
+
+```text
+fatal: unable to access 'https://github.com/ZRainbow1275/bifrost.git/': GnuTLS recv error (-110): The TLS connection was non-properly terminated.
+```
+
+就不要反复重试。可以先改 `/etc/hosts`，如果仍然失败，再从 Windows 本机打包上传。
+
+### 3.1 VPS 也拉不动 GitHub 时：先修改 /etc/hosts
+
+海外 VPS 通常不需要这一步。
+只有当 Server B 也拉不动 GitHub 时，才按这里处理。
+
+先在你的 Windows 浏览器里打开：
+
+```text
+https://www.ipaddress.com/
+```
+
+在网站里分别查询：
+
+```text
+github.com
+raw.githubusercontent.com
+```
+
+你会查到类似这样的 IPv4 地址：
+
+```text
+140.82.112.4 github.com
+185.199.108.133 raw.githubusercontent.com
+```
+
+上面只是示例。实际操作时，以你当场查到的 IP 为准。
+
+回到 Server B 的 SSH 窗口，执行下面命令。
+它会让你输入两次 IP，把你刚才查到的 IP 粘贴进去：
+
+```bash
+read -rp "请输入 github.com 的 IPv4: " GITHUB_IP
+read -rp "请输入 raw.githubusercontent.com 的 IPv4: " RAW_GITHUB_IP
+
+cp /etc/hosts "/etc/hosts.bak.$(date +%Y%m%d-%H%M%S)"
+sed -i '/[[:space:]]github\.com$/d; /[[:space:]]raw\.githubusercontent\.com$/d' /etc/hosts
+printf '\n# GitHub workaround for Bifrost install\n%s github.com\n%s raw.githubusercontent.com\n' "$GITHUB_IP" "$RAW_GITHUB_IP" >> /etc/hosts
+getent hosts github.com
+getent hosts raw.githubusercontent.com
+```
+
+确认 `getent hosts` 能显示你刚写进去的 IP 后，再重新拉项目：
+
+```bash
+rm -rf /opt/bifrost
+git clone https://github.com/ZRainbow1275/bifrost.git /opt/bifrost
+cd /opt/bifrost
+chmod +x install.sh scripts/*.sh
+```
+
+如果还是失败，继续下一节，从 Windows 本机打包上传。
+
+### 3.2 VPS 改 hosts 后仍然拉不动：从 Windows 本机上传项目
+
+先在你的 Windows PowerShell 里执行。这里假设你的本机项目目录是：
+
+```text
+D:\Desktop\CREATOR FIVE
+```
+
+执行：
+
+```powershell
+cd "D:\Desktop\CREATOR FIVE"
+git archive --format=tar.gz -o "$env:USERPROFILE\Desktop\bifrost-main.tar.gz" HEAD
+scp "$env:USERPROFILE\Desktop\bifrost-main.tar.gz" root@<SERVER_B_IP>:/tmp/bifrost-main.tar.gz
+```
+
+如果你已经把 Server B 的 SSH 端口改成了 `22222`，上传命令改成：
+
+```powershell
+scp -P 22222 -i "$env:USERPROFILE\.ssh\bifrost_root_ed25519" "$env:USERPROFILE\Desktop\bifrost-main.tar.gz" root@<SERVER_B_IP>:/tmp/bifrost-main.tar.gz
+```
+
+上传完成后，回到 Server B 的 SSH 窗口，执行：
+
+```bash
+rm -rf /opt/bifrost
+mkdir -p /opt/bifrost
+tar -xzf /tmp/bifrost-main.tar.gz -C /opt/bifrost
 cd /opt/bifrost
 chmod +x install.sh scripts/*.sh
 ```
