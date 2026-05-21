@@ -98,6 +98,9 @@ cd /opt/bifrost
 chmod +x install.sh scripts/*.sh
 ```
 
+截至 `2026-05-21` 的实测结果：GitHub 已经可以直接拉取。
+如果上面这三行已经成功，就直接跳到“确认目录正确”，不要再改 `/etc/hosts`，也不要走本机打包上传。
+
 如果 Server B 是海外 VPS，通常这一步能成功。
 如果它也出现类似下面的错误：
 
@@ -235,6 +238,18 @@ type "$env:USERPROFILE\.ssh\bifrost_root_ed25519.pub"
 
 复制整行粘贴进去。
 
+这一轮加固的目标是：服务器不再识别密码登录，只接受 SSH 公钥登录。
+脚本会把 SSH 配置改成下面这种效果：
+
+```text
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+AuthenticationMethods publickey
+PubkeyAuthentication yes
+PermitRootLogin prohibit-password
+```
+
 完成后，不要关旧窗口。  
 重新打开一个 Windows PowerShell，测试新端口：
 
@@ -247,6 +262,31 @@ ssh -i "$env:USERPROFILE\.ssh\bifrost_root_ed25519" -p 22222 root@<SERVER_B_IP>
 ```bash
 touch /tmp/ssh-port-change-confirmed
 ```
+
+确认后，在 Server B 的 SSH 窗口里检查一次实际生效配置：
+
+```bash
+sshd -T | grep -E '^(passwordauthentication|kbdinteractiveauthentication|authenticationmethods|pubkeyauthentication|permitrootlogin) '
+```
+
+你应该看到类似：
+
+```text
+passwordauthentication no
+kbdinteractiveauthentication no
+authenticationmethods publickey
+pubkeyauthentication yes
+permitrootlogin prohibit-password
+```
+
+再做一个反向验证：新开 Windows PowerShell，强制不用密钥、只尝试密码登录：
+
+```powershell
+ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password -p 22222 root@<SERVER_B_IP>
+```
+
+这条命令应该登录失败。
+如果它还能让你用密码登录成功，立刻停下，不要继续后面的部署。
 
 从现在开始，连接 Server B 都用：
 

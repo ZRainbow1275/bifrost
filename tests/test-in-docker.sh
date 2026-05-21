@@ -3799,6 +3799,43 @@ EOF
         SSH_AUTHORIZED_KEYS_FILE="${temp_root}/root/.ssh/authorized_keys" \
         bash -c '
             set -euo pipefail
+            mkdir -p "$(dirname "${SSHD_CONFIG_PATH}")" "${SSH_ADMIN_DIR}" "${SSHD_BACKUP_DIR}" "${SECURITY_STATE_DIR}"
+            cat > "${SSHD_CONFIG_PATH}" <<EOF
+Port 22
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+ChallengeResponseAuthentication yes
+PermitRootLogin yes
+PubkeyAuthentication no
+EOF
+            printf "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey root@test\n" > "${SSH_AUTHORIZED_KEYS_FILE}"
+            source "$SECURITY_SH"
+            sshd() { return 0; }
+            _detect_firewall() { echo none; }
+            systemctl() { return 0; }
+            printf "22\nn\n" | harden_ssh >/dev/null 2>&1
+            grep -q "^PasswordAuthentication no$" "${SSHD_CONFIG_PATH}"
+            grep -q "^KbdInteractiveAuthentication no$" "${SSHD_CONFIG_PATH}"
+            grep -q "^ChallengeResponseAuthentication no$" "${SSHD_CONFIG_PATH}"
+            grep -q "^AuthenticationMethods publickey$" "${SSHD_CONFIG_PATH}"
+            grep -q "^PubkeyAuthentication yes$" "${SSHD_CONFIG_PATH}"
+            grep -q "^PermitRootLogin prohibit-password$" "${SSHD_CONFIG_PATH}"
+        '; then
+        record_pass "Root harden_ssh enforces public-key-only authentication"
+    else
+        record_fail "Root harden_ssh should enforce public-key-only authentication"
+    fi
+
+    if BIFROST_TRACE_COMMON_LOAD=0 \
+        SECURITY_SH="${workdir}/security.sh" \
+        SECURITY_STATE_DIR="${temp_root}/state" \
+        SECURITY_STATE_FILE="${temp_root}/state/security.env" \
+        SSHD_CONFIG_PATH="${temp_root}/etc/ssh/sshd_config" \
+        SSHD_BACKUP_DIR="${temp_root}/etc/ssh" \
+        SSH_ADMIN_DIR="${temp_root}/root/.ssh" \
+        SSH_AUTHORIZED_KEYS_FILE="${temp_root}/root/.ssh/authorized_keys" \
+        bash -c '
+            set -euo pipefail
             output="$(mktemp)"
             restart_marker="$(mktemp)"
             trap "rm -f \"${output}\" \"${restart_marker}\"" EXIT
@@ -4331,6 +4368,43 @@ PermitRootLogin yes
 PubkeyAuthentication yes
 EOF
     printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey root@test\n' > "${temp_root}/root/.ssh/authorized_keys"
+
+    if BIFROST_TRACE_COMMON_LOAD=0 \
+        SECURITY_SH="${workdir}/security.sh" \
+        SECURITY_STATE_DIR="${temp_root}/state" \
+        SECURITY_STATE_FILE="${temp_root}/state/security.env" \
+        SSHD_CONFIG_PATH="${temp_root}/etc/ssh/sshd_config" \
+        SSHD_BACKUP_DIR="${temp_root}/etc/ssh" \
+        SSH_ADMIN_DIR="${temp_root}/root/.ssh" \
+        SSH_AUTHORIZED_KEYS_FILE="${temp_root}/root/.ssh/authorized_keys" \
+        bash -c '
+            set -euo pipefail
+            mkdir -p "$(dirname "${SSHD_CONFIG_PATH}")" "${SSH_ADMIN_DIR}" "${SSHD_BACKUP_DIR}" "${SECURITY_STATE_DIR}"
+            cat > "${SSHD_CONFIG_PATH}" <<EOF
+Port 22
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+ChallengeResponseAuthentication yes
+PermitRootLogin yes
+PubkeyAuthentication no
+EOF
+            printf "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey root@test\n" > "${SSH_AUTHORIZED_KEYS_FILE}"
+            source "$SECURITY_SH"
+            sshd() { return 0; }
+            _detect_firewall() { echo none; }
+            systemctl() { return 0; }
+            printf "22\nn\n" | harden_ssh >/dev/null 2>&1
+            grep -q "^PasswordAuthentication no$" "${SSHD_CONFIG_PATH}"
+            grep -q "^KbdInteractiveAuthentication no$" "${SSHD_CONFIG_PATH}"
+            grep -q "^ChallengeResponseAuthentication no$" "${SSHD_CONFIG_PATH}"
+            grep -q "^AuthenticationMethods publickey$" "${SSHD_CONFIG_PATH}"
+            grep -q "^PubkeyAuthentication yes$" "${SSHD_CONFIG_PATH}"
+            grep -q "^PermitRootLogin prohibit-password$" "${SSHD_CONFIG_PATH}"
+        '; then
+        record_pass "AI Gateway Bridge harden_ssh enforces public-key-only authentication"
+    else
+        record_fail "AI Gateway Bridge harden_ssh should enforce public-key-only authentication"
+    fi
 
     if BIFROST_TRACE_COMMON_LOAD=0 \
         SECURITY_SH="${workdir}/security.sh" \

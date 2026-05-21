@@ -182,6 +182,9 @@ cd /opt/bifrost
 chmod +x install.sh scripts/*.sh
 ```
 
+截至 `2026-05-21` 的实测结果：腾讯云已经可以直接拉 GitHub。
+如果上面这三行已经成功，就直接跳到“确认你已经在项目目录里”，不要再改 `/etc/hosts`，也不要走本机打包上传。
+
 如果这里出现类似下面的错误：
 
 ```text
@@ -367,6 +370,18 @@ type "$env:USERPROFILE\.ssh\bifrost_root_ed25519.pub"
 注意：当前项目的安全脚本默认把这把公钥写进 `/root/.ssh/authorized_keys`。  
 所以第一次是 `ubuntu` 登录，但加固后的运维登录会改成 `root + SSH key`。
 
+这一轮加固的目标是：服务器不再识别密码登录，只接受 SSH 公钥登录。
+脚本会把 SSH 配置改成下面这种效果：
+
+```text
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+AuthenticationMethods publickey
+PubkeyAuthentication yes
+PermitRootLogin prohibit-password
+```
+
 脚本完成后，不要关闭当前 SSH 窗口。
 
 重新打开一个新的 Windows PowerShell，测试新端口登录：
@@ -383,6 +398,31 @@ touch /tmp/ssh-port-change-confirmed
 
 这一步很重要。  
 脚本有 5 分钟自动回滚保护，如果你不确认，它可能会把 SSH 配置回滚。
+
+确认后，在 Server A 的 SSH 窗口里检查一次实际生效配置：
+
+```bash
+sshd -T | grep -E '^(passwordauthentication|kbdinteractiveauthentication|authenticationmethods|pubkeyauthentication|permitrootlogin) '
+```
+
+你应该看到类似：
+
+```text
+passwordauthentication no
+kbdinteractiveauthentication no
+authenticationmethods publickey
+pubkeyauthentication yes
+permitrootlogin prohibit-password
+```
+
+再做一个反向验证：新开 Windows PowerShell，强制不用密钥、只尝试密码登录：
+
+```powershell
+ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password -p 22222 root@<SERVER_A_IP>
+```
+
+这条命令应该登录失败。
+如果它还能让你用密码登录成功，立刻停下，不要继续后面的部署。
 
 从现在开始，连接 Server A 都用：
 
