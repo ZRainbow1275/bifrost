@@ -182,8 +182,9 @@ cd /opt/bifrost
 chmod +x install.sh scripts/*.sh
 ```
 
-截至 `2026-05-21` 的实测结果：腾讯云已经可以直接拉 GitHub。
-如果上面这三行已经成功，就直接跳到“确认你已经在项目目录里”，不要再改 `/etc/hosts`，也不要走本机打包上传。
+截至 `2026-05-21` 的实测结果：腾讯云到 GitHub 可能一会儿能通、一会儿又断，不稳定。
+如果上面这三行已经成功，就直接跳到“确认你已经在项目目录里”。
+如果 `git clone` 或后面的 `git pull --ff-only` 出现 `GnuTLS recv error (-110)`，不要反复重试，直接按下面的 hosts 或本机上传兜底方案处理。
 
 如果这里出现类似下面的错误：
 
@@ -260,6 +261,9 @@ chmod +x install.sh scripts/*.sh
 
 如果这次成功，继续往下做。
 如果还是同样的 `GnuTLS recv error (-110)`，不要在这里卡住，直接走下一节的本机上传方案。
+
+后续如果你已经有 `/opt/bifrost`，只是执行 `git pull --ff-only` 失败，也同样适用下一节的本机上传方案。
+本机上传会用你 Windows 上的最新项目包覆盖服务器上的 `/opt/bifrost`，效果等同于把服务器代码更新到本机当前版本。
 
 ### 4.2 腾讯云改 hosts 后仍然拉不动：从 Windows 本机上传项目
 

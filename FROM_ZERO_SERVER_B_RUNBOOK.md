@@ -98,8 +98,9 @@ cd /opt/bifrost
 chmod +x install.sh scripts/*.sh
 ```
 
-截至 `2026-05-21` 的实测结果：GitHub 已经可以直接拉取。
-如果上面这三行已经成功，就直接跳到“确认目录正确”，不要再改 `/etc/hosts`，也不要走本机打包上传。
+截至 `2026-05-21` 的实测结果：海外 VPS 通常可以直接拉 GitHub，但不同线路仍可能短时失败。
+如果上面这三行已经成功，就直接跳到“确认目录正确”。
+如果 `git clone` 或后面的 `git pull --ff-only` 出现 `GnuTLS recv error (-110)`，不要反复重试，直接按下面的 hosts 或本机上传兜底方案处理。
 
 如果 Server B 是海外 VPS，通常这一步能成功。
 如果它也出现类似下面的错误：
@@ -161,6 +162,9 @@ chmod +x install.sh scripts/*.sh
 ```
 
 如果还是失败，继续下一节，从 Windows 本机打包上传。
+
+后续如果你已经有 `/opt/bifrost`，只是执行 `git pull --ff-only` 失败，也同样适用下一节的本机上传方案。
+本机上传会用你 Windows 上的最新项目包覆盖服务器上的 `/opt/bifrost`，效果等同于把服务器代码更新到本机当前版本。
 
 ### 3.2 VPS 改 hosts 后仍然拉不动：从 Windows 本机上传项目
 
