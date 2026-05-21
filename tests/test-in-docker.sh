@@ -25,6 +25,7 @@
 #   backup    - backup 自动备份与归档内容契约
 #   uninstall - uninstall cron 清理边界契约
 #   supply    - 供应链 / trust bootstrap 契约
+#   github-hosts - GitHub hosts 修复脚本契约
 #   bifrost   - bifrost-api 管理面合同测试
 #   distribution - Server B 私有分发栈静态/模拟合同测试
 #   all       - 运行全部测试
@@ -334,6 +335,8 @@ test_functions() {
         "scripts/diagnostics.sh:manage_diagnostics"
         "scripts/whitelist.sh:manage_whitelist"
         "scripts/uninstall.sh:uninstall_all"
+        "scripts/github-hosts.sh:repair_github_hosts"
+        "scripts/github-hosts.sh:resolve_domain_ip"
     )
 
     for entry in "${expected_functions[@]}"; do
@@ -1532,6 +1535,109 @@ test_supply_chain_contracts() {
     else
         record_pass "Server A 不再输出 New API 弱默认管理员口令"
     fi
+}
+
+run_github_hosts_repair_contract_for_prefix() {
+    local prefix="$1"
+    local label="$2"
+    local script_path="${SCRIPT_DIR}/${prefix}scripts/github-hosts.sh"
+    local install_sh="${SCRIPT_DIR}/${prefix}install.sh"
+
+    if [[ -f "${script_path}" ]]; then
+        record_pass "${label} GitHub hosts 修复脚本存在"
+    else
+        record_fail "${label} GitHub hosts 修复脚本存在"
+        return
+    fi
+
+    if bash "${script_path}" --help 2>/dev/null | grep -Fq "Bifrost GitHub hosts repair"; then
+        record_pass "${label} GitHub hosts 修复脚本 help 可用"
+    else
+        record_fail "${label} GitHub hosts 修复脚本 help 可用"
+    fi
+
+    if bash "${install_sh}" --help 2>/dev/null | grep -Fq -- "--github-hosts-repair" \
+       && grep -Fq "scripts/github-hosts.sh" "${install_sh}"; then
+        record_pass "${label} install.sh 暴露 --github-hosts-repair 入口"
+    else
+        record_fail "${label} install.sh 暴露 --github-hosts-repair 入口"
+    fi
+
+    local temp_root
+    temp_root="$(mktemp -d)"
+    local hosts_file="${temp_root}/hosts"
+    cat > "${hosts_file}" <<'HOSTS'
+127.0.0.1 localhost
+# BIFROST-GITHUB-HOSTS-BEGIN
+1.1.1.1 github.com
+2.2.2.2 raw.githubusercontent.com
+# BIFROST-GITHUB-HOSTS-END
+203.0.113.10 example.local
+HOSTS
+
+    if BIFROST_HOSTS_FILE="${hosts_file}" \
+       BIFROST_GITHUB_HOSTS_RESOLVE_MODE=static \
+       BIFROST_GITHUB_IP=140.82.112.4 \
+       BIFROST_RAW_GITHUB_IP=185.199.108.133 \
+       BIFROST_GITHUB_HOSTS_SKIP_GIT_CHECK=1 \
+       bash "${script_path}" >/dev/null 2>&1; then
+        record_pass "${label} GitHub hosts 修复脚本可写入临时 hosts"
+    else
+        record_fail "${label} GitHub hosts 修复脚本可写入临时 hosts"
+    fi
+
+    if [[ "$(grep -Fc '# BIFROST-GITHUB-HOSTS-BEGIN' "${hosts_file}")" -eq 1 ]] \
+       && [[ "$(grep -Fc '# BIFROST-GITHUB-HOSTS-END' "${hosts_file}")" -eq 1 ]]; then
+        record_pass "${label} GitHub hosts 修复只保留一个托管块"
+    else
+        record_fail "${label} GitHub hosts 修复只保留一个托管块"
+    fi
+
+    if grep -Fq "140.82.112.4 github.com" "${hosts_file}" \
+       && grep -Fq "185.199.108.133 raw.githubusercontent.com" "${hosts_file}" \
+       && ! grep -Fq "1.1.1.1 github.com" "${hosts_file}" \
+       && ! grep -Fq "2.2.2.2 raw.githubusercontent.com" "${hosts_file}"; then
+        record_pass "${label} GitHub hosts 修复会替换旧托管映射"
+    else
+        record_fail "${label} GitHub hosts 修复会替换旧托管映射"
+    fi
+
+    if grep -Fq "203.0.113.10 example.local" "${hosts_file}"; then
+        record_pass "${label} GitHub hosts 修复保留非托管 hosts 行"
+    else
+        record_fail "${label} GitHub hosts 修复保留非托管 hosts 行"
+    fi
+
+    if ls "${hosts_file}".bifrost-github.*.bak >/dev/null 2>&1; then
+        record_pass "${label} GitHub hosts 修复会创建备份"
+    else
+        record_fail "${label} GitHub hosts 修复会创建备份"
+    fi
+
+    local bad_hosts="${temp_root}/bad-hosts"
+    printf '127.0.0.1 localhost\n' > "${bad_hosts}"
+    if BIFROST_HOSTS_FILE="${bad_hosts}" \
+       BIFROST_GITHUB_HOSTS_RESOLVE_MODE=static \
+       BIFROST_GITHUB_IP=10.0.0.1 \
+       BIFROST_RAW_GITHUB_IP=185.199.108.133 \
+       BIFROST_GITHUB_HOSTS_SKIP_GIT_CHECK=1 \
+       bash "${script_path}" >/dev/null 2>&1; then
+        record_fail "${label} GitHub hosts 修复拒绝私网/无效 IPv4"
+    else
+        record_pass "${label} GitHub hosts 修复拒绝私网/无效 IPv4"
+    fi
+
+    rm -rf "${temp_root}"
+}
+
+test_github_hosts_repair_contracts() {
+    info "=== GitHub hosts 修复脚本契约 ==="
+    run_github_hosts_repair_contract_for_prefix "" "Root"
+}
+
+test_bridge_github_hosts_repair_contracts() {
+    info "=== AI Gateway Bridge GitHub hosts 修复脚本契约 ==="
+    run_github_hosts_repair_contract_for_prefix "ai-gateway-bridge/" "AI Gateway Bridge"
 }
 
 test_bridge_supply_chain_contracts() {
@@ -5714,7 +5820,7 @@ test_menu() {
         "--server-a" "--server-b" "--security" "--health-check"
         "--vpn" "--anti-dpi" "--mihomo" "--keepalive" "--split-tunnel"
         "--backup" "--update" "--multi-server" "--user-mgmt" "--diagnostics"
-        "--dd-reinstall" "--uninstall" "--version" "--help"
+        "--dd-reinstall" "--github-hosts-repair" "--uninstall" "--version" "--help"
     )
 
     help_output="$(bash "$install_sh" --help 2>/dev/null || true)"
@@ -7047,6 +7153,7 @@ main() {
         backup)     test_backup_contracts; test_bridge_backup_contracts ;;
         uninstall)  test_uninstall_contracts; test_bridge_uninstall_contracts ;;
         supply)     test_supply_chain_contracts; test_bridge_supply_chain_contracts ;;
+        github-hosts) test_github_hosts_repair_contracts; test_bridge_github_hosts_repair_contracts ;;
         panel)      test_server_b_panel_contracts; test_bridge_server_b_panel_contracts ;;
         docs)       test_docs ;;
         bifrost)    test_bifrost_api_contracts; test_bifrost_shell_contracts ;;
@@ -7137,6 +7244,10 @@ main() {
             echo ""
             test_bridge_supply_chain_contracts
             echo ""
+            test_github_hosts_repair_contracts
+            echo ""
+            test_bridge_github_hosts_repair_contracts
+            echo ""
             test_server_b_panel_contracts
             echo ""
             test_bridge_server_b_panel_contracts
@@ -7160,7 +7271,7 @@ main() {
             test_in_container
             ;;
         *)
-            echo "用法: $0 [syntax|functions|configs|security|mihomo|xray|deploy|keepalive|multi|user|whitelist|monitoring|diagnostics|update|backup|uninstall|supply|panel|ports|menu|docs|bifrost|distribution|marketplace_skeleton|hardening_v2|docker|all]"
+            echo "用法: $0 [syntax|functions|configs|security|mihomo|xray|deploy|keepalive|multi|user|whitelist|monitoring|diagnostics|update|backup|uninstall|supply|github-hosts|panel|ports|menu|docs|bifrost|distribution|marketplace_skeleton|hardening_v2|docker|all]"
             exit 1
             ;;
     esac

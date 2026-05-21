@@ -116,6 +116,19 @@ fatal: unable to access 'https://github.com/ZRainbow1275/bifrost.git/': GnuTLS r
 海外 VPS 通常不需要这一步。
 只有当 Server B 也拉不动 GitHub 时，才按这里处理。
 
+如果 `/opt/bifrost` 目录已经存在，而且里面已经有最新脚本，先在 Server B 执行：
+
+```bash
+cd /opt/bifrost
+chmod +x install.sh scripts/*.sh
+./install.sh --github-hosts-repair
+git pull --ff-only
+```
+
+这条命令会自动备份 `/etc/hosts`，用 DNS-over-HTTPS 查询 `github.com` 和 `raw.githubusercontent.com` 当前可用的 IPv4，只替换 Bifrost 自己维护的 hosts 托管块，然后用 `git ls-remote https://github.com/ZRainbow1275/bifrost.git main` 验证 GitHub 是否真的能访问。
+
+如果你现在的 Server B 项目目录还没有这个新脚本，或者 `git clone` 第一次就失败导致 `/opt/bifrost` 还不存在，就按下面的手动方式做一次。
+
 先在你的 Windows 浏览器里打开：
 
 ```text
@@ -146,8 +159,8 @@ read -rp "请输入 github.com 的 IPv4: " GITHUB_IP
 read -rp "请输入 raw.githubusercontent.com 的 IPv4: " RAW_GITHUB_IP
 
 cp /etc/hosts "/etc/hosts.bak.$(date +%Y%m%d-%H%M%S)"
-sed -i '/[[:space:]]github\.com$/d; /[[:space:]]raw\.githubusercontent\.com$/d' /etc/hosts
-printf '\n# GitHub workaround for Bifrost install\n%s github.com\n%s raw.githubusercontent.com\n' "$GITHUB_IP" "$RAW_GITHUB_IP" >> /etc/hosts
+sed -i '/# BIFROST-GITHUB-HOSTS-BEGIN/,/# BIFROST-GITHUB-HOSTS-END/d; /[[:space:]]github\.com$/d; /[[:space:]]raw\.githubusercontent\.com$/d' /etc/hosts
+printf '\n# BIFROST-GITHUB-HOSTS-BEGIN\n%s github.com\n%s raw.githubusercontent.com\n# BIFROST-GITHUB-HOSTS-END\n' "$GITHUB_IP" "$RAW_GITHUB_IP" >> /etc/hosts
 getent hosts github.com
 getent hosts raw.githubusercontent.com
 ```
@@ -163,7 +176,15 @@ chmod +x install.sh scripts/*.sh
 
 如果还是失败，继续下一节，从 Windows 本机打包上传。
 
-后续如果你已经有 `/opt/bifrost`，只是执行 `git pull --ff-only` 失败，也同样适用下一节的本机上传方案。
+后续如果你已经有 `/opt/bifrost`，只是执行 `git pull --ff-only` 失败，优先回到本节开头执行：
+
+```bash
+cd /opt/bifrost
+./install.sh --github-hosts-repair
+git pull --ff-only
+```
+
+如果当前服务器上的项目代码太旧，没有 `--github-hosts-repair` 这个命令，或者脚本修复后还是拉不动，再走下一节的本机上传方案。
 本机上传会用你 Windows 上的最新项目包覆盖服务器上的 `/opt/bifrost`，效果等同于把服务器代码更新到本机当前版本。
 
 ### 3.2 VPS 改 hosts 后仍然拉不动：从 Windows 本机上传项目

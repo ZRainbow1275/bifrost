@@ -200,6 +200,31 @@ fatal: unable to access 'https://github.com/ZRainbow1275/bifrost.git/': GnuTLS r
 ### 4.1 腾讯云拉不动 GitHub 时：先修改 /etc/hosts
 
 这个方案就是你截图里的思路：手动告诉服务器 `github.com` 和 `raw.githubusercontent.com` 应该访问哪个 IP。
+本项目已经内置了自动修复脚本。它不会乱删 `/etc/hosts`，只会维护一段 `BIFROST-GITHUB-HOSTS` 托管块，并且会先备份原文件。
+
+如果 `/opt/bifrost` 目录已经存在，而且里面已经有最新脚本，先在 Server A 执行：
+
+```bash
+cd /opt/bifrost
+chmod +x install.sh scripts/*.sh
+./install.sh --github-hosts-repair
+git pull --ff-only
+```
+
+这条命令会自动做四件事：
+
+1. 通过 DNS-over-HTTPS 查询 `github.com` 和 `raw.githubusercontent.com` 当前可用的 IPv4。
+2. 备份 `/etc/hosts`，备份文件名类似 `/etc/hosts.bifrost-github.20260521-170000.bak`。
+3. 写入 Bifrost 自己的 hosts 托管块。
+4. 用 `git ls-remote https://github.com/ZRainbow1275/bifrost.git main` 验证 GitHub 是否真的能访问。
+
+如果脚本执行成功，再重新执行：
+
+```bash
+git pull --ff-only
+```
+
+如果你现在的 Server A 项目目录还没有这个新脚本，或者 `git clone` 第一次就失败导致 `/opt/bifrost` 还不存在，就按下面的手动方式做一次。
 注意：截图里的 IP 只是当时可用，不一定永远可用。你要先查最新 IP，再写进服务器。
 
 先在你的 Windows 浏览器里打开：
@@ -244,8 +269,8 @@ read -rp "请输入 github.com 的 IPv4: " GITHUB_IP
 read -rp "请输入 raw.githubusercontent.com 的 IPv4: " RAW_GITHUB_IP
 
 cp /etc/hosts "/etc/hosts.bak.$(date +%Y%m%d-%H%M%S)"
-sed -i '/[[:space:]]github\.com$/d; /[[:space:]]raw\.githubusercontent\.com$/d' /etc/hosts
-printf '\n# GitHub workaround for Bifrost install\n%s github.com\n%s raw.githubusercontent.com\n' "$GITHUB_IP" "$RAW_GITHUB_IP" >> /etc/hosts
+sed -i '/# BIFROST-GITHUB-HOSTS-BEGIN/,/# BIFROST-GITHUB-HOSTS-END/d; /[[:space:]]github\.com$/d; /[[:space:]]raw\.githubusercontent\.com$/d' /etc/hosts
+printf '\n# BIFROST-GITHUB-HOSTS-BEGIN\n%s github.com\n%s raw.githubusercontent.com\n# BIFROST-GITHUB-HOSTS-END\n' "$GITHUB_IP" "$RAW_GITHUB_IP" >> /etc/hosts
 getent hosts github.com
 getent hosts raw.githubusercontent.com
 ```
@@ -262,7 +287,15 @@ chmod +x install.sh scripts/*.sh
 如果这次成功，继续往下做。
 如果还是同样的 `GnuTLS recv error (-110)`，不要在这里卡住，直接走下一节的本机上传方案。
 
-后续如果你已经有 `/opt/bifrost`，只是执行 `git pull --ff-only` 失败，也同样适用下一节的本机上传方案。
+后续如果你已经有 `/opt/bifrost`，只是执行 `git pull --ff-only` 失败，优先回到本节开头执行：
+
+```bash
+cd /opt/bifrost
+./install.sh --github-hosts-repair
+git pull --ff-only
+```
+
+如果当前服务器上的项目代码太旧，没有 `--github-hosts-repair` 这个命令，或者脚本修复后还是拉不动，再走下一节的本机上传方案。
 本机上传会用你 Windows 上的最新项目包覆盖服务器上的 `/opt/bifrost`，效果等同于把服务器代码更新到本机当前版本。
 
 ### 4.2 腾讯云改 hosts 后仍然拉不动：从 Windows 本机上传项目

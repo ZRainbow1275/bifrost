@@ -574,6 +574,10 @@ parse_args() {
             --health-check)
                 run_cli_command "健康检查失败，请先处理上方错误。" bash "${SCRIPT_DIR}/scripts/health-check.sh" --verbose
                 ;;
+            --github-hosts-repair)
+                require_root
+                run_cli_command "GitHub hosts 修复失败，请先处理上方错误。" bash "${SCRIPT_DIR}/scripts/github-hosts.sh"
+                ;;
             --uninstall)
                 require_root
                 source "${SCRIPT_DIR}/scripts/uninstall.sh"
@@ -683,6 +687,8 @@ AI Gateway Bridge v2.0 - 一键部署脚本
   ./install.sh --dd-reinstall [--report-only]
                             DD 系统重装 / 云环境就绪审查
   ./install.sh --cloud-review 无交互首轮云环境审查（只检测、导出报告、不进入 DD 菜单）
+  ./install.sh --github-hosts-repair
+                            修复腾讯云/国内线路访问 GitHub 不稳定导致的 git pull/clone 失败
 
 v2.0 模块部署:
   ./install.sh --vpn          部署企业 VPN (WireGuard/Firezone/Headscale)
