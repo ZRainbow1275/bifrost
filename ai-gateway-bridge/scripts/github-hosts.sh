@@ -29,9 +29,12 @@ Environment:
   BIFROST_HOSTS_FILE=/etc/hosts
       Override hosts file path for tests.
   BIFROST_GITHUB_HOSTS_RESOLVE_MODE=static
-      Use BIFROST_GITHUB_IP and BIFROST_RAW_GITHUB_IP instead of DNS-over-HTTPS.
+      Use BIFROST_GITHUB_IP / BIFROST_GITHUB_IPS and
+      BIFROST_RAW_GITHUB_IP / BIFROST_RAW_GITHUB_IPS instead of DNS-over-HTTPS.
   BIFROST_GITHUB_IP=140.82.112.4
+  BIFROST_GITHUB_IPS=140.82.112.4,140.82.112.5
   BIFROST_RAW_GITHUB_IP=185.199.108.133
+  BIFROST_RAW_GITHUB_IPS=185.199.108.133,185.199.108.134
   BIFROST_GITHUB_HOSTS_SKIP_GIT_CHECK=1
       Skip git ls-remote verification.
   BIFROST_GITHUB_HOSTS_REPO_URL=https://github.com/ZRainbow1275/bifrost.git
@@ -78,9 +81,40 @@ extract_doh_ipv4_records() {
         || true
 }
 
-query_doh_provider() {
-    local provider="$1"
-    local domain="$2"
+append_ipv4_candidates_from_text() {
+    local result_var="$1"
+    local seen_var="$2"
+    local raw_values="$3"
+
+    local -n result_candidates="${result_var}"
+    local -n seen_candidates="${seen_var}"
+
+    raw_values="${raw_values//$'\r'/ }"
+    raw_values="${raw_values//$'\n'/ }"
+    raw_values="${raw_values//,/ }"
+    raw_values="${raw_values//$'\t'/ }"
+
+    local -a tokens=()
+    read -r -a tokens <<< "${raw_values}"
+
+    local ip
+    for ip in "${tokens[@]}"; do
+        [[ -n "${ip}" ]] || continue
+        if public_ipv4 "${ip}" && [[ -z "${seen_candidates[${ip}]:-}" ]]; then
+            seen_candidates["${ip}"]=1
+            result_candidates+=("${ip}")
+        fi
+    done
+}
+
+query_doh_provider_candidates() {
+    local result_var="$1"
+    local provider="$2"
+    local domain="$3"
+
+    local -n result_candidates="${result_var}"
+    result_candidates=()
+
     local url=()
 
     case "${provider}" in
@@ -102,70 +136,142 @@ query_doh_provider() {
     response="$(curl -4 -fsSL --connect-timeout 5 --max-time 12 --retry 1 "${url[@]}" 2>/dev/null || true)"
     [[ -n "${response}" ]] || return 1
 
+    local -A seen=()
     local ip
     while IFS= read -r ip; do
-        if public_ipv4 "${ip}"; then
-            printf '%s\n' "${ip}"
-            return 0
+        if public_ipv4 "${ip}" && [[ -z "${seen[${ip}]:-}" ]]; then
+            seen["${ip}"]=1
+            result_candidates+=("${ip}")
         fi
     done < <(printf '%s\n' "${response}" | extract_doh_ipv4_records)
 
-    return 1
+    [[ "${#result_candidates[@]}" -gt 0 ]]
 }
 
-resolve_static_ip() {
+query_doh_provider() {
+    local result_var="$1"
+    local provider="$2"
+    local domain="$3"
+
+    local -a provider_candidates=()
+
+    if ! query_doh_provider_candidates provider_candidates "${provider}" "${domain}"; then
+        return 1
+    fi
+
+    if [[ "${#provider_candidates[@]}" -gt 0 ]]; then
+        printf -v "${result_var}" '%s' "${provider_candidates[0]}"
+    fi
+}
+
+resolve_static_ip_candidates() {
     local result_var="$1"
     local domain="$2"
-    local ip=""
+    local -n result_candidates="${result_var}"
+    result_candidates=()
 
+    local raw_values=""
     case "${domain}" in
         github.com)
-            ip="${BIFROST_GITHUB_IP:-}"
+            raw_values="${BIFROST_GITHUB_IPS:-${BIFROST_GITHUB_IP:-}}"
             ;;
         raw.githubusercontent.com)
-            ip="${BIFROST_RAW_GITHUB_IP:-}"
+            raw_values="${BIFROST_RAW_GITHUB_IPS:-${BIFROST_RAW_GITHUB_IP:-}}"
             ;;
         *)
             return 1
             ;;
     esac
 
-    if ! public_ipv4 "${ip}"; then
-        log_error "Static IP for ${domain} is invalid or private: ${ip:-<empty>}"
+    local -A seen=()
+    append_ipv4_candidates_from_text "${result_var}" seen "${raw_values}"
+
+    [[ "${#result_candidates[@]}" -gt 0 ]] || {
+        log_error "Static IPs for ${domain} are invalid or private: ${raw_values:-<empty>}"
         return 1
+    }
+
+    log_success "${domain} -> ${result_candidates[0]}"
+    if [[ "${#result_candidates[@]}" -gt 1 ]]; then
+        log_info "${domain} will try ${#result_candidates[@]} static IPv4 candidate(s) in order."
     fi
 
-    printf -v "${result_var}" '%s' "${ip}"
+    return 0
 }
 
 resolve_domain_ip() {
     local result_var="$1"
     local domain="$2"
+    local -a candidates=()
 
     if [[ "${BIFROST_GITHUB_HOSTS_RESOLVE_MODE:-doh}" == "static" ]]; then
-        resolve_static_ip "${result_var}" "${domain}"
-        return $?
+        resolve_static_ip_candidates candidates "${domain}" || return 1
+    else
+        resolve_domain_ip_candidates candidates "${domain}" || return 1
     fi
+
+    if [[ "${#candidates[@]}" -eq 0 ]]; then
+        return 1
+    fi
+
+    printf -v "${result_var}" '%s' "${candidates[0]}"
+    return 0
+}
+
+resolve_domain_ip_candidates() {
+    local result_var="$1"
+    local domain="$2"
+    local -n result_candidates="${result_var}"
+    result_candidates=()
 
     if ! command -v curl >/dev/null 2>&1; then
         log_error "curl is required for DNS-over-HTTPS resolution. Install curl or use BIFROST_GITHUB_HOSTS_RESOLVE_MODE=static."
         return 1
     fi
 
+    local -A seen=()
     local provider
-    local ip
+    local -a provider_candidates=()
     for provider in alidns cloudflare google; do
         log_info "Resolving ${domain} via ${provider} DNS-over-HTTPS..."
-        if ip="$(query_doh_provider "${provider}" "${domain}")"; then
-            printf -v "${result_var}" '%s' "${ip}"
-            log_success "${domain} -> ${ip}"
-            return 0
+        provider_candidates=()
+        if query_doh_provider_candidates provider_candidates "${provider}" "${domain}"; then
+            if [[ "${#provider_candidates[@]}" -gt 0 ]]; then
+                if [[ "${#result_candidates[@]}" -eq 0 ]]; then
+                    log_success "${domain} -> ${provider_candidates[0]}"
+                fi
+
+                if [[ "${#provider_candidates[@]}" -gt 1 ]]; then
+                    log_info "${domain} DNS-over-HTTPS provider ${provider} returned ${#provider_candidates[@]} public IPv4 candidate(s)."
+                fi
+
+                local ip
+                for ip in "${provider_candidates[@]}"; do
+                    if [[ -z "${seen[${ip}]:-}" ]]; then
+                        seen["${ip}"]=1
+                        result_candidates+=("${ip}")
+                    fi
+                done
+            fi
         fi
     done
 
-    log_error "Unable to resolve a public IPv4 address for ${domain} through DNS-over-HTTPS."
-    log_error "Use manual values if needed: BIFROST_GITHUB_HOSTS_RESOLVE_MODE=static BIFROST_GITHUB_IP=<ip> BIFROST_RAW_GITHUB_IP=<ip> ./scripts/github-hosts.sh"
-    return 1
+    if [[ "${#result_candidates[@]}" -eq 0 ]]; then
+        log_error "Unable to resolve a public IPv4 address for ${domain} through DNS-over-HTTPS."
+        log_error "Use manual values if needed: BIFROST_GITHUB_HOSTS_RESOLVE_MODE=static BIFROST_GITHUB_IP=<ip> BIFROST_GITHUB_IPS=<ip1,ip2> BIFROST_RAW_GITHUB_IP=<ip> BIFROST_RAW_GITHUB_IPS=<ip1,ip2> ./scripts/github-hosts.sh"
+        return 1
+    fi
+
+    if [[ "${#result_candidates[@]}" -gt 1 ]]; then
+        log_info "${domain} will try ${#result_candidates[@]} IPv4 candidate(s) in order."
+    fi
+
+    return 0
+}
+
+probe_git_access() {
+    local repo_url="${BIFROST_GITHUB_HOSTS_REPO_URL:-${DEFAULT_BIFROST_REPO_URL}}"
+    GIT_TERMINAL_PROMPT=0 git ls-remote --heads "${repo_url}" main >/dev/null 2>&1
 }
 
 ensure_hosts_file_writable() {
@@ -194,9 +300,15 @@ write_github_hosts_block() {
     local hosts_file="$1"
     local github_ip="$2"
     local raw_github_ip="$3"
+    local backup_file="${4:-}"
 
-    local backup_file="${hosts_file}.bifrost-github.$(date +%Y%m%d-%H%M%S).bak"
-    cp -p "${hosts_file}" "${backup_file}"
+    if [[ -z "${backup_file}" ]]; then
+        backup_file="${hosts_file}.bifrost-github.$(date +%Y%m%d-%H%M%S).bak"
+    fi
+
+    if [[ ! -e "${backup_file}" ]]; then
+        cp -p "${hosts_file}" "${backup_file}"
+    fi
 
     local tmp_file
     tmp_file="$(mktemp)"
@@ -269,7 +381,7 @@ verify_git_access() {
 
     local repo_url="${BIFROST_GITHUB_HOSTS_REPO_URL:-${DEFAULT_BIFROST_REPO_URL}}"
     log_info "Verifying GitHub access: git ls-remote --heads ${repo_url} main"
-    if GIT_TERMINAL_PROMPT=0 git ls-remote --heads "${repo_url}" main >/dev/null 2>&1; then
+    if probe_git_access; then
         log_success "GitHub repository access verified."
         return 0
     fi
@@ -281,18 +393,63 @@ verify_git_access() {
 
 repair_github_hosts() {
     local hosts_file="${BIFROST_HOSTS_FILE:-/etc/hosts}"
-    local github_ip=""
-    local raw_github_ip=""
+    local github_ips=()
+    local raw_github_ips=()
+    local backup_file="${hosts_file}.bifrost-github.$(date +%Y%m%d-%H%M%S).bak"
 
     print_section "GitHub Hosts Repair"
     log_info "Hosts file: ${hosts_file}"
 
     ensure_hosts_file_writable "${hosts_file}"
-    resolve_domain_ip github_ip "github.com"
-    resolve_domain_ip raw_github_ip "raw.githubusercontent.com"
-    write_github_hosts_block "${hosts_file}" "${github_ip}" "${raw_github_ip}"
-    verify_hosts_block "${hosts_file}" "${github_ip}" "${raw_github_ip}"
+    if [[ "${BIFROST_GITHUB_HOSTS_RESOLVE_MODE:-doh}" == "static" ]]; then
+        resolve_static_ip_candidates github_ips "github.com"
+        resolve_static_ip_candidates raw_github_ips "raw.githubusercontent.com"
+    else
+        resolve_domain_ip_candidates github_ips "github.com"
+        resolve_domain_ip_candidates raw_github_ips "raw.githubusercontent.com"
+    fi
+
+    local github_ip=""
+    local raw_github_ip=""
+
+    if [[ "${BIFROST_GITHUB_HOSTS_SKIP_GIT_CHECK:-0}" == "1" ]]; then
+        github_ip="${github_ips[0]}"
+        raw_github_ip="${raw_github_ips[0]}"
+        write_github_hosts_block "${hosts_file}" "${github_ip}" "${raw_github_ip}" "${backup_file}"
+        verify_hosts_block "${hosts_file}" "${github_ip}" "${raw_github_ip}"
+        verify_git_access
+        return 0
+    fi
+
+    if ! command -v git >/dev/null 2>&1; then
+        github_ip="${github_ips[0]}"
+        raw_github_ip="${raw_github_ips[0]}"
+        write_github_hosts_block "${hosts_file}" "${github_ip}" "${raw_github_ip}" "${backup_file}"
+        verify_hosts_block "${hosts_file}" "${github_ip}" "${raw_github_ip}"
+        verify_git_access
+        return 0
+    fi
+
+    local attempt=0
+    for github_ip in "${github_ips[@]}"; do
+        for raw_github_ip in "${raw_github_ips[@]}"; do
+            attempt=$((attempt + 1))
+            log_info "Trying GitHub host pair #${attempt}: github.com=${github_ip}, raw.githubusercontent.com=${raw_github_ip}"
+            write_github_hosts_block "${hosts_file}" "${github_ip}" "${raw_github_ip}" "${backup_file}"
+            verify_hosts_block "${hosts_file}" "${github_ip}" "${raw_github_ip}"
+            if probe_git_access; then
+                log_success "GitHub repository access verified."
+                if [[ "${attempt}" -gt 1 ]]; then
+                    log_info "GitHub hosts repair succeeded after ${attempt} candidate pair(s)."
+                fi
+                return 0
+            fi
+            log_warn "GitHub access still failed with this pair; trying the next candidate."
+        done
+    done
+
     verify_git_access
+    return 1
 }
 
 main() {

@@ -128,6 +128,7 @@ git pull --ff-only
 ```
 
 这条命令会自动备份 `/etc/hosts`，用 DNS-over-HTTPS 查询 `github.com` 和 `raw.githubusercontent.com` 当前可用的 IPv4，只替换 Bifrost 自己维护的 hosts 托管块，然后用 `git ls-remote https://github.com/ZRainbow1275/bifrost.git main` 验证 GitHub 是否真的能访问。
+如果当前解析到多个 GitHub 候选 IP，脚本会自动逐个尝试，不再只卡死在第一个 IP 上。
 
 如果这里直接出现下面这种输出：
 

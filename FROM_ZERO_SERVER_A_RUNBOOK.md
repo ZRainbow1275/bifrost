@@ -213,12 +213,13 @@ git status --short --branch
 git pull --ff-only
 ```
 
-这条命令会自动做四件事：
+这条命令会自动做五件事：
 
 1. 通过 DNS-over-HTTPS 查询 `github.com` 和 `raw.githubusercontent.com` 当前可用的 IPv4。
 2. 备份 `/etc/hosts`，备份文件名类似 `/etc/hosts.bifrost-github.20260521-170000.bak`。
 3. 写入 Bifrost 自己的 hosts 托管块。
 4. 用 `git ls-remote https://github.com/ZRainbow1275/bifrost.git main` 验证 GitHub 是否真的能访问。
+5. 如果当前解析到多个 GitHub 候选 IP，脚本会自动逐个尝试，不再只卡死在第一个 IP 上。
 
 如果脚本执行成功，再重新执行：
 

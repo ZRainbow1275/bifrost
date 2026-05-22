@@ -1614,6 +1614,61 @@ HOSTS
         record_fail "${label} GitHub hosts 修复会创建备份"
     fi
 
+    local retry_hosts="${temp_root}/retry-hosts"
+    cat > "${retry_hosts}" <<'HOSTS'
+127.0.0.1 localhost
+# BIFROST-GITHUB-HOSTS-BEGIN
+1.1.1.1 github.com
+2.2.2.2 raw.githubusercontent.com
+# BIFROST-GITHUB-HOSTS-END
+203.0.113.10 example.local
+HOSTS
+
+    local fakebin="${temp_root}/fakebin"
+    mkdir -p "${fakebin}"
+    local original_git
+    original_git="$(command -v git)"
+    cat > "${fakebin}/git" <<'FAKE'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "ls-remote" ]]; then
+    state_file="${BIFROST_GITHUB_HOSTS_TEST_STATE_FILE:-}"
+    target_hosts_file="${BIFROST_HOSTS_FILE:-/etc/hosts}"
+    count=0
+    if [[ -f "${state_file}" ]]; then
+        count="$(cat "${state_file}")"
+    fi
+    count=$((count + 1))
+    printf '%s\n' "${count}" > "${state_file}"
+    if grep -Fq "140.82.112.5 github.com" "${target_hosts_file}" \
+       && grep -Fq "185.199.108.134 raw.githubusercontent.com" "${target_hosts_file}"; then
+        exit 0
+    fi
+    exit 1
+fi
+exec __ORIGINAL_GIT__ "$@"
+FAKE
+    sed -i "s|__ORIGINAL_GIT__|${original_git}|g" "${fakebin}/git"
+    chmod +x "${fakebin}/git"
+
+    if BIFROST_HOSTS_FILE="${retry_hosts}" \
+       BIFROST_GITHUB_HOSTS_RESOLVE_MODE=static \
+       BIFROST_GITHUB_IPS="140.82.112.4,140.82.112.5" \
+       BIFROST_RAW_GITHUB_IPS="185.199.108.133,185.199.108.134" \
+       BIFROST_GITHUB_HOSTS_TEST_STATE_FILE="${temp_root}/git-state" \
+       PATH="${fakebin}:${PATH}" \
+       bash "${script_path}" >/dev/null 2>&1; then
+        record_pass "${label} GitHub hosts 修复会在多个候选 IP 中重试直到 Git 通过"
+    else
+        record_fail "${label} GitHub hosts 修复会在多个候选 IP 中重试直到 Git 通过"
+    fi
+
+    if grep -Fq "140.82.112.5 github.com" "${retry_hosts}" \
+       && grep -Fq "185.199.108.134 raw.githubusercontent.com" "${retry_hosts}"; then
+        record_pass "${label} GitHub hosts 修复会写入最终成功的候选 IP"
+    else
+        record_fail "${label} GitHub hosts 修复会写入最终成功的候选 IP"
+    fi
+
     local bad_hosts="${temp_root}/bad-hosts"
     printf '127.0.0.1 localhost\n' > "${bad_hosts}"
     if BIFROST_HOSTS_FILE="${bad_hosts}" \
