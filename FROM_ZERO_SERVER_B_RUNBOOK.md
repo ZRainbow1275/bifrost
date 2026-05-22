@@ -21,6 +21,9 @@
 仓库地址已经写成你的远端仓库：`https://github.com/ZRainbow1275/bifrost.git`。
 输入命令时不要保留尖括号。
 
+如果你现在的 Server B 上已经有一个“初步仓库”，比如 `/opt/bifrost` 已存在，但还没有同步到最新远端版本，不要把它当成完全空白机器重新 clone。
+这时要先走“已有旧 checkout”的更新路径：先看 `git status --short --branch`，再用 `bash ./install.sh --github-hosts-repair` 和 `git pull --ff-only` 把它拉到最新。
+
 ## 1. 在海外 VPS 控制台放行端口
 
 不同 VPS 面板名字不一样，可能叫：
