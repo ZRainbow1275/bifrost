@@ -224,6 +224,62 @@ git pull --ff-only
 git pull --ff-only
 ```
 
+#### 4.1.1 已经有 `/opt/bifrost`，但旧代码还没有 `--github-hosts-repair`
+
+如果你现在卡在这里：
+
+```text
+root@VM-0-16-ubuntu:/opt/bifrost# git pull --ff-only
+fatal: unable to access 'https://github.com/ZRainbow1275/bifrost.git/': GnuTLS recv error (-110): The TLS connection was non-properly terminated.
+```
+
+并且你的服务器上已经有 `/opt/bifrost` 目录，但执行下面命令又提示没有 `--github-hosts-repair`：
+
+```bash
+cd /opt/bifrost
+./install.sh --github-hosts-repair
+```
+
+那说明服务器上的项目代码太旧，还没包含自动修复脚本。
+这种情况下，先用下面这段“引导修复命令”把 GitHub hosts 修好，再 `git pull` 拉到最新版本。
+
+在 Server A 的 SSH 窗口里执行：
+
+```bash
+sudo -i
+cd /opt/bifrost
+
+GITHUB_IP="$(curl -4fsSL 'https://dns.alidns.com/resolve?name=github.com&type=A' | grep -Eo '"data"[[:space:]]*:[[:space:]]*"([0-9]{1,3}\.){3}[0-9]{1,3}"' | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)"
+RAW_GITHUB_IP="$(curl -4fsSL 'https://dns.alidns.com/resolve?name=raw.githubusercontent.com&type=A' | grep -Eo '"data"[[:space:]]*:[[:space:]]*"([0-9]{1,3}\.){3}[0-9]{1,3}"' | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)"
+
+printf 'github.com -> %s\nraw.githubusercontent.com -> %s\n' "$GITHUB_IP" "$RAW_GITHUB_IP"
+test -n "$GITHUB_IP"
+test -n "$RAW_GITHUB_IP"
+
+cp /etc/hosts "/etc/hosts.bak.$(date +%Y%m%d-%H%M%S)"
+sed -i '/# BIFROST-GITHUB-HOSTS-BEGIN/,/# BIFROST-GITHUB-HOSTS-END/d; /[[:space:]]github\.com$/d; /[[:space:]]raw\.githubusercontent\.com$/d' /etc/hosts
+printf '\n# BIFROST-GITHUB-HOSTS-BEGIN\n%s github.com\n%s raw.githubusercontent.com\n# BIFROST-GITHUB-HOSTS-END\n' "$GITHUB_IP" "$RAW_GITHUB_IP" >> /etc/hosts
+
+getent hosts github.com
+getent hosts raw.githubusercontent.com
+
+git pull --ff-only
+chmod +x install.sh scripts/*.sh
+./install.sh --github-hosts-repair
+```
+
+最后一行 `./install.sh --github-hosts-repair` 是拉到最新代码之后再跑一次项目内置脚本，让它接管后续维护，并验证 `https://github.com/ZRainbow1275/bifrost.git` 是否真的能访问。
+
+如果这段执行成功，以后再遇到 `git pull` 的 `GnuTLS recv error (-110)`，就不用再复制这段长命令了，直接执行：
+
+```bash
+cd /opt/bifrost
+./install.sh --github-hosts-repair
+git pull --ff-only
+```
+
+#### 4.1.2 第一次 `git clone` 就失败，服务器上还没有 `/opt/bifrost`
+
 如果你现在的 Server A 项目目录还没有这个新脚本，或者 `git clone` 第一次就失败导致 `/opt/bifrost` 还不存在，就按下面的手动方式做一次。
 注意：截图里的 IP 只是当时可用，不一定永远可用。你要先查最新 IP，再写进服务器。
 
