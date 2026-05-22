@@ -127,6 +127,55 @@ git pull --ff-only
 
 这条命令会自动备份 `/etc/hosts`，用 DNS-over-HTTPS 查询 `github.com` 和 `raw.githubusercontent.com` 当前可用的 IPv4，只替换 Bifrost 自己维护的 hosts 托管块，然后用 `git ls-remote https://github.com/ZRainbow1275/bifrost.git main` 验证 GitHub 是否真的能访问。
 
+如果这里直接出现下面这种输出：
+
+```text
+2026-05-22 14:50:33 [ERROR] 未知参数: --github-hosts-repair
+```
+
+这不是你输错了，而是服务器上的项目代码还太旧，还没有这个命令。
+不要在旧版本里继续找这个参数。先按下面的手动 hosts 修复或引导修复命令，把 GitHub 访问先修通，再把代码 `git pull --ff-only` 到最新版本，然后再回来执行 `./install.sh --github-hosts-repair`。
+
+#### 3.1.1 `git pull` 已经能联网，但被本地改动卡住
+
+如果你已经修好了 hosts，`git pull --ff-only` 也能连上远端了，但又出现下面这种报错：
+
+```text
+error: Your local changes to the following files would be overwritten by merge:
+        install.sh
+        scripts/security.sh
+Please commit your changes or stash them before you merge.
+Aborting
+```
+
+这说明不是网络问题，而是服务器本地已经改过代码。不要直接删文件，也不要上来就 `git reset --hard`。先把现场备份下来，再临时收起来，然后再拉最新代码。
+
+在 Server B 的 SSH 窗口里按这个顺序做：
+
+```bash
+sudo -i
+cd /opt/bifrost
+
+git status --short
+
+backup_dir="/root/bifrost-local-backup/$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$backup_dir"
+cp install.sh scripts/security.sh "$backup_dir"/
+git diff -- install.sh scripts/security.sh > "$backup_dir/local-changes.diff"
+
+git stash push -m "bifrost local changes before pull" -- install.sh scripts/security.sh
+git pull --ff-only
+
+chmod +x install.sh scripts/*.sh
+./install.sh --github-hosts-repair
+```
+
+如果你后面想看那份本地改动，备份都在：
+
+```bash
+/root/bifrost-local-backup/
+```
+
 如果你现在的 Server B 项目目录还没有这个新脚本，或者 `git clone` 第一次就失败导致 `/opt/bifrost` 还不存在，就按下面的手动方式做一次。
 
 先在你的 Windows 浏览器里打开：

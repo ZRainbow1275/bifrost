@@ -224,6 +224,15 @@ git pull --ff-only
 git pull --ff-only
 ```
 
+如果这里直接出现下面这种输出：
+
+```text
+2026-05-22 14:50:33 [ERROR] 未知参数: --github-hosts-repair
+```
+
+这不是你输错了，而是服务器上的项目代码还太旧，还没有这个命令。
+不要在旧版本里继续找这个参数。先按下面的“引导修复命令”把 GitHub hosts 修好，再把代码 `git pull --ff-only` 到最新版本，然后再回来执行 `./install.sh --github-hosts-repair`。
+
 #### 4.1.1 已经有 `/opt/bifrost`，但旧代码还没有 `--github-hosts-repair`
 
 如果你现在卡在这里：
@@ -278,7 +287,56 @@ cd /opt/bifrost
 git pull --ff-only
 ```
 
-#### 4.1.2 第一次 `git clone` 就失败，服务器上还没有 `/opt/bifrost`
+#### 4.1.2 `git pull` 已经能联网，但被本地改动卡住
+
+如果你已经把 GitHub hosts 修好了，`git pull --ff-only` 也开始能连上远端了，但又出现下面这种报错：
+
+```text
+error: Your local changes to the following files would be overwritten by merge:
+        install.sh
+        scripts/security.sh
+Please commit your changes or stash them before you merge.
+Aborting
+```
+
+这表示不是网络问题，而是这台服务器本地已经改过代码。
+这里不要直接删文件，也不要上来就 `git reset --hard`。先把现场备份下来，再临时收起来，然后再拉最新代码。
+
+在 Server A 的 SSH 窗口里按这个顺序做：
+
+```bash
+sudo -i
+cd /opt/bifrost
+
+git status --short
+
+backup_dir="/root/bifrost-local-backup/$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$backup_dir"
+cp install.sh scripts/security.sh "$backup_dir"/
+git diff -- install.sh scripts/security.sh > "$backup_dir/local-changes.diff"
+
+git stash push -m "bifrost local changes before pull" -- install.sh scripts/security.sh
+git pull --ff-only
+
+chmod +x install.sh scripts/*.sh
+./install.sh --github-hosts-repair
+```
+
+这段命令的意思是：
+
+1. `git status --short` 先看看到底是哪两个文件被改了。
+2. `cp ...` 和 `git diff ...` 先把现场留一份备份。
+3. `git stash push ...` 先把本地改动暂存起来，避免 `git pull` 被卡住。
+4. `git pull --ff-only` 拉最新代码。
+5. 拉完后再跑新的 `./install.sh --github-hosts-repair`，让项目内置脚本接管后续 hosts 修复。
+
+如果你后面想看那份本地改动，备份都在：
+
+```bash
+/root/bifrost-local-backup/
+```
+
+#### 4.1.3 第一次 `git clone` 就失败，服务器上还没有 `/opt/bifrost`
 
 如果你现在的 Server A 项目目录还没有这个新脚本，或者 `git clone` 第一次就失败导致 `/opt/bifrost` 还不存在，就按下面的手动方式做一次。
 注意：截图里的 IP 只是当时可用，不一定永远可用。你要先查最新 IP，再写进服务器。
