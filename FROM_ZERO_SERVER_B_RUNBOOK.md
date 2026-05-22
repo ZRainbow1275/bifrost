@@ -127,6 +127,14 @@ git status --short --branch
 git pull --ff-only
 ```
 
+如果这里报 `Permission denied`，不要先去改整棵仓库的权限，直接换成：
+
+```bash
+bash ./install.sh --github-hosts-repair
+```
+
+这通常表示你当前还是旧 checkout，`install.sh` 还没有可执行位。等后面 `git pull` 到最新版本后，再回到正常的 `./install.sh ...` 形式即可。
+
 这条命令会自动备份 `/etc/hosts`，用 DNS-over-HTTPS 查询 `github.com` 和 `raw.githubusercontent.com` 当前可用的 IPv4，只替换 Bifrost 自己维护的 hosts 托管块，然后用 `git ls-remote https://github.com/ZRainbow1275/bifrost.git main` 验证 GitHub 是否真的能访问。
 如果当前解析到多个 GitHub 候选 IP，脚本会自动逐个尝试，不再只卡死在第一个 IP 上。
 

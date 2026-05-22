@@ -213,6 +213,14 @@ git status --short --branch
 git pull --ff-only
 ```
 
+如果这里报 `Permission denied`，不要先去改整棵仓库的权限，直接换成：
+
+```bash
+bash ./install.sh --github-hosts-repair
+```
+
+这通常表示你当前还是旧 checkout，`install.sh` 还没有可执行位。等后面 `git pull` 到最新版本后，再回到正常的 `./install.sh ...` 形式即可。
+
 这条命令会自动做五件事：
 
 1. 通过 DNS-over-HTTPS 查询 `github.com` 和 `raw.githubusercontent.com` 当前可用的 IPv4。
