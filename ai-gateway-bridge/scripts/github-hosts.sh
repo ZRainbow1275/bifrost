@@ -37,6 +37,8 @@ Environment:
   BIFROST_RAW_GITHUB_IPS=185.199.108.133,185.199.108.134
   BIFROST_GITHUB_HOSTS_SKIP_GIT_CHECK=1
       Skip git ls-remote verification.
+  BIFROST_GITHUB_HOSTS_GIT_TIMEOUT=20
+      Max seconds to wait for git ls-remote before trying the next candidate.
   BIFROST_GITHUB_HOSTS_REPO_URL=https://github.com/ZRainbow1275/bifrost.git
 USAGE
 }
@@ -271,7 +273,22 @@ resolve_domain_ip_candidates() {
 
 probe_git_access() {
     local repo_url="${BIFROST_GITHUB_HOSTS_REPO_URL:-${DEFAULT_BIFROST_REPO_URL}}"
-    GIT_TERMINAL_PROMPT=0 git ls-remote --heads "${repo_url}" main >/dev/null 2>&1
+    local timeout_seconds="${BIFROST_GITHUB_HOSTS_GIT_TIMEOUT:-20}"
+    local -a git_cmd=(
+        git
+        -c "http.lowSpeedLimit=1"
+        -c "http.lowSpeedTime=${timeout_seconds}"
+        ls-remote
+        --heads
+        "${repo_url}"
+        main
+    )
+
+    if command -v timeout >/dev/null 2>&1; then
+        GIT_TERMINAL_PROMPT=0 timeout "${timeout_seconds}s" "${git_cmd[@]}" >/dev/null 2>&1
+    else
+        GIT_TERMINAL_PROMPT=0 "${git_cmd[@]}" >/dev/null 2>&1
+    fi
 }
 
 ensure_hosts_file_writable() {
@@ -380,7 +397,8 @@ verify_git_access() {
     fi
 
     local repo_url="${BIFROST_GITHUB_HOSTS_REPO_URL:-${DEFAULT_BIFROST_REPO_URL}}"
-    log_info "Verifying GitHub access: git ls-remote --heads ${repo_url} main"
+    local timeout_seconds="${BIFROST_GITHUB_HOSTS_GIT_TIMEOUT:-20}"
+    log_info "Verifying GitHub access: git ls-remote --heads ${repo_url} main (timeout: ${timeout_seconds}s)"
     if probe_git_access; then
         log_success "GitHub repository access verified."
         return 0

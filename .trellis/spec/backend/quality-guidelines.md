@@ -52,6 +52,7 @@ Questions to answer:
 - Do not hard-code screenshot/example GitHub IP addresses as the only path.
 - Runtime repair must resolve current public IPv4 records for `github.com` and `raw.githubusercontent.com`, preferring DNS-over-HTTPS and allowing explicit static env overrides for manual recovery.
 - Runtime repair must try multiple resolved/static public IPv4 candidates when available and stop on the first pair that passes `git ls-remote`; do not pin operators to the first DNS answer.
+- Git verification must have a bounded timeout and must continue to the next candidate on timeout; an unreachable GitHub IP must not hang the operator session indefinitely.
 - `/etc/hosts` edits must be backed up before writing.
 - The script may only replace the `BIFROST-GITHUB-HOSTS` managed block; it must preserve unrelated hosts entries.
 - The command must verify the written mappings and attempt repository access with `git ls-remote` unless explicitly skipped for tests.
@@ -65,7 +66,7 @@ Questions to answer:
 
 #### 5. Tests Required
 - `bash ./tests/test-in-docker.sh github-hosts` must cover root and `ai-gateway-bridge` scripts.
-- Regression tests must verify: one managed block, old managed mappings replaced, unrelated lines preserved, backup created, invalid/private IPv4 rejected, multi-candidate retry reaches a later working IP pair, and CLI help exposes `--github-hosts-repair`.
+- Regression tests must verify: one managed block, old managed mappings replaced, unrelated lines preserved, backup created, invalid/private IPv4 rejected, multi-candidate retry reaches a later working IP pair, hung Git verification times out and continues, and CLI help exposes `--github-hosts-repair`.
 - `bash ./tests/test-in-docker.sh syntax functions menu docs` should pass after changing the entrypoint or docs.
 
 ### Scenario: Reverse-proxy exposure profiles must include dependent assets

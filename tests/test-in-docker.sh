@@ -1630,7 +1630,13 @@ HOSTS
     original_git="$(command -v git)"
     cat > "${fakebin}/git" <<'FAKE'
 #!/usr/bin/env bash
-if [[ "${1:-}" == "ls-remote" ]]; then
+is_ls_remote=0
+for arg in "$@"; do
+    if [[ "${arg}" == "ls-remote" ]]; then
+        is_ls_remote=1
+    fi
+done
+if [[ "${is_ls_remote}" == "1" ]]; then
     state_file="${BIFROST_GITHUB_HOSTS_TEST_STATE_FILE:-}"
     target_hosts_file="${BIFROST_HOSTS_FILE:-/etc/hosts}"
     count=0
@@ -1639,6 +1645,10 @@ if [[ "${1:-}" == "ls-remote" ]]; then
     fi
     count=$((count + 1))
     printf '%s\n' "${count}" > "${state_file}"
+    if [[ "${BIFROST_GITHUB_HOSTS_TEST_SLEEP_FIRST:-0}" == "1" && "${count}" == "1" ]]; then
+        sleep 3
+        exit 1
+    fi
     if grep -Fq "140.82.112.5 github.com" "${target_hosts_file}" \
        && grep -Fq "185.199.108.134 raw.githubusercontent.com" "${target_hosts_file}"; then
         exit 0
@@ -1667,6 +1677,25 @@ FAKE
         record_pass "${label} GitHub hosts 修复会写入最终成功的候选 IP"
     else
         record_fail "${label} GitHub hosts 修复会写入最终成功的候选 IP"
+    fi
+
+    local timeout_hosts="${temp_root}/timeout-hosts"
+    cat > "${timeout_hosts}" <<'HOSTS'
+127.0.0.1 localhost
+HOSTS
+
+    if BIFROST_HOSTS_FILE="${timeout_hosts}" \
+       BIFROST_GITHUB_HOSTS_RESOLVE_MODE=static \
+       BIFROST_GITHUB_IPS="140.82.112.4,140.82.112.5" \
+       BIFROST_RAW_GITHUB_IPS="185.199.108.133,185.199.108.134" \
+       BIFROST_GITHUB_HOSTS_GIT_TIMEOUT=1 \
+       BIFROST_GITHUB_HOSTS_TEST_SLEEP_FIRST=1 \
+       BIFROST_GITHUB_HOSTS_TEST_STATE_FILE="${temp_root}/git-timeout-state" \
+       PATH="${fakebin}:${PATH}" \
+       bash "${script_path}" >/dev/null 2>&1; then
+        record_pass "${label} GitHub hosts 修复会在 Git 验证卡住时超时并继续重试"
+    else
+        record_fail "${label} GitHub hosts 修复会在 Git 验证卡住时超时并继续重试"
     fi
 
     local bad_hosts="${temp_root}/bad-hosts"

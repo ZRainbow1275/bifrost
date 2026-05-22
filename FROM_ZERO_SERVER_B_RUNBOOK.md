@@ -141,6 +141,22 @@ bash ./install.sh --github-hosts-repair
 这条命令会自动备份 `/etc/hosts`，用 DNS-over-HTTPS 查询 `github.com` 和 `raw.githubusercontent.com` 当前可用的 IPv4，只替换 Bifrost 自己维护的 hosts 托管块，然后用 `git ls-remote https://github.com/ZRainbow1275/bifrost.git main` 验证 GitHub 是否真的能访问。
 如果当前解析到多个 GitHub 候选 IP，脚本会自动逐个尝试，不再只卡死在第一个 IP 上。
 
+如果你用的是旧 checkout，脚本停在下面这一行很久不动：
+
+```text
+Verifying GitHub access: git ls-remote --heads https://github.com/ZRainbow1275/bifrost.git main
+```
+
+先按 `Ctrl+C` 退出。然后用旧脚本的跳过验证模式，只修 `/etc/hosts`，不要让旧脚本继续卡在 `git ls-remote`：
+
+```bash
+cd /opt/bifrost
+BIFROST_GITHUB_HOSTS_SKIP_GIT_CHECK=1 bash ./install.sh --github-hosts-repair
+timeout 20s git ls-remote --heads https://github.com/ZRainbow1275/bifrost.git main
+```
+
+如果这条 `timeout 20s git ls-remote ...` 仍然失败或超时，先不要继续 `git pull`，把输出贴出来。新版脚本已经给 Git 验证加了超时，拉到新版后不会再无限卡住。
+
 如果这里直接出现下面这种输出：
 
 ```text
