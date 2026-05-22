@@ -179,8 +179,10 @@ dnf install -y git curl ca-certificates
 ```bash
 git clone https://github.com/ZRainbow1275/bifrost.git /opt/bifrost
 cd /opt/bifrost
-chmod +x install.sh scripts/*.sh
+git status --short --branch
 ```
+
+新版仓库已经自带脚本可执行权限。不要再执行 `chmod +x install.sh scripts/*.sh`，否则旧版本仓库会把很多脚本标成 `M`，干扰后面的 `git pull` 判断。
 
 截至 `2026-05-21` 的实测结果：腾讯云到 GitHub 可能一会儿能通、一会儿又断，不稳定。
 如果上面这三行已经成功，就直接跳到“确认你已经在项目目录里”。
@@ -206,7 +208,7 @@ fatal: unable to access 'https://github.com/ZRainbow1275/bifrost.git/': GnuTLS r
 
 ```bash
 cd /opt/bifrost
-chmod +x install.sh scripts/*.sh
+git status --short --branch
 ./install.sh --github-hosts-repair
 git pull --ff-only
 ```
@@ -273,7 +275,7 @@ getent hosts github.com
 getent hosts raw.githubusercontent.com
 
 git pull --ff-only
-chmod +x install.sh scripts/*.sh
+git status --short --branch
 ./install.sh --github-hosts-repair
 ```
 
@@ -318,7 +320,7 @@ git diff -- install.sh scripts/security.sh > "$backup_dir/local-changes.diff"
 git stash push -m "bifrost local changes before pull" -- install.sh scripts/security.sh
 git pull --ff-only
 
-chmod +x install.sh scripts/*.sh
+git status --short --branch
 ./install.sh --github-hosts-repair
 ```
 
@@ -335,6 +337,34 @@ chmod +x install.sh scripts/*.sh
 ```bash
 /root/bifrost-local-backup/
 ```
+
+如果 `git status --short --branch` 看到一大串下面这种 `M scripts/*.sh`：
+
+```text
+ M install.sh
+ M scripts/security.sh
+ M scripts/server-a.sh
+ M scripts/server-b.sh
+```
+
+并且你前面执行过 `chmod +x install.sh scripts/*.sh`，这通常只是“文件权限变化”，不是代码内容真的被你改了。
+如果还看到 `M configs/sysctl/hardening.conf`，这是旧版安全脚本曾把运行时 sysctl 配置反写回项目目录造成的；新版脚本已经修掉这个行为。
+
+为了不丢现场，先备份 diff，再恢复这些仓库文件到 Git 版本：
+
+```bash
+cd /opt/bifrost
+
+backup_dir="/root/bifrost-local-backup/$(date +%Y%m%d-%H%M%S)-dirty-tree"
+mkdir -p "$backup_dir"
+git diff > "$backup_dir/all-local-changes.diff"
+
+git restore -- configs/sysctl/hardening.conf install.sh scripts/*.sh
+git pull --ff-only
+./install.sh --github-hosts-repair
+```
+
+这段命令不会删除 `/etc/hosts`、`/etc/ssh/sshd_config`、`/etc/sysctl.d/` 这些真正的系统配置；它只把 `/opt/bifrost` 仓库里的文件恢复成远端版本。
 
 #### 4.1.3 第一次 `git clone` 就失败，服务器上还没有 `/opt/bifrost`
 
@@ -395,7 +425,7 @@ getent hosts raw.githubusercontent.com
 rm -rf /opt/bifrost
 git clone https://github.com/ZRainbow1275/bifrost.git /opt/bifrost
 cd /opt/bifrost
-chmod +x install.sh scripts/*.sh
+git status --short --branch
 ```
 
 如果这次成功，继续往下做。
@@ -450,7 +480,7 @@ rm -rf /opt/bifrost
 mkdir -p /opt/bifrost
 tar -xzf /tmp/bifrost-main.tar.gz -C /opt/bifrost
 cd /opt/bifrost
-chmod +x install.sh scripts/*.sh
+git status --short --branch
 ```
 
 确认你已经在项目目录里：

@@ -46,7 +46,7 @@ ssh root@<A_IP> "curl -so /dev/null -w '%{http_code}' --connect-timeout 5 https:
 ```bash
 ssh root@<B_IP>
 git clone https://github.com/ZRainbow1275/bifrost.git
-cd bifrost && chmod +x install.sh scripts/*.sh
+cd bifrost && git status --short --branch
 sudo ./install.sh --server-b
 ```
 
@@ -83,7 +83,7 @@ cat /root/bifrost/server-b-info.txt 2>/dev/null || echo "手动从部署输出�
 ```bash
 ssh root@<A_IP>
 git clone https://github.com/ZRainbow1275/bifrost.git
-cd bifrost && chmod +x install.sh scripts/*.sh
+cd bifrost && git status --short --branch
 sudo ./install.sh --server-a
 # 输入 Step 1 的连接信息
 ```

@@ -101,7 +101,7 @@ curl -fsSL https://raw.githubusercontent.com/ZRainbow1275/bifrost/main/install.s
 ```bash
 git clone https://github.com/ZRainbow1275/bifrost.git
 cd bifrost
-chmod +x install.sh
+git status --short --branch
 ./install.sh
 ```
 

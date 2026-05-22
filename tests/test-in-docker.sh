@@ -3886,6 +3886,45 @@ test_security_contracts() {
     cp "${SCRIPT_DIR}/scripts/security.sh" "${workdir}/security.sh"
     cp "${SCRIPT_DIR}/scripts/common.sh" "${workdir}/common.sh"
 
+    if BIFROST_TRACE_COMMON_LOAD=0 \
+        SECURITY_SH="${workdir}/security.sh" \
+        SYSCTL_HARDENING_CONF_FILE="${temp_root}/etc/sysctl.d/99-ai-gateway-hardening.conf" \
+        PATH="${temp_root}/fakebin:${PATH}" \
+        bash -c '
+            set -euo pipefail
+            repo_config_dir="$(dirname "$(dirname "${SECURITY_SH}")")/configs/sysctl"
+            mkdir -p "$(dirname "${SYSCTL_HARDENING_CONF_FILE}")" "${PATH%%:*}" "${repo_config_dir}"
+            printf "repo-template-should-not-change\n" > "${repo_config_dir}/hardening.conf"
+            cat > "${PATH%%:*}/modprobe" <<'\''FAKE'\''
+#!/usr/bin/env bash
+exit 0
+FAKE
+            cat > "${PATH%%:*}/sysctl" <<'\''FAKE'\''
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--system" ]]; then
+    exit 0
+fi
+if [[ "${1:-}" == "-n" ]]; then
+    case "${2:-}" in
+        net.ipv4.tcp_congestion_control) echo bbr ;;
+        *) echo 1 ;;
+    esac
+    exit 0
+fi
+exit 0
+FAKE
+            chmod +x "${PATH%%:*}/modprobe" "${PATH%%:*}/sysctl"
+            source "$SECURITY_SH"
+            harden_kernel >/dev/null 2>&1
+            test -f "${SYSCTL_HARDENING_CONF_FILE}"
+            grep -q "Bifrost - Kernel Security Hardening" "${SYSCTL_HARDENING_CONF_FILE}"
+            grep -q "repo-template-should-not-change" "${repo_config_dir}/hardening.conf"
+        '; then
+        record_pass "Root harden_kernel writes runtime sysctl only and does not mutate repo configs"
+    else
+        record_fail "Root harden_kernel should not mutate repo configs"
+    fi
+
     mkdir -p "${temp_root}/etc/ssh" "${temp_root}/root/.ssh"
     cat > "${temp_root}/etc/ssh/sshd_config" <<'EOF'
 Port 22
@@ -4465,6 +4504,45 @@ test_bridge_security_contracts() {
     mkdir -p "${workdir}"
     cp "${SCRIPT_DIR}/ai-gateway-bridge/scripts/security.sh" "${workdir}/security.sh"
     cp "${SCRIPT_DIR}/ai-gateway-bridge/scripts/common.sh" "${workdir}/common.sh"
+
+    if BIFROST_TRACE_COMMON_LOAD=0 \
+        SECURITY_SH="${workdir}/security.sh" \
+        SYSCTL_HARDENING_CONF_FILE="${temp_root}/etc/sysctl.d/99-ai-gateway-hardening.conf" \
+        PATH="${temp_root}/fakebin:${PATH}" \
+        bash -c '
+            set -euo pipefail
+            repo_config_dir="$(dirname "$(dirname "${SECURITY_SH}")")/configs/sysctl"
+            mkdir -p "$(dirname "${SYSCTL_HARDENING_CONF_FILE}")" "${PATH%%:*}" "${repo_config_dir}"
+            printf "repo-template-should-not-change\n" > "${repo_config_dir}/hardening.conf"
+            cat > "${PATH%%:*}/modprobe" <<'\''FAKE'\''
+#!/usr/bin/env bash
+exit 0
+FAKE
+            cat > "${PATH%%:*}/sysctl" <<'\''FAKE'\''
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--system" ]]; then
+    exit 0
+fi
+if [[ "${1:-}" == "-n" ]]; then
+    case "${2:-}" in
+        net.ipv4.tcp_congestion_control) echo bbr ;;
+        *) echo 1 ;;
+    esac
+    exit 0
+fi
+exit 0
+FAKE
+            chmod +x "${PATH%%:*}/modprobe" "${PATH%%:*}/sysctl"
+            source "$SECURITY_SH"
+            harden_kernel >/dev/null 2>&1
+            test -f "${SYSCTL_HARDENING_CONF_FILE}"
+            grep -q "AI Gateway Bridge - Kernel Security Hardening" "${SYSCTL_HARDENING_CONF_FILE}"
+            grep -q "repo-template-should-not-change" "${repo_config_dir}/hardening.conf"
+        '; then
+        record_pass "AI Gateway Bridge harden_kernel writes runtime sysctl only and does not mutate repo configs"
+    else
+        record_fail "AI Gateway Bridge harden_kernel should not mutate repo configs"
+    fi
 
     mkdir -p "${temp_root}/etc/ssh" "${temp_root}/root/.ssh"
     cat > "${temp_root}/etc/ssh/sshd_config" <<'EOF'

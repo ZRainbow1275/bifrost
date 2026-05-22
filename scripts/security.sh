@@ -52,6 +52,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 : "${DNF_AUTOMATIC_TIMER_NAME:=dnf-automatic.timer}"
 : "${RKHUNTER_CONF_FILE:=/etc/rkhunter.conf}"
 : "${RKHUNTER_CRON_FILE:=/etc/cron.weekly/rkhunter-scan}"
+: "${SYSCTL_HARDENING_CONF_FILE:=/etc/sysctl.d/99-ai-gateway-hardening.conf}"
 
 # ------------------------------------------------------------------------------
 # _ensure_state_dir: Create the state directory if it does not exist
@@ -1176,7 +1177,7 @@ harden_kernel() {
     log_info "Kernel Security Hardening"
     log_info "=========================================="
 
-    local sysctl_conf="/etc/sysctl.d/99-ai-gateway-hardening.conf"
+    local sysctl_conf="${SYSCTL_HARDENING_CONF_FILE}"
 
     # ---- Check BBR support ----
     local bbr_available=false
@@ -1257,14 +1258,6 @@ BBR_EOF
 # # net.core.default_qdisc = fq
 # # net.ipv4.tcp_congestion_control = bbr
 NOBBR_EOF
-    fi
-
-    # ---- Also copy to configs/ for version control ----
-    local project_config_dir
-    project_config_dir="$(dirname "$(dirname "${BASH_SOURCE[0]}")")/configs/sysctl"
-    if [[ -d "$(dirname "${project_config_dir}")" ]]; then
-        mkdir -p "${project_config_dir}"
-        cp "${sysctl_conf}" "${project_config_dir}/hardening.conf" 2>/dev/null || true
     fi
 
     # ---- Apply settings ----

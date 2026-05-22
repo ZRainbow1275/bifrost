@@ -95,8 +95,10 @@ dnf install -y git curl ca-certificates wireguard-tools
 ```bash
 git clone https://github.com/ZRainbow1275/bifrost.git /opt/bifrost
 cd /opt/bifrost
-chmod +x install.sh scripts/*.sh
+git status --short --branch
 ```
+
+新版仓库已经自带脚本可执行权限。不要再执行 `chmod +x install.sh scripts/*.sh`，否则旧版本仓库会把很多脚本标成 `M`，干扰后面的 `git pull` 判断。
 
 截至 `2026-05-21` 的实测结果：海外 VPS 通常可以直接拉 GitHub，但不同线路仍可能短时失败。
 如果上面这三行已经成功，就直接跳到“确认目录正确”。
@@ -120,7 +122,7 @@ fatal: unable to access 'https://github.com/ZRainbow1275/bifrost.git/': GnuTLS r
 
 ```bash
 cd /opt/bifrost
-chmod +x install.sh scripts/*.sh
+git status --short --branch
 ./install.sh --github-hosts-repair
 git pull --ff-only
 ```
@@ -166,7 +168,7 @@ git diff -- install.sh scripts/security.sh > "$backup_dir/local-changes.diff"
 git stash push -m "bifrost local changes before pull" -- install.sh scripts/security.sh
 git pull --ff-only
 
-chmod +x install.sh scripts/*.sh
+git status --short --branch
 ./install.sh --github-hosts-repair
 ```
 
@@ -175,6 +177,34 @@ chmod +x install.sh scripts/*.sh
 ```bash
 /root/bifrost-local-backup/
 ```
+
+如果 `git status --short --branch` 看到一大串下面这种 `M scripts/*.sh`：
+
+```text
+ M install.sh
+ M scripts/security.sh
+ M scripts/server-a.sh
+ M scripts/server-b.sh
+```
+
+并且你前面执行过 `chmod +x install.sh scripts/*.sh`，这通常只是“文件权限变化”，不是代码内容真的被你改了。
+如果还看到 `M configs/sysctl/hardening.conf`，这是旧版安全脚本曾把运行时 sysctl 配置反写回项目目录造成的；新版脚本已经修掉这个行为。
+
+为了不丢现场，先备份 diff，再恢复这些仓库文件到 Git 版本：
+
+```bash
+cd /opt/bifrost
+
+backup_dir="/root/bifrost-local-backup/$(date +%Y%m%d-%H%M%S)-dirty-tree"
+mkdir -p "$backup_dir"
+git diff > "$backup_dir/all-local-changes.diff"
+
+git restore -- configs/sysctl/hardening.conf install.sh scripts/*.sh
+git pull --ff-only
+./install.sh --github-hosts-repair
+```
+
+这段命令不会删除 `/etc/hosts`、`/etc/ssh/sshd_config`、`/etc/sysctl.d/` 这些真正的系统配置；它只把 `/opt/bifrost` 仓库里的文件恢复成远端版本。
 
 如果你现在的 Server B 项目目录还没有这个新脚本，或者 `git clone` 第一次就失败导致 `/opt/bifrost` 还不存在，就按下面的手动方式做一次。
 
@@ -220,7 +250,7 @@ getent hosts raw.githubusercontent.com
 rm -rf /opt/bifrost
 git clone https://github.com/ZRainbow1275/bifrost.git /opt/bifrost
 cd /opt/bifrost
-chmod +x install.sh scripts/*.sh
+git status --short --branch
 ```
 
 如果还是失败，继续下一节，从 Windows 本机打包上传。
@@ -265,7 +295,7 @@ rm -rf /opt/bifrost
 mkdir -p /opt/bifrost
 tar -xzf /tmp/bifrost-main.tar.gz -C /opt/bifrost
 cd /opt/bifrost
-chmod +x install.sh scripts/*.sh
+git status --short --branch
 ```
 
 确认目录正确：

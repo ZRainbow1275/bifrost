@@ -69,7 +69,7 @@ Step 4: 员工入职 — 安装 WireGuard → 连接 VPN → 配置 AI 工具
 ```bash
 git clone https://github.com/your-org/ai-gateway-bridge.git
 cd ai-gateway-bridge
-chmod +x install.sh scripts/*.sh
+git status --short --branch
 sudo ./install.sh
 # 选择「1. 部署海外服务器」
 # (推荐) 部署完成后选择「10. DPI 防护部署」加固反检测

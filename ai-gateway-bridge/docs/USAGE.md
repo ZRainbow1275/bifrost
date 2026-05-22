@@ -81,8 +81,8 @@ wget https://github.com/your-org/ai-gateway-bridge/archive/main.tar.gz
 tar xzf main.tar.gz
 cd ai-gateway-bridge-main
 
-# 赋予执行权限
-chmod +x install.sh scripts/*.sh
+# 确认工作区状态
+git status --short --branch
 ```
 
 ### 1.2 运行部署
@@ -166,7 +166,7 @@ ssh root@your-server-a-ip
 # 下载脚本
 git clone https://github.com/your-org/ai-gateway-bridge.git
 cd ai-gateway-bridge
-chmod +x install.sh scripts/*.sh
+git status --short --branch
 
 # 域名模式（默认）：需要域名解析到 Server A，并满足国内服务器备案前提
 sudo ./install.sh
