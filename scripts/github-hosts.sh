@@ -39,6 +39,7 @@ Environment:
       Skip git ls-remote verification.
   BIFROST_GITHUB_HOSTS_GIT_TIMEOUT=20
       Max seconds to wait for git ls-remote before trying the next candidate.
+      Verification uses HTTP/1.1 plus Git low-speed timeout guards.
   BIFROST_GITHUB_HOSTS_REPO_URL=https://github.com/ZRainbow1275/bifrost.git
 USAGE
 }
@@ -276,6 +277,7 @@ probe_git_access() {
     local timeout_seconds="${BIFROST_GITHUB_HOSTS_GIT_TIMEOUT:-20}"
     local -a git_cmd=(
         git
+        -c "http.version=HTTP/1.1"
         -c "http.lowSpeedLimit=1"
         -c "http.lowSpeedTime=${timeout_seconds}"
         ls-remote
@@ -405,6 +407,7 @@ verify_git_access() {
     fi
 
     log_error "GitHub hosts block was written, but git verification still failed."
+    log_error "If ls-remote works but git pull later times out, use: timeout 60s git -c http.version=HTTP/1.1 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=60 pull --ff-only"
     log_error "If this is Tencent Cloud line instability, use the Windows upload fallback in the runbook once, then rerun this command."
     return 1
 }

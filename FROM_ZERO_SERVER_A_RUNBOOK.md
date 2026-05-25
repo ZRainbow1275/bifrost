@@ -336,6 +336,20 @@ git status --short --branch
 git log --oneline -8
 ```
 
+本轮腾讯云实测成功的组合是：
+
+```text
+github.com=140.82.113.4
+raw.githubusercontent.com=185.199.108.133
+```
+
+并且真正让 `git pull` 走通的关键不是裸跑 `git pull --ff-only`，而是使用下面这种带 HTTP/1.1 和低速超时保护的拉取方式：
+
+```bash
+timeout 60s git -c http.version=HTTP/1.1 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=60 pull --ff-only
+echo "pull-exit=$?"
+```
+
 如果这里报的是 `fatal: unable to access 'https://github.com/...': SSL connection timeout`，说明前面的 `ls-remote` 只证明 GitHub 能返回引用信息，但真正拉对象时 HTTPS 传输还是太慢。先不要反复重试，改用下面这个更稳的命令再试一次：
 
 ```bash

@@ -1638,6 +1638,7 @@ for arg in "$@"; do
 done
 if [[ "${is_ls_remote}" == "1" ]]; then
     state_file="${BIFROST_GITHUB_HOSTS_TEST_STATE_FILE:-}"
+    args_file="${BIFROST_GITHUB_HOSTS_TEST_ARGS_FILE:-}"
     target_hosts_file="${BIFROST_HOSTS_FILE:-/etc/hosts}"
     count=0
     if [[ -f "${state_file}" ]]; then
@@ -1645,6 +1646,9 @@ if [[ "${is_ls_remote}" == "1" ]]; then
     fi
     count=$((count + 1))
     printf '%s\n' "${count}" > "${state_file}"
+    if [[ -n "${args_file}" ]]; then
+        printf '%s\n' "$*" >> "${args_file}"
+    fi
     if [[ "${BIFROST_GITHUB_HOSTS_TEST_SLEEP_FIRST:-0}" == "1" && "${count}" == "1" ]]; then
         sleep 3
         exit 1
@@ -1684,6 +1688,8 @@ FAKE
 127.0.0.1 localhost
 HOSTS
 
+    local git_args_log="${temp_root}/git-args.log"
+
     if BIFROST_HOSTS_FILE="${timeout_hosts}" \
        BIFROST_GITHUB_HOSTS_RESOLVE_MODE=static \
        BIFROST_GITHUB_IPS="140.82.112.4,140.82.112.5" \
@@ -1691,11 +1697,20 @@ HOSTS
        BIFROST_GITHUB_HOSTS_GIT_TIMEOUT=1 \
        BIFROST_GITHUB_HOSTS_TEST_SLEEP_FIRST=1 \
        BIFROST_GITHUB_HOSTS_TEST_STATE_FILE="${temp_root}/git-timeout-state" \
+       BIFROST_GITHUB_HOSTS_TEST_ARGS_FILE="${git_args_log}" \
        PATH="${fakebin}:${PATH}" \
        bash "${script_path}" >/dev/null 2>&1; then
         record_pass "${label} GitHub hosts 修复会在 Git 验证卡住时超时并继续重试"
     else
         record_fail "${label} GitHub hosts 修复会在 Git 验证卡住时超时并继续重试"
+    fi
+
+    if grep -Fq -- '-c http.version=HTTP/1.1' "${git_args_log}" \
+       && grep -Fq -- '-c http.lowSpeedLimit=1' "${git_args_log}" \
+       && grep -Fq -- '-c http.lowSpeedTime=1' "${git_args_log}"; then
+        record_pass "${label} GitHub hosts 验证命令会固定 HTTP/1.1 和低速超时参数"
+    else
+        record_fail "${label} GitHub hosts 验证命令会固定 HTTP/1.1 和低速超时参数"
     fi
 
     local bad_hosts="${temp_root}/bad-hosts"
