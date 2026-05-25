@@ -214,8 +214,10 @@ for github_ip in "${github_ips[@]}"; do
     if timeout 20s git ls-remote --heads "${repo}" main; then
       echo
       echo "SUCCESS: GitHub access works with github.com=${github_ip}, raw.githubusercontent.com=${raw_ip}"
-      git pull --ff-only
-      exit $?
+      timeout 60s git -c http.version=HTTP/1.1 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=60 pull --ff-only
+      pull_exit=$?
+      echo "pull-exit=${pull_exit}"
+      exit "${pull_exit}"
     fi
 
     echo "FAILED: this pair did not work, trying next..."
@@ -229,6 +231,28 @@ EOF
 
 bash /tmp/bifrost-github-hosts-try.sh
 ```
+
+看到 `SUCCESS: GitHub access works ...` 只说明这一组 hosts 能连上 GitHub。脚本随后会继续执行 `git pull --ff-only`，并打印 `pull-exit=...`，这里一定要看最后的退出码：
+
+- `pull-exit=0`：代码已经拉到最新，可以继续下面的检查。
+- `pull-exit=124`：`git pull` 等了 60 秒仍然卡住，先不要反复重试，把从 `SUCCESS` 开始到 `pull-exit=124` 的输出贴出来。
+- 其他非 `0` 数字：`git pull` 失败，把完整错误输出贴出来。
+
+如果脚本执行成功，再确认当前代码版本：
+
+```bash
+git status --short --branch
+git log --oneline -8
+```
+
+如果这里报的是 `fatal: unable to access 'https://github.com/...': SSL connection timeout`，说明前面的 `ls-remote` 只证明 GitHub 能返回引用信息，但真正拉对象时 HTTPS 传输还是太慢。先不要反复重试，改用下面这个更稳的命令再试一次：
+
+```bash
+timeout 60s git -c http.version=HTTP/1.1 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=60 pull --ff-only
+echo "pull-exit=$?"
+```
+
+如果 `pull-exit=124`，说明 60 秒内还是没拉完，先把这条报错贴回来，不要继续硬等。
 
 如果这里直接出现下面这种输出：
 
