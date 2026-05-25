@@ -52,6 +52,17 @@ Enter passphrase
 新手测试阶段可以直接按回车两次，表示暂时不设置 key 密码。  
 如果你已经熟悉 SSH，也可以设置一个 passphrase。
 
+后面登录时如果看到下面这种提示：
+
+```text
+Enter passphrase for key 'C:\Users\HP\.ssh\bifrost_root_ed25519':
+```
+
+这问的是这把 Windows 本机私钥的 passphrase，不是腾讯云服务器密码。
+如果你创建 key 时设置过 passphrase，就输入那个 passphrase；输入时屏幕不会显示内容。
+如果你创建 key 时直接按回车跳过了 passphrase，这里也直接按回车。
+如果忘记了 passphrase，它不能找回，只能重新生成一把 SSH key，再把新公钥写入服务器。
+
 看一下公钥内容：
 
 ```powershell
@@ -703,6 +714,15 @@ PermitRootLogin prohibit-password
 ```powershell
 ssh -i "$env:USERPROFILE\.ssh\bifrost_root_ed25519" -p 22222 root@<SERVER_A_IP>
 ```
+
+如果这里提示：
+
+```text
+Enter passphrase for key ...
+```
+
+这是本机私钥口令，不是服务器密码。输入正确 passphrase 后能登录，仍然算“公钥登录成功”。
+如果后面继续出现 `root@<SERVER_A_IP>'s password:`，才说明服务器还在要求密码登录或公钥没有被接受。
 
 如果新窗口能登录成功，再回到旧 SSH 窗口执行：
 

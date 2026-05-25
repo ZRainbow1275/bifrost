@@ -481,6 +481,17 @@ type "$env:USERPROFILE\.ssh\bifrost_root_ed25519.pub"
 
 复制整行粘贴进去。
 
+如果后面用这把 key 登录时看到：
+
+```text
+Enter passphrase for key 'C:\Users\HP\.ssh\bifrost_root_ed25519':
+```
+
+这是 Windows 本机私钥的 passphrase，不是 VPS 密码。
+如果你创建 key 时设置过 passphrase，就输入那个 passphrase；输入时屏幕不会显示内容。
+如果你创建 key 时直接按回车跳过了 passphrase，这里也直接按回车。
+如果忘记了 passphrase，它不能找回，只能重新生成一把 SSH key，再把新公钥写入服务器。
+
 这一轮加固的目标是：服务器不再识别密码登录，只接受 SSH 公钥登录。
 脚本会把 SSH 配置改成下面这种效果：
 
@@ -499,6 +510,9 @@ PermitRootLogin prohibit-password
 ```powershell
 ssh -i "$env:USERPROFILE\.ssh\bifrost_root_ed25519" -p 22222 root@<SERVER_B_IP>
 ```
+
+如果这里提示 `Enter passphrase for key ...`，这是本机私钥口令，不是服务器密码。输入正确 passphrase 后能登录，仍然算“公钥登录成功”。
+如果后面继续出现 `root@<SERVER_B_IP>'s password:`，才说明服务器还在要求密码登录或公钥没有被接受。
 
 如果新窗口能登录，回到旧窗口执行：
 
