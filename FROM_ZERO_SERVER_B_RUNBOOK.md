@@ -167,11 +167,17 @@ echo "git-check-exit=$?"
 如果你已经确认是 `git-check-exit=124`，就执行下面这段候选 IP 轮询脚本。它会逐个改 `/etc/hosts`，每次最多等 20 秒，直到找到一个能访问 GitHub 的组合，然后自动执行 `git pull --ff-only`：
 
 ```bash
+sudo -i
 cd /opt/bifrost
 
 cat > /tmp/bifrost-github-hosts-try.sh <<'EOF'
 #!/usr/bin/env bash
-set -u
+set -euo pipefail
+
+if [[ "$(id -u)" -ne 0 ]]; then
+  echo "ERROR: this script must run as root. Run: sudo bash /tmp/bifrost-github-hosts-try.sh"
+  exit 1
+fi
 
 repo="https://github.com/ZRainbow1275/bifrost.git"
 
