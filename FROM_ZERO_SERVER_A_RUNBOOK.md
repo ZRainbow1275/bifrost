@@ -255,6 +255,66 @@ echo "git-check-exit=$?"
 
 如果这条 `timeout 20s git ls-remote ...` 失败或超时，把从 `timeout 20s ...` 到 `git-check-exit=...` 的完整输出贴出来。新版脚本已经给 Git 验证加了超时，拉到新版后不会再无限卡住。
 
+如果你已经确认是 `git-check-exit=124`，就执行下面这段候选 IP 轮询脚本。它会逐个改 `/etc/hosts`，每次最多等 20 秒，直到找到一个能访问 GitHub 的组合，然后自动执行 `git pull --ff-only`：
+
+```bash
+cd /opt/bifrost
+
+cat > /tmp/bifrost-github-hosts-try.sh <<'EOF'
+#!/usr/bin/env bash
+set -u
+
+repo="https://github.com/ZRainbow1275/bifrost.git"
+
+github_ips=(
+  20.205.243.166
+  140.82.112.4
+  140.82.113.4
+  140.82.114.4
+  140.82.121.4
+  140.82.112.3
+)
+
+raw_ips=(
+  185.199.108.133
+  185.199.109.133
+  185.199.110.133
+  185.199.111.133
+)
+
+for github_ip in "${github_ips[@]}"; do
+  for raw_ip in "${raw_ips[@]}"; do
+    echo
+    echo ">>> Trying github.com=${github_ip}, raw.githubusercontent.com=${raw_ip}"
+
+    BIFROST_GITHUB_HOSTS_RESOLVE_MODE=static \
+    BIFROST_GITHUB_IP="${github_ip}" \
+    BIFROST_RAW_GITHUB_IP="${raw_ip}" \
+    BIFROST_GITHUB_HOSTS_SKIP_GIT_CHECK=1 \
+      bash ./install.sh --github-hosts-repair
+
+    getent hosts github.com
+    getent hosts raw.githubusercontent.com
+
+    if timeout 20s git ls-remote --heads "${repo}" main; then
+      echo
+      echo "SUCCESS: GitHub access works with github.com=${github_ip}, raw.githubusercontent.com=${raw_ip}"
+      git pull --ff-only
+      exit $?
+    fi
+
+    echo "FAILED: this pair did not work, trying next..."
+  done
+done
+
+echo
+echo "ERROR: no candidate pair worked. Paste this output back."
+exit 1
+EOF
+
+bash /tmp/bifrost-github-hosts-try.sh
+```
+
 如果脚本执行成功，再重新执行：
 
 ```bash
