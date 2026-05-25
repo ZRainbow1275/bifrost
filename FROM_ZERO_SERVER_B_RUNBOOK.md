@@ -153,9 +153,16 @@ Verifying GitHub access: git ls-remote --heads https://github.com/ZRainbow1275/b
 cd /opt/bifrost
 BIFROST_GITHUB_HOSTS_SKIP_GIT_CHECK=1 bash ./install.sh --github-hosts-repair
 timeout 20s git ls-remote --heads https://github.com/ZRainbow1275/bifrost.git main
+echo "git-check-exit=$?"
 ```
 
-如果这条 `timeout 20s git ls-remote ...` 仍然失败或超时，先不要继续 `git pull`，把输出贴出来。新版脚本已经给 Git 验证加了超时，拉到新版后不会再无限卡住。
+这里要看最后一行退出码：
+
+- `git-check-exit=0`，并且上面出现 `refs/heads/main`，说明 GitHub 已经能连上，可以继续 `git pull --ff-only`。
+- `git-check-exit=124`，说明 20 秒超时，先不要继续 `git pull`。
+- 其他非 `0` 数字，说明 GitHub 连接还是失败，先不要继续 `git pull`。
+
+如果这条 `timeout 20s git ls-remote ...` 失败或超时，把从 `timeout 20s ...` 到 `git-check-exit=...` 的完整输出贴出来。新版脚本已经给 Git 验证加了超时，拉到新版后不会再无限卡住。
 
 如果这里直接出现下面这种输出：
 
