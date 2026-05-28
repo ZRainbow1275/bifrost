@@ -756,6 +756,9 @@ cat /root/ai-gateway-connection.txt
 
 ### `--security` 中途断线，`port 22` 显示 `Connection closed`
 
+先确认一件事：加固完成后，Server B 的登录用户应该是 `root`，不是 `ubuntu`。
+如果你还在试 `ubuntu@<SERVER_B_IP>`，先停下，改用 `root@<SERVER_B_IP>` 和新端口 `22222`。
+
 先不要重装系统。先在 Windows PowerShell 里试新端口：
 
 ```powershell
