@@ -697,7 +697,8 @@ _vpn_deploy_headscale() {
         if ! github_download "${headscale_url}" "${tmp_deb}" 120; then
             die "Failed to download Headscale package from all sources (direct + configured mirrors)."
         fi
-        dpkg -i "${tmp_deb}" || apt-get install -f -y
+        wait_for_apt_locks || return 1
+        dpkg -i "${tmp_deb}" || run_apt_get install -f -y
     else
         # Upstream latest releases publish Linux binaries but not RPM packages.
         local tmp_bin

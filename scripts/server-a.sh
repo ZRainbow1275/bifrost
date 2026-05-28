@@ -354,8 +354,8 @@ install_certbot_ip_support() {
                     log_error "snap is not installed and automatic snapd installation is only supported on Debian/Ubuntu hosts."
                     return 1
                 fi
-                apt-get update -qq
-                apt-get install -y -qq snapd
+                run_apt_get update -qq
+                run_apt_get install -y -qq snapd
             fi
             snap install core 2>/dev/null || snap refresh core
             if snap list certbot &>/dev/null; then
@@ -367,8 +367,8 @@ install_certbot_ip_support() {
             ;;
         apt)
             log_warn "Installing Certbot via apt. Ubuntu 22.04 default repositories may lag behind the required ${required_version}+ release."
-            apt-get update -qq
-            apt-get install -y -qq certbot
+            run_apt_get update -qq
+            run_apt_get install -y -qq certbot
             ;;
         none)
             log_error "BIFROST_CERTBOT_INSTALL_METHOD=none requires a preinstalled certbot ${required_version}+."
@@ -2181,8 +2181,8 @@ _install_caddy() {
 
     case "$os_family" in
         debian)
-            apt-get update -qq
-            apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl
+            run_apt_get update -qq
+            run_apt_get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl
             if ! curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
                 | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg; then
                 log_error "Failed to import the Caddy repository key. Refusing to trust an unverified repository."
@@ -2193,8 +2193,8 @@ _install_caddy() {
                 log_error "Failed to install the Caddy repository definition."
                 return 1
             fi
-            apt-get update -qq
-            apt-get install -y -qq caddy
+            run_apt_get update -qq
+            run_apt_get install -y -qq caddy
             ;;
         rhel)
             dnf install -y 'dnf-command(copr)' 2>/dev/null || yum install -y yum-plugin-copr 2>/dev/null || true

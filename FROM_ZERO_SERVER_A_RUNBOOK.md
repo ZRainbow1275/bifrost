@@ -126,6 +126,25 @@ ssh ubuntu@<SERVER_A_IP>
 ssh -i "$env:USERPROFILE\.ssh\你的腾讯云密钥文件" ubuntu@<SERVER_A_IP>
 ```
 
+如果这台 Server A 是刚刚重装过的，或者你之前已经用同一个 IP 连过旧系统，Windows 可能会报：
+
+```text
+WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!
+Host key verification failed.
+```
+
+这说明 Windows 还记着旧系统的 SSH 指纹。确认你确实刚重装过 Server A 后，在 Windows PowerShell 里执行：
+
+```powershell
+ssh-keygen -R <SERVER_A_IP>
+ssh-keygen -R "[<SERVER_A_IP>]:22"
+ssh-keygen -R "[<SERVER_A_IP>]:22222"
+ssh-keygen -R "[<SERVER_A_IP>]:11964"
+```
+
+然后重新执行 SSH 登录命令。
+这些命令只清理 `known_hosts` 里的旧服务器指纹，不会删除你的 SSH 私钥。
+
 第一次连接会问：
 
 ```text
@@ -189,6 +208,9 @@ dnf install -y git curl ca-certificates
 ```
 
 然后先尝试从 GitHub 拉项目：
+
+如果这是刚重装后的腾讯云新机器，或者你一上来就遇到 `GnuTLS recv error (-110)` / `SSL connection timeout`，先不要反复重试这个 `git clone`。
+因为这时仓库还没拉下来，不能先用 `./install.sh --github-hosts-repair`，要先跳到下面的 `4.1` / `4.1.1`，把 `/etc/hosts` 手动修好，再回到这里重试 clone。
 
 ```bash
 git clone https://github.com/ZRainbow1275/bifrost.git /opt/bifrost
@@ -676,6 +698,9 @@ cd /opt/bifrost
 ./install.sh --security
 ```
 
+如果这里先看到 `APT/dpkg is busy`、`unattended-upgr`、`lock-frontend` 之类提示，不要手动删锁，也不要杀进程。
+这通常是系统自己的自动更新正在占用安装锁，脚本现在会先等一会儿；如果一直等到超时，再停下来把那屏输出发给我。
+
 脚本会问 SSH 端口。  
 这里不要用随机默认值，输入你前面在腾讯云安全组放行过的端口：
 
@@ -683,7 +708,14 @@ cd /opt/bifrost
 22222
 ```
 
-脚本会让你粘贴 SSH 公钥。  
+脚本可能会检测到现有 `authorized_keys`，然后问是否要再添加一把 SSH 公钥。
+如果它列出的 key 已经是你当前这把，比如末尾显示 `bifrost-root`，这里选：
+
+```text
+N
+```
+
+如果它没有列出你准备使用的 key，或者你要换一把新 key，再选择 `y` 并粘贴 SSH 公钥。
 回到 Windows PowerShell 执行：
 
 ```powershell
@@ -982,6 +1014,26 @@ ssh -i "$env:USERPROFILE\.ssh\bifrost_root_ed25519" -p 22222 root@<SERVER_A_IP>
 ```powershell
 ssh -i "$env:USERPROFILE\.ssh\bifrost_root_ed25519" -p 22222 root@<SERVER_A_IP>
 ```
+
+如果你刚把 Server A 重装过，或者这台机器的 SSH 指纹变了，Windows 里可能会先报：
+
+```text
+WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!
+Host key verification failed.
+```
+
+这不是你输错密码，也不是私钥坏了，而是你本机还记着这台服务器的旧指纹。
+这时先在 Windows PowerShell 里把旧记录删掉，再重新连：
+
+```powershell
+ssh-keygen -R <SERVER_A_IP>
+ssh-keygen -R "[<SERVER_A_IP>]:22"
+ssh-keygen -R "[<SERVER_A_IP>]:22222"
+ssh-keygen -R "[<SERVER_A_IP>]:11964"
+```
+
+`ssh-keygen -R` 只会删掉本机 `known_hosts` 里的旧记录，不会删你的私钥。
+如果它还是继续报错，再打开 `C:\Users\HP\.ssh\known_hosts`，把报错里提示的那一行删掉，然后再重试上面的 SSH 命令。
 
 如果 root 不通，再试 `ubuntu`：
 

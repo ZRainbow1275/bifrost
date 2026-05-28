@@ -68,6 +68,9 @@ sudo ./install.sh
 
 ### 1.1 下载部署脚本
 
+如果这台机器在腾讯云或其他国内线路，第一次 `git clone` 前先确认 GitHub 能访问；如果不通，先按 Server A / Server B 实操文档里的 `/etc/hosts` 方案修好，再回来执行 clone。
+因为这一步还没有把仓库拉下来，所以此时不能先用 `./install.sh --github-hosts-repair`。
+
 ```bash
 # SSH 登录 Server B
 ssh root@your-server-b-ip
@@ -158,6 +161,9 @@ Short ID:     (空或 0123456789abcdef)
   - 腾讯云等暂不绑定域名的真实测试：使用 `BIFROST_SERVER_A_TLS_MODE=ip`，脚本会通过 Certbot 5.4+ 申请 Let's Encrypt 短生命周期 IP 证书，并把证书显式接入 Caddy
 
 ### 2.2 运行部署
+
+如果这台机器在腾讯云或其他国内线路，第一次 `git clone` 前先确认 GitHub 能访问；如果不通，先按 Server A / Server B 实操文档里的 `/etc/hosts` 方案修好，再回来执行 clone。
+因为这一步还没有把仓库拉下来，所以此时不能先用 `./install.sh --github-hosts-repair`。
 
 ```bash
 # SSH 登录 Server A

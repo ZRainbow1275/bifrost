@@ -300,6 +300,8 @@ test_functions() {
         "scripts/common.sh:show_menu"
         "scripts/common.sh:log_info"
         "scripts/common.sh:install_packages"
+        "scripts/common.sh:wait_for_apt_locks"
+        "scripts/common.sh:run_apt_get"
         "scripts/common.sh:check_docker"
         "scripts/common.sh:require_docker_server_version"
         "scripts/common.sh:generate_uuid"
@@ -1795,12 +1797,88 @@ test_bridge_supply_chain_contracts() {
             [[ ! -s "${tmp_out}" ]]
             declare -f github_fetch_text >/dev/null
             declare -f github_clone_repo >/dev/null
+            declare -f wait_for_apt_locks >/dev/null
+            declare -f run_apt_get >/dev/null
             rm -f "${tmp_out}"
         '; then
         record_pass "AI Gateway Bridge common.sh 默认静默加载，且补齐 GitHub helper 契约"
     else
         record_fail "AI Gateway Bridge common.sh 默认静默加载，且补齐 GitHub helper 契约"
     fi
+
+    if BIFROST_TRACE_COMMON_LOAD=0 \
+        COMMON_SH="${SCRIPT_DIR}/scripts/common.sh" \
+        bash -c '
+            set -euo pipefail
+            source "$COMMON_SH" >/dev/null 2>&1
+            calls_file="$(mktemp)"
+            printf "0" >"${calls_file}"
+            apt_lock_holders() {
+                local calls
+                calls="$(cat "${calls_file}")"
+                calls=$((calls + 1))
+                printf "%s" "${calls}" >"${calls_file}"
+                if [[ "${calls}" -lt 2 ]]; then
+                    echo "11863:unattended-upgr"
+                fi
+            }
+            sleep() { :; }
+            apt-get() {
+                printf "APT:%s\n" "$*"
+            }
+            output="$(run_apt_get install -y foo)"
+            calls="$(cat "${calls_file}")"
+            rm -f "${calls_file}"
+            [[ "${output}" == *"APT:install -y foo"* ]]
+            [[ "${calls}" -ge 2 ]]
+        '; then
+        record_pass "Root run_apt_get 会等待 apt/dpkg 锁释放后再执行安装命令"
+    else
+        record_fail "Root run_apt_get 应等待 apt/dpkg 锁释放后再执行安装命令"
+    fi
+
+    if BIFROST_TRACE_COMMON_LOAD=0 \
+        BRIDGE_COMMON_SH="${SCRIPT_DIR}/ai-gateway-bridge/scripts/common.sh" \
+        bash -c '
+            set -euo pipefail
+            source "$BRIDGE_COMMON_SH" >/dev/null 2>&1
+            calls_file="$(mktemp)"
+            printf "0" >"${calls_file}"
+            apt_lock_holders() {
+                local calls
+                calls="$(cat "${calls_file}")"
+                calls=$((calls + 1))
+                printf "%s" "${calls}" >"${calls_file}"
+                if [[ "${calls}" -lt 2 ]]; then
+                    echo "11863:unattended-upgr"
+                fi
+            }
+            sleep() { :; }
+            apt-get() {
+                printf "APT:%s\n" "$*"
+            }
+            output="$(run_apt_get install -y foo)"
+            calls="$(cat "${calls_file}")"
+            rm -f "${calls_file}"
+            [[ "${output}" == *"APT:install -y foo"* ]]
+            [[ "${calls}" -ge 2 ]]
+        '; then
+        record_pass "AI Gateway Bridge run_apt_get 会等待 apt/dpkg 锁释放后再执行安装命令"
+    else
+        record_fail "AI Gateway Bridge run_apt_get 应等待 apt/dpkg 锁释放后再执行安装命令"
+    fi
+
+    local direct_apt_log
+    direct_apt_log="$(mktemp)"
+    if grep -R -nE '(^|[[:space:]])(DEBIAN_FRONTEND=[^[:space:]]+[[:space:]]+)?apt-get[[:space:]]+(update|install)\b' \
+        scripts ai-gateway-bridge/scripts \
+        | grep -Ev '(^|/)common\.sh:|(^|/)uninstall\.sh:' >"${direct_apt_log}"; then
+        cat "${direct_apt_log}" >&2
+        record_fail "部署脚本不应绕过 run_apt_get 直接执行 apt-get update/install"
+    else
+        record_pass "部署脚本的 apt-get update/install 会通过 run_apt_get 等待锁释放"
+    fi
+    rm -f "${direct_apt_log}"
 
     if grep -Eq 'echo "\\$\\{_xray_script\\}" \\| bash -s -- install|echo "y" \\| bash -c "\\$\\{_3xui_script\\}"' ai-gateway-bridge/scripts/server-b.sh; then
         record_fail "AI Gateway Bridge Server B 不应再通过 echo/bash -c 形式执行下载脚本正文"
@@ -4414,7 +4492,7 @@ EOF
         record_fail "Root install_security_tools 在子安装器失败时会返回失败且不宣称已完成"
     fi
 
-    if grep -Fq "apt-get install -y -qq --no-install-recommends rkhunter" "${workdir}/security.sh"; then
+    if grep -Fq "run_apt_get install -y -qq --no-install-recommends rkhunter" "${workdir}/security.sh"; then
         record_pass "Root _install_rkhunter avoids installing recommended mail stack packages"
     else
         record_fail "Root _install_rkhunter should install rkhunter with --no-install-recommends"
@@ -5135,6 +5213,12 @@ EOF
         record_pass "AI Gateway Bridge _install_rkhunter 在初始扫描失败时会返回失败且不宣称已完成"
     else
         record_fail "AI Gateway Bridge _install_rkhunter 在初始扫描失败时会返回失败且不宣称已完成"
+    fi
+
+    if grep -Fq "run_apt_get install -y -qq --no-install-recommends rkhunter" "${workdir}/security.sh"; then
+        record_pass "AI Gateway Bridge _install_rkhunter 在 apt 安装阶段会等待锁释放"
+    else
+        record_fail "AI Gateway Bridge _install_rkhunter 应在 apt 安装阶段等待锁释放"
     fi
 
     if BIFROST_TRACE_COMMON_LOAD=0 \

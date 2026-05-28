@@ -76,7 +76,7 @@ if ! declare -f install_if_missing >/dev/null 2>&1; then
         if ! command -v "${cmd}" &>/dev/null; then
             log_info "Installing ${pkg}..."
             if command -v apt-get &>/dev/null; then
-                DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkg}"
+                run_apt_get install -y "${pkg}"
             elif command -v dnf &>/dev/null; then
                 dnf install -y "${pkg}"
             elif command -v yum &>/dev/null; then

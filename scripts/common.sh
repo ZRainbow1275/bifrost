@@ -413,6 +413,77 @@ detect_system() {
 # Section 6 : Package Manager Abstraction
 # =============================================================================
 
+# Report processes that are likely holding apt/dpkg locks.
+apt_lock_holders() {
+    local -a lock_files=(
+        /var/lib/dpkg/lock-frontend
+        /var/lib/dpkg/lock
+        /var/cache/apt/archives/lock
+    )
+    local -a pids=()
+    local output pid
+
+    if command -v fuser >/dev/null 2>&1; then
+        output="$(fuser "${lock_files[@]}" 2>/dev/null || true)"
+        for pid in ${output}; do
+            if [[ "${pid}" =~ ^[0-9]+$ ]]; then
+                pids+=("${pid}")
+            fi
+        done
+    fi
+
+    if [[ ${#pids[@]} -gt 0 ]]; then
+        printf '%s\n' "${pids[@]}" | sort -n -u | while IFS= read -r pid; do
+            local args
+            args="$(ps -p "${pid}" -o args= 2>/dev/null | awk '{$1=$1; print}' || true)"
+            printf '%s:%s\n' "${pid}" "${args:-unknown}"
+        done
+        return 0
+    fi
+
+    ps -eo pid=,comm=,args= 2>/dev/null | awk '
+        $2 ~ /^(apt|apt-get|dpkg|unattended-upgr|unattended-upgrades|apt.systemd.daily|packagekitd)$/ {
+            args = $3
+            for (i = 4; i <= NF; i++) {
+                args = args " " $i
+            }
+            print $1 ":" args
+        }
+    '
+}
+
+# Wait until apt/dpkg locks are released before package operations.
+wait_for_apt_locks() {
+    local timeout="${BIFROST_APT_LOCK_WAIT_SECONDS:-600}"
+    local interval="${BIFROST_APT_LOCK_WAIT_INTERVAL:-5}"
+    local elapsed=0
+    local holders
+
+    while true; do
+        holders="$(apt_lock_holders || true)"
+        if [[ -z "${holders//[[:space:]]/}" ]]; then
+            return 0
+        fi
+
+        holders="${holders//$'\n'/, }"
+        if (( elapsed >= timeout )); then
+            log_error "APT/dpkg lock is still held after ${timeout}s: ${holders}"
+            log_error "Wait for the package manager to finish, then rerun the command."
+            return 1
+        fi
+
+        log_warn "APT/dpkg is busy (${holders}); waiting ${interval}s before package operation..."
+        sleep "${interval}"
+        elapsed=$((elapsed + interval))
+    done
+}
+
+# Run apt-get after waiting for unattended-upgrades or other package managers.
+run_apt_get() {
+    wait_for_apt_locks || return 1
+    DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}" apt-get "$@"
+}
+
 # Install one or more packages using the detected package manager.
 # Automatically updates the index (apt) on first call.
 # Usage: install_packages curl wget jq
@@ -433,10 +504,10 @@ install_packages() {
         apt)
             # Refresh index on first call in this session.
             if [[ -z "${_APT_UPDATED:-}" ]]; then
-                apt-get update -qq
+                run_apt_get update -qq
                 _APT_UPDATED=1
             fi
-            DEBIAN_FRONTEND=noninteractive apt-get install -y ${pkgs[@]+"${pkgs[@]}"}
+            run_apt_get install -y ${pkgs[@]+"${pkgs[@]}"}
             ;;
         dnf)
             dnf install -y ${pkgs[@]+"${pkgs[@]}"}

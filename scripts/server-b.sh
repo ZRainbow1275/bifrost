@@ -1487,8 +1487,8 @@ _install_caddy() {
             fi
             echo "deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" \
                 > /etc/apt/sources.list.d/caddy-stable.list
-            apt-get update -qq
-            apt-get install -y caddy
+            run_apt_get update -qq
+            run_apt_get install -y caddy
             ;;
         dnf|yum)
             install_packages yum-utils

@@ -81,7 +81,7 @@ if ! declare -f install_if_missing >/dev/null 2>&1; then
         if ! command -v "${cmd}" &>/dev/null; then
             log_info "Installing ${pkg}..."
             if command -v apt-get &>/dev/null; then
-                DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkg}"
+                run_apt_get install -y "${pkg}"
             elif command -v dnf &>/dev/null; then
                 dnf install -y "${pkg}"
             elif command -v yum &>/dev/null; then
@@ -323,7 +323,7 @@ setup_iptables_segmentation() {
             log_info "Installing iptables-persistent for rule persistence..."
             echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections 2>/dev/null || true
             echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections 2>/dev/null || true
-            DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent 2>/dev/null || {
+            run_apt_get install -y iptables-persistent 2>/dev/null || {
                 log_warn "Could not install iptables-persistent. Rules will need manual persistence."
             }
         fi

@@ -624,8 +624,8 @@ setup_firewall() {
         none)
             log_warn "No firewall package detected. Installing ufw..."
             if command -v apt-get &>/dev/null; then
-                _run_firewall_step "Failed to update apt package index while installing ufw." apt-get update -qq || return 1
-                _run_firewall_step "Failed to install ufw." apt-get install -y -qq ufw || return 1
+                _run_firewall_step "Failed to update apt package index while installing ufw." run_apt_get update -qq || return 1
+                _run_firewall_step "Failed to install ufw." run_apt_get install -y -qq ufw || return 1
             elif command -v dnf &>/dev/null; then
                 _run_firewall_step "Failed to install firewalld via dnf." dnf install -y -q firewalld || return 1
                 _run_firewall_step "Failed to start firewalld after installation." systemctl enable --now firewalld || return 1
@@ -801,7 +801,7 @@ _setup_firewall_nftables() {
 
     log_info "[nftables] Installing nftables package..."
     if command -v apt-get >/dev/null 2>&1; then
-        _run_firewall_step "Failed to install nftables." apt-get install -y nftables || return 1
+        _run_firewall_step "Failed to install nftables." run_apt_get install -y nftables || return 1
     elif command -v dnf >/dev/null 2>&1; then
         _run_firewall_step "Failed to install nftables." dnf install -y nftables || return 1
     elif command -v yum >/dev/null 2>&1; then
@@ -852,8 +852,8 @@ setup_fail2ban() {
     if ! command -v fail2ban-client &>/dev/null; then
         log_info "Installing fail2ban..."
         if command -v apt-get &>/dev/null; then
-            _run_checked_step "Failed to update apt package index while installing fail2ban." apt-get update -qq || return 1
-            _run_checked_step "Failed to install fail2ban via apt-get." apt-get install -y -qq fail2ban || return 1
+            _run_checked_step "Failed to update apt package index while installing fail2ban." run_apt_get update -qq || return 1
+            _run_checked_step "Failed to install fail2ban via apt-get." run_apt_get install -y -qq fail2ban || return 1
         elif command -v dnf &>/dev/null; then
             _run_checked_step "Failed to install fail2ban via dnf." dnf install -y -q fail2ban || return 1
         elif command -v yum &>/dev/null; then
@@ -1340,11 +1340,11 @@ _setup_auto_updates_debian() {
     log_info "Configuring unattended-upgrades for Debian/Ubuntu..."
 
     # Install packages
-    DEBIAN_FRONTEND=noninteractive apt-get update -qq || {
+    run_apt_get update -qq || {
         log_error "Failed to update apt package index for unattended-upgrades."
         return 1
     }
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unattended-upgrades apt-listchanges || {
+    run_apt_get install -y -qq unattended-upgrades apt-listchanges || {
         log_error "Failed to install unattended-upgrades packages."
         return 1
     }
@@ -1529,11 +1529,11 @@ _install_rkhunter() {
     if ! command -v rkhunter &>/dev/null; then
         log_info "Installing rkhunter..."
         if command -v apt-get &>/dev/null; then
-            DEBIAN_FRONTEND=noninteractive apt-get update -qq || {
+            run_apt_get update -qq || {
                 log_error "Failed to update apt package index while installing rkhunter."
                 return 1
             }
-            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends rkhunter || {
+            run_apt_get install -y -qq --no-install-recommends rkhunter || {
                 log_error "Failed to install rkhunter via apt-get."
                 return 1
             }
@@ -1702,7 +1702,7 @@ _install_lynis() {
             # Try official repository first
             if ! apt-cache show lynis &>/dev/null 2>&1; then
                 log_info "Adding Lynis official repository..."
-                apt-get install -y -qq apt-transport-https ca-certificates curl gnupg || {
+                run_apt_get install -y -qq apt-transport-https ca-certificates curl gnupg || {
                     log_error "Failed to install Lynis repository bootstrap dependencies."
                     return 1
                 }
@@ -1718,12 +1718,12 @@ _install_lynis() {
                     log_error "Failed to write the Lynis apt repository list."
                     return 1
                 }
-                apt-get update -qq || {
+                run_apt_get update -qq || {
                     log_error "Failed to refresh apt package index after adding the Lynis repository."
                     return 1
                 }
             fi
-            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq lynis || {
+            run_apt_get install -y -qq lynis || {
                 log_error "Failed to install Lynis via apt-get."
                 return 1
             }
