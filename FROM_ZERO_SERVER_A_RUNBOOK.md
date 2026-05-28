@@ -972,6 +972,78 @@ ssh -i "$env:USERPROFILE\.ssh\bifrost_root_ed25519" -p 22222 root@<SERVER_A_IP>
 
 如果还不行，去腾讯云安全组确认 `22222` 是否放行。
 
+### `--security` 中途断线，`port 22` 显示 `Connection closed`
+
+先不要重装系统。先在 Windows PowerShell 里试新端口：
+
+```powershell
+ssh -i "$env:USERPROFILE\.ssh\bifrost_root_ed25519" -p 22222 root@<SERVER_A_IP>
+```
+
+如果 root 不通，再试 `ubuntu`：
+
+```powershell
+ssh -i "$env:USERPROFILE\.ssh\bifrost_root_ed25519" -p 22222 ubuntu@<SERVER_A_IP>
+```
+
+如果你之前误按了脚本显示的随机默认端口，比如 `11964`，并且腾讯云安全组也临时放行了这个端口，可以再试一次：
+
+```powershell
+ssh -i "$env:USERPROFILE\.ssh\bifrost_root_ed25519" -p 11964 root@<SERVER_A_IP>
+```
+
+如果都不通，等 5 分钟后再试旧端口。旧版本脚本在真正改 SSH 端口后会启动 5 分钟自动回滚：
+
+```powershell
+ssh -i "$env:USERPROFILE\.ssh\bifrost_root_ed25519" ubuntu@<SERVER_A_IP>
+```
+
+如果 5 分钟后还是 `Connection closed by <SERVER_A_IP> port 22`，说明断线发生在安全回滚启动前，通常是防火墙已经关了 `22`，但 SSH 服务还没有成功切到 `22222`。这时走腾讯云控制台恢复：
+
+1. 打开腾讯云 CVM 控制台。
+2. 找到 Server A 实例。
+3. 点“登录”或“VNC 登录”。如果没有可用密码，先在控制台给 `ubuntu` 重置密码。
+4. 进入服务器后执行下面命令。
+
+```bash
+sudo -i
+
+ss -lntp | grep -E '(:22|:22222|:11964)\b' || true
+ufw status verbose || true
+grep -nE '^(Port|PasswordAuthentication|PermitRootLogin|PubkeyAuthentication|KbdInteractiveAuthentication|AuthenticationMethods)' /etc/ssh/sshd_config || true
+cat /etc/bifrost/.security-state 2>/dev/null || true
+
+ufw allow 22/tcp comment "SSH recovery"
+ufw allow 22222/tcp comment "SSH"
+
+install -d -m 700 -o root -g root /root/.ssh
+touch /root/.ssh/authorized_keys
+if [ -f /home/ubuntu/.ssh/authorized_keys ]; then cat /home/ubuntu/.ssh/authorized_keys >> /root/.ssh/authorized_keys; fi
+awk '!seen[$0]++' /root/.ssh/authorized_keys > /tmp/bifrost-root-authorized-keys
+cat /tmp/bifrost-root-authorized-keys > /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+
+cp -p /etc/ssh/sshd_config "/etc/ssh/sshd_config.bifrost-recovery.$(date +%Y%m%d-%H%M%S)"
+sed -i -E 's/^\s*#?\s*Port\s+.*/Port 22222/' /etc/ssh/sshd_config
+grep -qE '^\s*Port\s+' /etc/ssh/sshd_config || echo 'Port 22222' >> /etc/ssh/sshd_config
+
+if sshd -t; then
+  systemctl restart ssh || systemctl restart sshd
+else
+  echo "sshd config is invalid; do not close this console"
+fi
+
+touch /tmp/ssh-port-change-confirmed
+```
+
+然后回到 Windows PowerShell 测试：
+
+```powershell
+ssh -i "$env:USERPROFILE\.ssh\bifrost_root_ed25519" -p 22222 root@<SERVER_A_IP>
+```
+
+如果能登录，再继续后面的安全加固检查。
+
 ### `--cloud-review` 发现腾讯云 agent
 
 这是正常的。  

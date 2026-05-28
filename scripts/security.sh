@@ -50,6 +50,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 : "${AUTO_UPGRADES_PERIODIC_FILE:=/etc/apt/apt.conf.d/20auto-upgrades}"
 : "${DNF_AUTOMATIC_CONFIG_FILE:=/etc/dnf/automatic.conf}"
 : "${DNF_AUTOMATIC_TIMER_NAME:=dnf-automatic.timer}"
+: "${BIFROST_DEFAULT_SSH_PORT:=22222}"
 : "${RKHUNTER_CONF_FILE:=/etc/rkhunter.conf}"
 : "${RKHUNTER_CRON_FILE:=/etc/cron.weekly/rkhunter-scan}"
 : "${SYSCTL_HARDENING_CONF_FILE:=/etc/sysctl.d/99-ai-gateway-hardening.conf}"
@@ -97,15 +98,22 @@ _load_state() {
 }
 
 # ------------------------------------------------------------------------------
-# _get_ssh_port: Resolve the SSH port from state, sshd_config, or default 22
+# _get_configured_ssh_port: Read the currently configured sshd port.
+# Returns empty stdout when sshd_config does not set Port.
+# ------------------------------------------------------------------------------
+_get_configured_ssh_port() {
+    grep -E "^\s*Port\s+" "${SSHD_CONFIG_PATH}" 2>/dev/null | awk '{print $2}' | head -1
+}
+
+# ------------------------------------------------------------------------------
+# _get_ssh_port: Resolve the active SSH port from sshd_config, state, or default 22
 # Returns: port number via stdout
 # ------------------------------------------------------------------------------
 _get_ssh_port() {
     local port
-    port="$(_load_state "SSH_PORT")"
+    port="$(_get_configured_ssh_port)"
     if [[ -z "${port}" ]]; then
-        # Try to read from current sshd_config
-        port=$(grep -E "^Port\s+" "${SSHD_CONFIG_PATH}" 2>/dev/null | awk '{print $2}' | head -1)
+        port="$(_load_state "SSH_PORT")"
     fi
     echo "${port:-22}"
 }
@@ -364,10 +372,16 @@ harden_ssh() {
     log_info "Backup created: ${backup_file}"
 
     # ---- Ask for SSH port ----
-    local default_port
-    default_port="$(_generate_random_port)"
     local current_port
     current_port="$(_get_ssh_port)"
+    local default_port
+    if [[ -n "${BIFROST_SSH_PORT:-}" ]]; then
+        default_port="${BIFROST_SSH_PORT}"
+    elif [[ "${current_port}" != "22" ]]; then
+        default_port="${current_port}"
+    else
+        default_port="${BIFROST_DEFAULT_SSH_PORT}"
+    fi
 
     log_info "Current SSH port: ${current_port}"
     read -rp "$(echo -e "${COLOR_YELLOW}Enter new SSH port [default: ${default_port}]:${COLOR_RESET} ")" user_port

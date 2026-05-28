@@ -4168,6 +4168,44 @@ EOF
 
     if BIFROST_TRACE_COMMON_LOAD=0 \
         SECURITY_SH="${workdir}/security.sh" \
+        SECURITY_STATE_DIR="${temp_root}/state-default-port" \
+        SECURITY_STATE_FILE="${temp_root}/state-default-port/security.env" \
+        SSHD_CONFIG_PATH="${temp_root}/etc-default-port/ssh/sshd_config" \
+        SSHD_BACKUP_DIR="${temp_root}/etc-default-port/ssh" \
+        SSH_ADMIN_DIR="${temp_root}/etc-default-port/root/.ssh" \
+        SSH_AUTHORIZED_KEYS_FILE="${temp_root}/etc-default-port/root/.ssh/authorized_keys" \
+        bash -c '
+            set -euo pipefail
+            mkdir -p "$(dirname "${SSHD_CONFIG_PATH}")" "${SSH_ADMIN_DIR}" "${SSHD_BACKUP_DIR}" "${SECURITY_STATE_DIR}"
+            cat > "${SSHD_CONFIG_PATH}" <<EOF
+Port 22
+PasswordAuthentication yes
+PermitRootLogin yes
+PubkeyAuthentication yes
+EOF
+            printf "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey root@test\n" > "${SSH_AUTHORIZED_KEYS_FILE}"
+            source "$SECURITY_SH"
+            _generate_random_port() { echo 11964; }
+            _detect_firewall() { echo none; }
+            systemctl() { return 0; }
+            sshd() { return 0; }
+            sleep() { :; }
+            nohup() { :; }
+            if printf "\nn\n" | harden_ssh >/dev/null 2>&1; then
+                :
+            else
+                exit 1
+            fi
+            grep -q "^Port 22222$" "${SSHD_CONFIG_PATH}"
+            ! grep -q "^Port 11964$" "${SSHD_CONFIG_PATH}"
+        '; then
+        record_pass "Root harden_ssh uses 22222 as the default SSH port instead of a random port"
+    else
+        record_fail "Root harden_ssh should default to SSH port 22222 instead of a random port"
+    fi
+
+    if BIFROST_TRACE_COMMON_LOAD=0 \
+        SECURITY_SH="${workdir}/security.sh" \
         SECURITY_STATE_DIR="${temp_root}/state" \
         SECURITY_STATE_FILE="${temp_root}/state/security.env" \
         SSHD_CONFIG_PATH="${temp_root}/etc/ssh/sshd_config" \
@@ -4252,6 +4290,40 @@ EOF
         record_pass "Root setup_firewall 在 firewalld 关键步骤失败时会返回失败且不宣称已完成"
     else
         record_fail "Root setup_firewall 在 firewalld 关键步骤失败时会返回失败且不宣称已完成"
+    fi
+
+    if BIFROST_TRACE_COMMON_LOAD=0 \
+        SECURITY_SH="${workdir}/security.sh" \
+        SECURITY_STATE_DIR="${temp_root}/state-firewall-port" \
+        SECURITY_STATE_FILE="${temp_root}/state-firewall-port/security.env" \
+        SSHD_CONFIG_PATH="${temp_root}/etc-firewall-port/ssh/sshd_config" \
+        bash -c '
+            set -euo pipefail
+            mkdir -p "$(dirname "${SSHD_CONFIG_PATH}")" "${SECURITY_STATE_DIR}"
+            cat > "${SSHD_CONFIG_PATH}" <<EOF
+Port 22
+PasswordAuthentication yes
+PermitRootLogin yes
+PubkeyAuthentication yes
+EOF
+            printf "SSH_PORT=22222\n" > "${SECURITY_STATE_FILE}"
+            source "$SECURITY_SH"
+            _detect_firewall() { echo ufw; }
+            ufw() {
+                if [[ "${1:-}" == "allow" && "${2:-}" == "22222/tcp" ]]; then
+                    echo "unexpected stale state port" >&2
+                    return 1
+                fi
+                return 0
+            }
+            output="$(mktemp)"
+            trap "rm -f \"${output}\"" EXIT
+            setup_firewall >"${output}" 2>&1
+            grep -q "SSH port: 22" "${output}"
+        '; then
+        record_pass "Root setup_firewall prefers sshd_config over stale SSH_PORT state"
+    else
+        record_fail "Root setup_firewall should prefer sshd_config over stale SSH_PORT state"
     fi
 
     if BIFROST_TRACE_COMMON_LOAD=0 \
@@ -4787,6 +4859,44 @@ EOF
 
     if BIFROST_TRACE_COMMON_LOAD=0 \
         SECURITY_SH="${workdir}/security.sh" \
+        SECURITY_STATE_DIR="${temp_root}/state-default-port" \
+        SECURITY_STATE_FILE="${temp_root}/state-default-port/security.env" \
+        SSHD_CONFIG_PATH="${temp_root}/etc-default-port/ssh/sshd_config" \
+        SSHD_BACKUP_DIR="${temp_root}/etc-default-port/ssh" \
+        SSH_ADMIN_DIR="${temp_root}/etc-default-port/root/.ssh" \
+        SSH_AUTHORIZED_KEYS_FILE="${temp_root}/etc-default-port/root/.ssh/authorized_keys" \
+        bash -c '
+            set -euo pipefail
+            mkdir -p "$(dirname "${SSHD_CONFIG_PATH}")" "${SSH_ADMIN_DIR}" "${SSHD_BACKUP_DIR}" "${SECURITY_STATE_DIR}"
+            cat > "${SSHD_CONFIG_PATH}" <<EOF
+Port 22
+PasswordAuthentication yes
+PermitRootLogin yes
+PubkeyAuthentication yes
+EOF
+            printf "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey root@test\n" > "${SSH_AUTHORIZED_KEYS_FILE}"
+            source "$SECURITY_SH"
+            _generate_random_port() { echo 11964; }
+            _detect_firewall() { echo none; }
+            systemctl() { return 0; }
+            sshd() { return 0; }
+            sleep() { :; }
+            nohup() { :; }
+            if printf "\nn\n" | harden_ssh >/dev/null 2>&1; then
+                :
+            else
+                exit 1
+            fi
+            grep -q "^Port 22222$" "${SSHD_CONFIG_PATH}"
+            ! grep -q "^Port 11964$" "${SSHD_CONFIG_PATH}"
+        '; then
+        record_pass "AI Gateway Bridge harden_ssh uses 22222 as the default SSH port instead of a random port"
+    else
+        record_fail "AI Gateway Bridge harden_ssh should default to SSH port 22222 instead of a random port"
+    fi
+
+    if BIFROST_TRACE_COMMON_LOAD=0 \
+        SECURITY_SH="${workdir}/security.sh" \
         SECURITY_STATE_DIR="${temp_root}/state" \
         SECURITY_STATE_FILE="${temp_root}/state/security.env" \
         SSHD_CONFIG_PATH="${temp_root}/etc/ssh/sshd_config" \
@@ -4871,6 +4981,40 @@ EOF
         record_pass "AI Gateway Bridge setup_firewall 在 firewalld 关键步骤失败时会返回失败且不宣称已完成"
     else
         record_fail "AI Gateway Bridge setup_firewall 在 firewalld 关键步骤失败时会返回失败且不宣称已完成"
+    fi
+
+    if BIFROST_TRACE_COMMON_LOAD=0 \
+        SECURITY_SH="${workdir}/security.sh" \
+        SECURITY_STATE_DIR="${temp_root}/state-firewall-port" \
+        SECURITY_STATE_FILE="${temp_root}/state-firewall-port/security.env" \
+        SSHD_CONFIG_PATH="${temp_root}/etc-firewall-port/ssh/sshd_config" \
+        bash -c '
+            set -euo pipefail
+            mkdir -p "$(dirname "${SSHD_CONFIG_PATH}")" "${SECURITY_STATE_DIR}"
+            cat > "${SSHD_CONFIG_PATH}" <<EOF
+Port 22
+PasswordAuthentication yes
+PermitRootLogin yes
+PubkeyAuthentication yes
+EOF
+            printf "SSH_PORT=22222\n" > "${SECURITY_STATE_FILE}"
+            source "$SECURITY_SH"
+            _detect_firewall() { echo ufw; }
+            ufw() {
+                if [[ "${1:-}" == "allow" && "${2:-}" == "22222/tcp" ]]; then
+                    echo "unexpected stale state port" >&2
+                    return 1
+                fi
+                return 0
+            }
+            output="$(mktemp)"
+            trap "rm -f \"${output}\"" EXIT
+            setup_firewall >"${output}" 2>&1
+            grep -q "SSH port: 22" "${output}"
+        '; then
+        record_pass "AI Gateway Bridge setup_firewall prefers sshd_config over stale SSH_PORT state"
+    else
+        record_fail "AI Gateway Bridge setup_firewall should prefer sshd_config over stale SSH_PORT state"
     fi
 
     if BIFROST_TRACE_COMMON_LOAD=0 \
